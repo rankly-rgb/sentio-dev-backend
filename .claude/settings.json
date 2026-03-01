@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude --version:*)",
+      "Bash(claude plugin marketplace add:*)",
+      "Bash(claude plugin marketplace list)",
+      "Bash(claude plugin:*)",
+      "Bash(TMPDIR=/home/codespace/.claude/tmp claude plugin install playwright-skill@playwright-skill)"
+    ]
+  }
+}

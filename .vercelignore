@@ -1,0 +1,16 @@
+node_modules
+coverage
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+supabase/tests
+.env.local
+.env*.local
+.git
+.github
+docs
+*.md
+!README.md
+scripts
+supabase
