@@ -1,5 +1,6 @@
 import { createSupabaseServerClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
+import { RefreshDataButton } from '@/components/RefreshDataButton'
 
 interface DashboardStats {
   total_accounts: number
@@ -92,7 +93,7 @@ export default async function DashboardPage() {
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Dashboard</h2>
-          <p className="text-slate-500 mt-1">Vue d'ensemble de votre base client</p>
+          <p className="text-slate-500 mt-1">Vue d&apos;ensemble de votre base client</p>
         </div>
 
         {/* KPI Cards */}
@@ -131,7 +132,10 @@ export default async function DashboardPage() {
 
         {/* État sync */}
         <div className="bg-white rounded-xl border border-slate-200 p-6">
-          <h3 className="font-semibold text-slate-900 mb-4">Synchronisations récentes</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold text-slate-900">Synchronisations récentes</h3>
+            <RefreshDataButton />
+          </div>
           <SyncStatus organizationId={profile.organization_id} />
         </div>
       </main>
