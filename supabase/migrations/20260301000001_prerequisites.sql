@@ -21,14 +21,19 @@ $$;
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.user_organization_id()
 RETURNS UUID
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 AS $$
-  SELECT organization_id
+DECLARE
+  org_id UUID;
+BEGIN
+  SELECT organization_id INTO org_id
   FROM public.profiles_
   WHERE auth_user_id = auth.uid()
-  LIMIT 1
+  LIMIT 1;
+  RETURN org_id;
+END;
 $$;
 
 -- ------------------------------------------------------------

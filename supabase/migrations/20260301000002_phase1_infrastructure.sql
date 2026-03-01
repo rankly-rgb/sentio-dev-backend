@@ -46,7 +46,7 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.profiles_ (
   id               UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id  UUID NULL REFERENCES public.organizations(id),
+  organization_id  UUID NULL,
   auth_user_id     UUID NULL,
   email            TEXT NOT NULL,
   role             TEXT NULL DEFAULT 'member',

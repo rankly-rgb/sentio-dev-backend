@@ -8,7 +8,7 @@
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.ai_insights (
   id               UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id  UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  organization_id  UUID NOT NULL,
   account_id       UUID NULL REFERENCES public.accounts(id) ON DELETE SET NULL,
 
   insight_type     TEXT NOT NULL,
@@ -79,7 +79,7 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.playbooks (
   id                    UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id       UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  organization_id       UUID NOT NULL,
   segment_id            UUID NULL REFERENCES public.account_segments(id) ON DELETE SET NULL,
   insight_id            UUID NULL REFERENCES public.ai_insights(id) ON DELETE SET NULL,
   created_by            UUID NULL REFERENCES public.profiles_(id) ON DELETE SET NULL,
@@ -189,9 +189,9 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.playbook_executions (
   id                UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id   UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
-  playbook_id       UUID NOT NULL REFERENCES public.playbooks(id) ON DELETE CASCADE,
-  account_id        UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
+  organization_id   UUID NOT NULL,
+  playbook_id       UUID NOT NULL,
+  account_id        UUID NOT NULL,
   segment_id        UUID NULL REFERENCES public.account_segments(id) ON DELETE SET NULL,
   triggered_by      UUID NULL REFERENCES public.profiles_(id) ON DELETE SET NULL,
 

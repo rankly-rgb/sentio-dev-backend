@@ -9,7 +9,7 @@
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.accounts (
   id                    UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id       UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  organization_id       UUID NOT NULL,
 
   -- Identifiants anonymes (Zero-PII)
   stripe_customer_id    TEXT NOT NULL,
@@ -95,8 +95,8 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.subscriptions (
   id                UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id   UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
-  account_id        UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
+  organization_id   UUID NOT NULL,
+  account_id        UUID NOT NULL,
 
   stripe_sub_id     TEXT NOT NULL,
   stripe_price_id   TEXT NULL,
@@ -150,8 +150,8 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.invoices (
   id                UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id   UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
-  account_id        UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
+  organization_id   UUID NOT NULL,
+  account_id        UUID NOT NULL,
   subscription_id   UUID NULL REFERENCES public.subscriptions(id) ON DELETE SET NULL,
 
   stripe_invoice_id TEXT NOT NULL,
@@ -206,8 +206,8 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.mrr_movements (
   id               UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id  UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
-  account_id       UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
+  organization_id  UUID NOT NULL,
+  account_id       UUID NOT NULL,
   subscription_id  UUID NULL REFERENCES public.subscriptions(id) ON DELETE SET NULL,
 
   movement_type    TEXT NOT NULL,
@@ -257,8 +257,8 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.usage_events (
   id               UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id  UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
-  account_id       UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
+  organization_id  UUID NOT NULL,
+  account_id       UUID NOT NULL,
 
   event_type       TEXT NOT NULL,
   feature_name     TEXT NULL,
@@ -309,8 +309,8 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.hubspot_companies (
   id                   UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id      UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
-  account_id           UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
+  organization_id      UUID NOT NULL,
+  account_id           UUID NOT NULL,
 
   hubspot_company_id   TEXT NOT NULL,
   lifecycle_stage      TEXT NULL,

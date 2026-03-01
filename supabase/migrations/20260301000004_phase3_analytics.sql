@@ -9,8 +9,8 @@
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.score_history (
   id                  UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id     UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
-  account_id          UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
+  organization_id     UUID NOT NULL,
+  account_id          UUID NOT NULL,
 
   snapshot_date       DATE NOT NULL,
   health_score        NUMERIC(5,2) NULL,
@@ -66,7 +66,7 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.account_segments (
   id                       UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id          UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  organization_id          UUID NOT NULL,
 
   segment_name             TEXT NOT NULL,
   segment_type             TEXT NOT NULL,
@@ -142,9 +142,9 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.segment_memberships (
   id               UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id  UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
-  segment_id       UUID NOT NULL REFERENCES public.account_segments(id) ON DELETE CASCADE,
-  account_id       UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
+  organization_id  UUID NOT NULL,
+  segment_id       UUID NOT NULL,
+  account_id       UUID NOT NULL,
 
   status           VARCHAR(20) NOT NULL DEFAULT 'active',
   added_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -208,7 +208,7 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.cohorts (
   id                        UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id           UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  organization_id           UUID NOT NULL,
 
   cohort_month              DATE NOT NULL,
   cohort_name               TEXT NULL,
@@ -268,7 +268,7 @@ USING (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.retention_metrics (
   id                         UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id            UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  organization_id            UUID NOT NULL,
 
   metric_date                DATE NOT NULL,
   total_accounts_tracked     INTEGER NOT NULL DEFAULT 0,

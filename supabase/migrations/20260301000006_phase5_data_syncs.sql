@@ -8,7 +8,7 @@
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.data_syncs (
   id                   UUID NOT NULL DEFAULT gen_random_uuid(),
-  organization_id      UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  organization_id      UUID NOT NULL,
 
   sync_source          TEXT NOT NULL,
   sync_type            TEXT NOT NULL,
