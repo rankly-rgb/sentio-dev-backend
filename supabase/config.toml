@@ -1,0 +1,21 @@
+# Supabase project configuration
+# Ref : https://supabase.com/docs/guides/cli/config
+
+[project]
+id = "upqakxuatlshhqiagbqw"
+
+# stripe-webhook : pas de vérification JWT (Stripe signe ses propres requêtes via HMAC)
+[functions.stripe-webhook]
+verify_jwt = false
+
+# track-usage : pas de JWT (endpoints publics SDK clients)
+[functions.track-usage]
+verify_jwt = false
+
+# sync-stripe : déclenché par cron ou manuellement (service_role)
+[functions.sync-stripe]
+verify_jwt = true
+
+# calculate-scores : déclenché par cron (service_role)
+[functions.calculate-scores]
+verify_jwt = true
