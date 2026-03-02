@@ -142,7 +142,7 @@ async function handleSubscriptionEvent(
 
   const unitAmount = sub.plan?.amount ?? sub.items?.data?.[0]?.price?.unit_amount ?? 0
   const qty = sub.quantity ?? 1
-  const interval = sub.plan?.interval ?? (sub.items?.data?.[0]?.price as Record<string, unknown>)?.recurring?.interval ?? 'month'
+  const interval = sub.plan?.interval ?? sub.items?.data?.[0]?.price?.recurring?.interval ?? 'month'
   const mrrCents = Math.round((unitAmount * qty) / (interval === 'year' ? 12 : 1))
   const cancelAt = sub.cancel_at ? new Date(sub.cancel_at * 1000).toISOString().split('T')[0] : null
   const canceledAt = sub.canceled_at ? new Date(sub.canceled_at * 1000).toISOString() : null
@@ -219,16 +219,23 @@ async function handleSubscriptionEvent(
     }
   }
 
-  // Mettre à jour le MRR du compte
-  const newMrr = currentStatus === 'active' || currentStatus === 'trialing'
-    ? mrrCents
-    : 0
+  // Aggregate MRR from ALL active subscriptions for this account
+  // (not just the current event's subscription, to handle multi-sub accounts)
+  const { data: activeSubs } = await supabase
+    .from('subscriptions')
+    .select('mrr_cents')
+    .eq('account_id', accountRow.id)
+    .in('status', ['active', 'trialing'])
+
+  const totalMrr = (activeSubs ?? []).reduce(
+    (sum: number, s: { mrr_cents: number }) => sum + (s.mrr_cents ?? 0), 0,
+  )
 
   await supabase
     .from('accounts')
     .update({
-      mrr_cents: newMrr,
-      arr_cents: newMrr * 12,
+      mrr_cents: totalMrr,
+      arr_cents: totalMrr * 12,
       last_stripe_sync_at: new Date().toISOString(),
     })
     .eq('id', accountRow.id)
@@ -330,7 +337,7 @@ interface StripeSubscription {
   status: string
   quantity?: number
   plan?: { amount: number; interval: string }
-  items?: { data: Array<{ price: { id: string; unit_amount: number; product: string } }> }
+  items?: { data: Array<{ price: { id: string; unit_amount: number; product: string; recurring?: { interval: string } } }> }
   trial_end?: number | null
   cancel_at?: number | null
   canceled_at?: number | null

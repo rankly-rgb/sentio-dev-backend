@@ -1,7 +1,7 @@
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 
 export type SyncStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rate_limited'
-export type SyncSource = 'stripe' | 'hubspot' | 'usage' | 'manual'
+export type SyncSource = 'stripe' | 'hubspot' | 'usage' | 'manual' | 'scoring'
 export type SyncType = 'initial' | 'incremental' | 'webhook' | 'daily' | 'full_sync'
 
 interface SyncLoggerOptions {

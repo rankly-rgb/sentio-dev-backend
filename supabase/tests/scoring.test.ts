@@ -7,6 +7,7 @@ import {
   calcExpansionScore,
   calcHealthScore,
   calcChurnRiskScore,
+  determineSegmentTypes,
   type Account,
   type UsageStats,
   type HubspotData,
@@ -278,5 +279,94 @@ describe('calcChurnRiskScore', () => {
   it('is floored at 0', () => {
     const risk = calcChurnRiskScore(100, noOverdue, 30, baseAccount)
     expect(risk).toBe(0)
+  })
+})
+
+// ── Segment Assignment ────────────────────────────────────────
+
+describe('determineSegmentTypes', () => {
+  const baseScores = { health_score: 50, churn_risk_score: 50, expansion_score: 30 }
+  const oldDate = '2020-01-01T00:00:00Z'
+  const recentDate = new Date(Date.now() - 30 * 86400000).toISOString()
+
+  it('assigns "nouveaux" for accounts < 90 days old', () => {
+    const segments = determineSegmentTypes(baseScores, 5000, false, recentDate)
+    expect(segments).toContain('nouveaux')
+  })
+
+  it('does not assign "nouveaux" for old accounts', () => {
+    const segments = determineSegmentTypes(baseScores, 5000, false, oldDate)
+    expect(segments).not.toContain('nouveaux')
+  })
+
+  it('assigns "en_churn" when mrr_cents = 0', () => {
+    const segments = determineSegmentTypes(baseScores, 0, false, oldDate)
+    expect(segments).toContain('en_churn')
+    // en_churn is exclusive with other score-based segments
+    expect(segments).not.toContain('stables')
+    expect(segments).not.toContain('en_danger_critique')
+  })
+
+  it('assigns "impayes" when has overdue invoices (mrr > 0)', () => {
+    const segments = determineSegmentTypes(baseScores, 5000, true, oldDate)
+    expect(segments).toContain('impayes')
+    expect(segments).not.toContain('a_risque_leger')
+  })
+
+  it('assigns "en_danger_critique" for churn_risk >= 70', () => {
+    const scores = { health_score: 25, churn_risk_score: 75, expansion_score: 10 }
+    const segments = determineSegmentTypes(scores, 5000, false, oldDate)
+    expect(segments).toContain('en_danger_critique')
+    expect(segments).toHaveLength(1)
+  })
+
+  it('assigns "a_risque_leger" for 50 <= churn_risk < 70', () => {
+    const scores = { health_score: 45, churn_risk_score: 55, expansion_score: 20 }
+    const segments = determineSegmentTypes(scores, 5000, false, oldDate)
+    expect(segments).toContain('a_risque_leger')
+    expect(segments).toHaveLength(1)
+  })
+
+  it('assigns "champions" for health >= 80', () => {
+    const scores = { health_score: 85, churn_risk_score: 15, expansion_score: 40 }
+    const segments = determineSegmentTypes(scores, 5000, false, oldDate)
+    expect(segments).toContain('champions')
+    expect(segments).toHaveLength(1)
+  })
+
+  it('assigns "en_expansion" for expansion >= 70 and health >= 60', () => {
+    const scores = { health_score: 65, churn_risk_score: 35, expansion_score: 75 }
+    const segments = determineSegmentTypes(scores, 5000, false, oldDate)
+    expect(segments).toContain('en_expansion')
+    expect(segments).toHaveLength(1)
+  })
+
+  it('assigns "stables" as default fallback', () => {
+    const scores = { health_score: 55, churn_risk_score: 40, expansion_score: 30 }
+    const segments = determineSegmentTypes(scores, 5000, false, oldDate)
+    expect(segments).toEqual(['stables'])
+  })
+
+  it('can assign both "nouveaux" and a score-based segment', () => {
+    const scores = { health_score: 90, churn_risk_score: 10, expansion_score: 50 }
+    const segments = determineSegmentTypes(scores, 5000, false, recentDate)
+    expect(segments).toContain('nouveaux')
+    expect(segments).toContain('champions')
+    expect(segments).toHaveLength(2)
+  })
+
+  it('prioritizes "en_churn" over "en_danger_critique" when mrr = 0', () => {
+    const scores = { health_score: 10, churn_risk_score: 90, expansion_score: 5 }
+    const segments = determineSegmentTypes(scores, 0, false, oldDate)
+    expect(segments).toContain('en_churn')
+    expect(segments).not.toContain('en_danger_critique')
+  })
+
+  it('prioritizes "impayes" over score-based segments when overdue', () => {
+    const scores = { health_score: 85, churn_risk_score: 15, expansion_score: 80 }
+    const segments = determineSegmentTypes(scores, 5000, true, oldDate)
+    expect(segments).toContain('impayes')
+    expect(segments).not.toContain('champions')
+    expect(segments).not.toContain('en_expansion')
   })
 })

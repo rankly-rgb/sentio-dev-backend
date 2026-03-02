@@ -1,7 +1,8 @@
 // ============================================================
 // Edge Function : calculate-scores
 // Calcule quotidiennement les scores Health/Churn/Expansion
-// pour chaque account et persiste dans score_history.
+// pour chaque account, assigne les segments, et persiste
+// dans score_history + account_segments.
 //
 // Formules (CLAUDE.md) :
 //   Health  = (Usage×35%) + (Financial×25%) + (Engagement×20%) + (Contract×20%)
@@ -20,25 +21,101 @@ import {
   type UsageStats,
   type HubspotData,
   type InvoiceStatus,
+  type SegmentType,
+  SYSTEM_SEGMENT_TYPES,
   calcUsageScore,
   calcFinancialScore,
   calcEngagementScore,
   calcContractScore,
   calcExpansionScore,
+  calcHealthScore,
+  calcChurnRiskScore,
+  determineSegmentTypes,
 } from '../_shared/scoring.ts'
+
+// ── Types internes ──────────────────────────────────────────
+interface AccountWithCreatedAt extends Account {
+  created_at: string
+}
+
+interface ScoreResult {
+  health_score: number
+  churn_risk_score: number
+  expansion_score: number
+  product_usage_score: number
+}
+
+// ── Segment definitions (mirrored in migration) ─────────────
+const SEGMENT_DEFINITIONS: Array<{
+  segment_name: string
+  segment_type: SegmentType
+  priority: string
+  criteria: Record<string, unknown>
+  description: string
+}> = [
+  { segment_name: 'Champions', segment_type: 'champions', priority: 'high', criteria: { health_score_gte: 80 }, description: 'Comptes en excellente sante' },
+  { segment_name: 'En expansion', segment_type: 'en_expansion', priority: 'medium', criteria: { expansion_score_gte: 70, health_score_gte: 60 }, description: "Comptes avec potentiel d'expansion" },
+  { segment_name: 'Stables', segment_type: 'stables', priority: 'low', criteria: { health_score_gte: 40, churn_risk_lt: 50 }, description: 'Comptes stables sans risque' },
+  { segment_name: 'A risque leger', segment_type: 'a_risque_leger', priority: 'medium', criteria: { churn_risk_gte: 50, churn_risk_lt: 70 }, description: 'Comptes montrant des signes de risque' },
+  { segment_name: 'En danger critique', segment_type: 'en_danger_critique', priority: 'critical', criteria: { churn_risk_gte: 70 }, description: 'Comptes en danger imminent de churn' },
+  { segment_name: 'Impayes', segment_type: 'impayes', priority: 'critical', criteria: { has_overdue_invoices: true }, description: 'Comptes avec factures impayees' },
+  { segment_name: 'En churn', segment_type: 'en_churn', priority: 'critical', criteria: { mrr_cents_eq: 0 }, description: 'Comptes ayant churne' },
+  { segment_name: 'Nouveaux (< 90j)', segment_type: 'nouveaux', priority: 'low', criteria: { days_since_creation_lt: 90 }, description: 'Comptes crees il y a moins de 90 jours' },
+]
+
+// ── Ensure system segments exist for an org ──────────────────
+async function ensureSystemSegments(
+  supabase: SupabaseClient,
+  organizationId: string,
+): Promise<Map<SegmentType, string>> {
+  const { data: existing } = await supabase
+    .from('account_segments')
+    .select('id, segment_type')
+    .eq('organization_id', organizationId)
+    .eq('is_system_generated', true)
+
+  const segmentMap = new Map<SegmentType, string>()
+  const existingTypes = new Set<string>()
+
+  for (const seg of existing ?? []) {
+    segmentMap.set(seg.segment_type as SegmentType, seg.id)
+    existingTypes.add(seg.segment_type)
+  }
+
+  const missing = SEGMENT_DEFINITIONS.filter((d) => !existingTypes.has(d.segment_type))
+
+  if (missing.length > 0) {
+    const { data: created } = await supabase
+      .from('account_segments')
+      .insert(
+        missing.map((d) => ({
+          organization_id: organizationId,
+          segment_name: d.segment_name,
+          segment_type: d.segment_type,
+          priority: d.priority,
+          criteria: d.criteria,
+          description: d.description,
+          is_system_generated: true,
+          is_active: true,
+        })),
+      )
+      .select('id, segment_type')
+
+    for (const seg of created ?? []) {
+      segmentMap.set(seg.segment_type as SegmentType, seg.id)
+    }
+  }
+
+  return segmentMap
+}
 
 // ── Scoring d'un compte ───────────────────────────────────────
 async function scoreAccount(
   supabase: SupabaseClient,
   account: Account,
   maxMrrCents: number,
-  snapshotDate: string,
-): Promise<{
-  health_score: number
-  churn_risk_score: number
-  expansion_score: number
-  product_usage_score: number
-}> {
+  _snapshotDate: string,
+): Promise<ScoreResult & { invoiceStatus: InvoiceStatus; daysActive: number }> {
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]
 
   // Usage stats (30 derniers jours)
@@ -99,23 +176,8 @@ async function scoreAccount(
   const engagementScore = calcEngagementScore(hubspot)
   const contractScore = calcContractScore(account)
 
-  const healthScore = Math.round(
-    (usageScore * 0.35 + financialScore * 0.25 + engagementScore * 0.20 + contractScore * 0.20) * 100,
-  ) / 100
-
-  // Facteurs additifs de churn risk
-  let churnAdditif = 0
-  if (invoiceStatus.has_overdue) churnAdditif += 15
-  if (stats.days_active === 0) churnAdditif += 20 // aucune activité depuis 30j
-  if (account.contract_end_date) {
-    const daysUntilRenewal = Math.floor(
-      (new Date(account.contract_end_date).getTime() - Date.now()) / 86400000,
-    )
-    if (daysUntilRenewal <= 30 && daysUntilRenewal >= 0) churnAdditif += 10
-    if (daysUntilRenewal < 0) churnAdditif += 25 // contrat expiré
-  }
-
-  const churnRiskScore = Math.min(100, Math.round((100 - healthScore + churnAdditif) * 100) / 100)
+  const healthScore = calcHealthScore(usageScore, financialScore, engagementScore, contractScore)
+  const churnRiskScore = calcChurnRiskScore(healthScore, invoiceStatus, stats.days_active, account)
   const expansionScore = calcExpansionScore(account, stats)
 
   return {
@@ -123,7 +185,109 @@ async function scoreAccount(
     churn_risk_score: Math.max(0, Math.min(100, churnRiskScore)),
     expansion_score: Math.max(0, Math.min(100, expansionScore)),
     product_usage_score: Math.max(0, Math.min(100, usageScore)),
+    invoiceStatus,
+    daysActive: stats.days_active,
   }
+}
+
+// ── Assign segments after scoring ────────────────────────────
+async function assignSegments(
+  supabase: SupabaseClient,
+  organizationId: string,
+  accounts: AccountWithCreatedAt[],
+  accountScores: Map<string, ScoreResult>,
+  accountInvoiceStatus: Map<string, InvoiceStatus>,
+): Promise<{ segmentsAssigned: number }> {
+  const segmentMap = await ensureSystemSegments(supabase, organizationId)
+  const systemSegmentIds = Array.from(segmentMap.values())
+
+  if (systemSegmentIds.length === 0) return { segmentsAssigned: 0 }
+
+  // Delete old ai_generated memberships for system segments
+  await supabase
+    .from('segment_memberships')
+    .delete()
+    .eq('organization_id', organizationId)
+    .eq('source_type', 'ai_generated')
+    .in('segment_id', systemSegmentIds)
+
+  // Build new memberships
+  const memberships: Array<Record<string, unknown>> = []
+  const segmentAggs: Record<string, { count: number; mrrTotal: number; healthSum: number; churnSum: number }> = {}
+
+  for (const segType of SYSTEM_SEGMENT_TYPES) {
+    segmentAggs[segType] = { count: 0, mrrTotal: 0, healthSum: 0, churnSum: 0 }
+  }
+
+  const now = new Date().toISOString()
+
+  for (const account of accounts) {
+    const scores = accountScores.get(account.id)
+    if (!scores) continue
+
+    const invoiceStatus = accountInvoiceStatus.get(account.id)
+    const hasOverdue = invoiceStatus?.has_overdue ?? false
+
+    const segTypes = determineSegmentTypes(
+      scores,
+      account.mrr_cents ?? 0,
+      hasOverdue,
+      account.created_at,
+    )
+
+    for (const segType of segTypes) {
+      const segId = segmentMap.get(segType)
+      if (!segId) continue
+
+      memberships.push({
+        organization_id: organizationId,
+        segment_id: segId,
+        account_id: account.id,
+        status: 'active',
+        source_type: 'ai_generated',
+        risk_score: scores.churn_risk_score,
+        last_evaluated_at: now,
+      })
+
+      segmentAggs[segType].count++
+      segmentAggs[segType].mrrTotal += account.mrr_cents ?? 0
+      segmentAggs[segType].healthSum += scores.health_score
+      segmentAggs[segType].churnSum += scores.churn_risk_score
+    }
+  }
+
+  // Batch insert memberships
+  if (memberships.length > 0) {
+    const CHUNK_SIZE = 100
+    for (let i = 0; i < memberships.length; i += CHUNK_SIZE) {
+      const { error } = await supabase
+        .from('segment_memberships')
+        .insert(memberships.slice(i, i + CHUNK_SIZE))
+
+      if (error) {
+        console.error('[calculate-scores] segment_memberships insert error:', error.message)
+      }
+    }
+  }
+
+  // Update segment aggregate metrics
+  for (const [segType, agg] of Object.entries(segmentAggs)) {
+    const segId = segmentMap.get(segType as SegmentType)
+    if (!segId) continue
+
+    await supabase
+      .from('account_segments')
+      .update({
+        account_count: agg.count,
+        mrr_total_cents: agg.mrrTotal,
+        avg_health_score: agg.count > 0 ? Math.round((agg.healthSum / agg.count) * 100) / 100 : null,
+        avg_churn_risk: agg.count > 0 ? Math.round((agg.churnSum / agg.count) * 100) / 100 : null,
+        last_calculated_at: now,
+      })
+      .eq('id', segId)
+  }
+
+  return { segmentsAssigned: memberships.length }
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
@@ -174,18 +338,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Scoring already in progress', 409)
   }
 
-  const results: Array<{ organization_id: string; accounts_scored: number; errors: number }> = []
+  const results: Array<{ organization_id: string; accounts_scored: number; segments_assigned: number; errors: number }> = []
 
   try {
     for (const org of orgs) {
       const organizationId = org.id
       let accountsScored = 0
+      let segmentsAssigned = 0
       let errors = 0
 
       const logger = new DataSyncLogger({
         supabase,
         organizationId,
-        syncSource: 'manual',
+        syncSource: 'scoring',
         syncType: 'daily',
         triggeredBy: 'cron',
       })
@@ -203,23 +368,47 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         const maxMrrCents = maxMrrRow?.mrr_cents ?? 1
 
-        // Récupérer tous les accounts actifs de l'org
-        const { data: accounts } = await supabase
+        // Récupérer tous les accounts de l'org (avec created_at pour segmentation)
+        const { data: accounts, error: accountsError } = await supabase
           .from('accounts')
-          .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, health_score, churn_risk_score')
+          .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, health_score, churn_risk_score, created_at')
           .eq('organization_id', organizationId)
 
-        if (!accounts?.length) {
-          await logger.complete({ accounts_scored: 0 })
+        if (accountsError) {
+          console.error(JSON.stringify({
+            level: 'error',
+            function_name: 'calculate-scores',
+            organization_id: organizationId,
+            message: `accounts query failed: ${accountsError.message}`,
+          }))
+          await logger.fail(accountsError.message)
           continue
         }
 
-        for (const account of accounts as Account[]) {
+        if (!accounts?.length) {
+          await logger.complete({ accounts_scored: 0, segments_assigned: 0 })
+          continue
+        }
+
+        // Score each account and collect results
+        const accountScores = new Map<string, ScoreResult>()
+        const accountInvoiceStatus = new Map<string, InvoiceStatus>()
+
+        for (const account of accounts as AccountWithCreatedAt[]) {
           try {
-            const scores = await scoreAccount(supabase, account, maxMrrCents, snapshotDate)
+            const result = await scoreAccount(supabase, account, maxMrrCents, snapshotDate)
+            const scores: ScoreResult = {
+              health_score: result.health_score,
+              churn_risk_score: result.churn_risk_score,
+              expansion_score: result.expansion_score,
+              product_usage_score: result.product_usage_score,
+            }
+
+            accountScores.set(account.id, scores)
+            accountInvoiceStatus.set(account.id, result.invoiceStatus)
 
             // Upsert dans score_history
-            await supabase
+            const { error: historyError } = await supabase
               .from('score_history')
               .upsert(
                 {
@@ -235,8 +424,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 { onConflict: 'organization_id,account_id,snapshot_date', ignoreDuplicates: false },
               )
 
+            if (historyError) {
+              console.error(JSON.stringify({
+                level: 'error',
+                function_name: 'calculate-scores',
+                organization_id: organizationId,
+                account_id: account.id,
+                message: `score_history upsert failed: ${historyError.message}`,
+              }))
+              errors++
+              logger.increment('records_failed')
+              continue
+            }
+
             // Mettre à jour les scores courants sur l'account
-            await supabase
+            const { error: updateError } = await supabase
               .from('accounts')
               .update({
                 health_score: scores.health_score,
@@ -246,6 +448,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 scores_calculated_at: new Date().toISOString(),
               })
               .eq('id', account.id)
+
+            if (updateError) {
+              console.error(JSON.stringify({
+                level: 'error',
+                function_name: 'calculate-scores',
+                organization_id: organizationId,
+                account_id: account.id,
+                message: `accounts update failed: ${updateError.message}`,
+              }))
+              errors++
+              logger.increment('records_failed')
+              continue
+            }
 
             accountsScored++
             logger.increment('records_processed')
@@ -262,14 +477,33 @@ Deno.serve(async (req: Request): Promise<Response> => {
           }
         }
 
-        await logger.complete({ accounts_scored: accountsScored, errors })
+        // ── Segment Assignment ──────────────────────────────
+        try {
+          const segResult = await assignSegments(
+            supabase,
+            organizationId,
+            accounts as AccountWithCreatedAt[],
+            accountScores,
+            accountInvoiceStatus,
+          )
+          segmentsAssigned = segResult.segmentsAssigned
+        } catch (err) {
+          console.error(JSON.stringify({
+            level: 'error',
+            function_name: 'calculate-scores',
+            organization_id: organizationId,
+            message: `segment assignment failed: ${err instanceof Error ? err.message : String(err)}`,
+          }))
+        }
+
+        await logger.complete({ accounts_scored: accountsScored, segments_assigned: segmentsAssigned, errors })
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         await logger.fail(msg)
         errors = -1
       }
 
-      results.push({ organization_id: organizationId, accounts_scored: accountsScored, errors })
+      results.push({ organization_id: organizationId, accounts_scored: accountsScored, segments_assigned: segmentsAssigned, errors })
     }
 
     return jsonResponse({

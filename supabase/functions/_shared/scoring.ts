@@ -149,3 +149,52 @@ export function calcChurnRiskScore(
 
   return Math.max(0, Math.min(100, Math.round((100 - healthScore + churnAdditif) * 100) / 100))
 }
+
+// ── Segmentation ─────────────────────────────────────────────
+export type SegmentType =
+  | 'champions' | 'en_expansion' | 'stables' | 'a_risque_leger'
+  | 'en_danger_critique' | 'impayes' | 'en_churn' | 'nouveaux'
+
+export const SYSTEM_SEGMENT_TYPES: SegmentType[] = [
+  'champions', 'en_expansion', 'stables', 'a_risque_leger',
+  'en_danger_critique', 'impayes', 'en_churn', 'nouveaux',
+]
+
+/**
+ * Determine which segment(s) an account belongs to.
+ * Returns an array: score-based segment (mutually exclusive, first match)
+ * + lifecycle segment ('nouveaux') which can overlap.
+ */
+export function determineSegmentTypes(
+  scores: { health_score: number; churn_risk_score: number; expansion_score: number },
+  mrrCents: number,
+  hasOverdueInvoices: boolean,
+  accountCreatedAt: string,
+): SegmentType[] {
+  const segments: SegmentType[] = []
+
+  // Lifecycle: nouveaux if < 90 days old
+  const daysSinceCreation = Math.floor(
+    (Date.now() - new Date(accountCreatedAt).getTime()) / 86400000,
+  )
+  if (daysSinceCreation < 90) segments.push('nouveaux')
+
+  // Score-based primary segment (mutually exclusive, priority order)
+  if (mrrCents === 0) {
+    segments.push('en_churn')
+  } else if (hasOverdueInvoices) {
+    segments.push('impayes')
+  } else if (scores.churn_risk_score >= 70) {
+    segments.push('en_danger_critique')
+  } else if (scores.churn_risk_score >= 50) {
+    segments.push('a_risque_leger')
+  } else if (scores.health_score >= 80) {
+    segments.push('champions')
+  } else if (scores.expansion_score >= 70 && scores.health_score >= 60) {
+    segments.push('en_expansion')
+  } else {
+    segments.push('stables')
+  }
+
+  return segments
+}

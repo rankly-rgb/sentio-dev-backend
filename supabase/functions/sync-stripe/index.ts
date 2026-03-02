@@ -49,7 +49,7 @@ interface StripeSubscription {
   plan?: { amount: number; interval: string; id: string; product: string }
   items?: {
     data: Array<{
-      price: { id: string; unit_amount: number; product: string }
+      price: { id: string; unit_amount: number; product: string; recurring?: { interval: string; interval_count?: number } }
       quantity?: number
     }>
   }
@@ -152,12 +152,16 @@ async function* paginateStripe<T>(
   }
 }
 
-// ── Calcul MRR depuis subscription ───────────────────────────
+// ── Helpers subscription ─────────────────────────────────────
+function getSubscriptionInterval(sub: StripeSubscription): string {
+  return sub.plan?.interval ?? sub.items?.data?.[0]?.price?.recurring?.interval ?? 'month'
+}
+
 function calcMrrCents(sub: StripeSubscription): number {
   const item = sub.items?.data?.[0]
   const amount = item?.price?.unit_amount ?? sub.plan?.amount ?? 0
   const qty = item?.quantity ?? sub.quantity ?? 1
-  const interval = sub.plan?.interval ?? (item?.price as Record<string, unknown> & { recurring?: { interval?: string } })?.recurring?.interval ?? 'month'
+  const interval = getSubscriptionInterval(sub)
   return Math.round((amount * qty) / (interval === 'year' ? 12 : 1))
 }
 
@@ -195,15 +199,24 @@ async function syncCustomers(
 }
 
 // ── Sync subscriptions ────────────────────────────────────────
+// Always full-syncs (no createdAfter filter) because Stripe's
+// created[gt] filter misses subscription updates/cancellations.
 async function syncSubscriptions(
   supabase: SupabaseClient,
   organizationId: string,
   apiKey: string,
   logger: DataSyncLogger,
-  createdAfter?: number,
 ): Promise<void> {
   const extraParams: Record<string, string> = { status: 'all' }
-  if (createdAfter) extraParams['created[gt]'] = String(createdAfter)
+
+  // Track per-account metadata from active subs for propagation
+  const accountSubMeta = new Map<string, Array<{
+    mrrCents: number
+    billingInterval: string
+    quantity: number
+    contractStart: string | null
+    contractEnd: string | null
+  }>>()
 
   for await (const sub of paginateStripe<StripeSubscription>('/subscriptions', apiKey, extraParams, logger)) {
     // Résoudre l'account
@@ -221,6 +234,8 @@ async function syncSubscriptions(
     }
 
     const mrrCents = calcMrrCents(sub)
+    const interval = getSubscriptionInterval(sub)
+    const qty = sub.items?.data?.[0]?.quantity ?? sub.quantity ?? 1
     const cancelAt = sub.cancel_at
       ? new Date(sub.cancel_at * 1000).toISOString().split('T')[0]
       : null
@@ -229,6 +244,12 @@ async function syncSubscriptions(
       : null
     const trialEnd = sub.trial_end
       ? new Date(sub.trial_end * 1000).toISOString().split('T')[0]
+      : null
+    const periodStart = sub.current_period_start
+      ? new Date(sub.current_period_start * 1000).toISOString().split('T')[0]
+      : null
+    const periodEnd = sub.current_period_end
+      ? new Date(sub.current_period_end * 1000).toISOString().split('T')[0]
       : null
 
     const { error } = await supabase
@@ -242,7 +263,7 @@ async function syncSubscriptions(
           stripe_product_id: sub.items?.data?.[0]?.price?.product ?? null,
           status: sub.status,
           mrr_cents: mrrCents,
-          quantity: sub.quantity ?? 1,
+          quantity: qty,
           trial_end_date: trialEnd,
           cancel_at: cancelAt,
           canceled_at: canceledAt,
@@ -258,25 +279,52 @@ async function syncSubscriptions(
 
     logger.increment('records_processed')
     logger.increment('subscriptions_processed')
+
+    // Collect metadata from active subs for account propagation
+    if (sub.status === 'active' || sub.status === 'trialing') {
+      const subs = accountSubMeta.get(accountRow.id) ?? []
+      subs.push({
+        mrrCents,
+        billingInterval: interval === 'year' ? 'annual' : 'monthly',
+        quantity: qty,
+        contractStart: periodStart,
+        contractEnd: periodEnd,
+      })
+      accountSubMeta.set(accountRow.id, subs)
+    }
   }
 
-  // Aggregate MRR across all active subscriptions per account
+  // Aggregate MRR + propagate metadata per account
   const { data: orgAccounts } = await supabase
     .from('accounts')
     .select('id')
     .eq('organization_id', organizationId)
 
   for (const acct of orgAccounts ?? []) {
-    const { data: activeSubs } = await supabase
-      .from('subscriptions')
-      .select('mrr_cents')
-      .eq('account_id', acct.id)
-      .in('status', ['active', 'trialing'])
+    const subs = accountSubMeta.get(acct.id) ?? []
+    const totalMrr = subs.reduce((sum: number, s) => sum + s.mrrCents, 0)
+    const totalSeats = subs.reduce((sum: number, s) => sum + s.quantity, 0)
 
-    const totalMrr = (activeSubs ?? []).reduce((sum, s) => sum + (s.mrr_cents ?? 0), 0)
+    // Use highest-MRR subscription for interval and contract dates
+    const primary = subs.length > 0
+      ? subs.sort((a, b) => b.mrrCents - a.mrrCents)[0]
+      : null
+
+    const updateData: Record<string, unknown> = {
+      mrr_cents: totalMrr,
+      arr_cents: totalMrr * 12,
+      seat_count: totalSeats > 0 ? totalSeats : null,
+    }
+
+    if (primary) {
+      updateData.billing_interval = primary.billingInterval
+      updateData.contract_start_date = primary.contractStart
+      updateData.contract_end_date = primary.contractEnd
+    }
+
     await supabase
       .from('accounts')
-      .update({ mrr_cents: totalMrr, arr_cents: totalMrr * 12 })
+      .update(updateData)
       .eq('id', acct.id)
   }
 }
@@ -443,9 +491,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   await logger.start()
 
   try {
-    // Sync dans l'ordre : customers → subscriptions → invoices
+    // Sync dans l'ordre : customers → subscriptions (always full) → invoices
     await syncCustomers(supabase, organizationId, apiKey, logger, createdAfter)
-    await syncSubscriptions(supabase, organizationId, apiKey, logger, createdAfter)
+    await syncSubscriptions(supabase, organizationId, apiKey, logger)
     await syncInvoices(supabase, organizationId, apiKey, logger, createdAfter)
 
     // Mettre à jour le timestamp de sync sur l'organisation
