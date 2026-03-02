@@ -1,11 +1,8 @@
 name: Deploy to Vercel
 
 on:
-  # Deploy only after CI succeeds on main
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main]
+  # Auto-deploy disabled — backend-only repo, frontend deployed separately
+  # Use workflow_dispatch to trigger a manual deploy if needed
   workflow_dispatch:
 
 env:
