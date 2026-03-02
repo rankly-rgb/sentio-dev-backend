@@ -185,12 +185,12 @@ Infrastructure de résilience et observabilité ajoutée aux Edge Functions.
 | `slack-alert.ts` | Alertes Slack fire-and-forget (5s timeout) |
 | `structured-logger.ts` | Logs JSON avec `correlation_id`, `function_name`, `provider` |
 | `metrics.ts` | Écriture dans `sync_metrics` |
-| `scoring.ts` | Fonctions de scoring pures extraites pour testabilité |
+| `scoring.ts` | Fonctions de scoring pures + segmentation (`determineSegmentTypes`) |
 
 ### Patterns de résilience appliqués
 
 - **sync-stripe** : `stripeGet()` → retry + circuit breaker + fetchWithTimeout + pagination max 50 pages + cron lock
-- **calculate-scores** : cron lock + DataSyncLogger par org + Slack alerting
+- **calculate-scores** : cron lock + DataSyncLogger par org + Slack alerting + segment assignment post-scoring
 - **stripe-webhook** : DLQ write + Slack alert sur échec handler
 - **Tous** : try/catch sur `createServiceClient()`, CORS headers sur réponses
 
@@ -209,13 +209,43 @@ Infrastructure de résilience et observabilité ajoutée aux Edge Functions.
 - `supabase-client.ts` : headers CORS sur `jsonResponse`/`errorResponse`
 - `track-usage` : suppression overhead DataSyncLogger par événement
 
-### Migration
+### Scoring & Segmentation v1 (2026-03-03)
+
+Bug fixes critiques sur le pipeline de données + ajout de la segmentation automatique.
+
+**Causes racines corrigées :**
+- `sync-stripe` : full-sync systématique des subscriptions (le filtre `created[gt]` ratait les mises à jour/annulations)
+- `sync-stripe` : propagation `billing_interval`, `seat_count`, `contract_start_date`, `contract_end_date` vers `accounts`
+- `stripe-webhook` : agrégation MRR depuis TOUTES les subscriptions actives (au lieu d'écraser avec une seule)
+- `calculate-scores` : error checking sur les upserts `score_history` et `accounts.update`
+- `calculate-scores` : utilisation des fonctions exportées `calcHealthScore`/`calcChurnRiskScore` (plus de duplication inline)
+- Fix type `StripeSubscription` : ajout `price.recurring.interval` (suppression des casts unsafe)
+- Contrainte CHECK `subscriptions.status` élargie : `incomplete_expired`, `unpaid`
+
+**Segmentation automatique :**
+- 8 segments SaaS B2B : Champions, En expansion, Stables, À risque léger, En danger critique, Impayés, En churn, Nouveaux (< 90j)
+- `scoring.ts` : `determineSegmentTypes()` — score-based exclusif + `nouveaux` non-exclusif
+- `calculate-scores` : `ensureSystemSegments()` + `assignSegments()` après chaque run de scoring
+- Met à jour `account_segments` (count, MRR, avg scores) et `segment_memberships`
+
+**Règles de segmentation (priorité décroissante, mutuellement exclusif sauf `nouveaux`) :**
+1. `nouveaux` — créé < 90 jours (non-exclusif, se cumule avec un segment score-based)
+2. `en_churn` — MRR = 0
+3. `impayes` — factures impayées
+4. `en_danger_critique` — churn_risk >= 70
+5. `a_risque_leger` — churn_risk >= 50
+6. `champions` — health >= 80
+7. `en_expansion` — expansion >= 70 ET health >= 60
+8. `stables` — défaut
+
+### Migrations
 
 - `20260302000001_stability_indexes.sql` : 10 index de performance (DLQ, cron_locks, data_syncs, usage_events, invoices, hubspot_companies, score_history)
+- `20260303000001_scoring_segmentation_fixes.sql` : contrainte CHECK élargie, source `scoring` dans data_syncs, seed des 8 segments système, index unique partiel `(org_id, segment_type) WHERE is_system_generated`
 
-### Tests (51 passing)
+### Tests (63 passing)
 
-- `supabase/tests/scoring.test.ts` : 36 tests (7 fonctions de scoring)
+- `supabase/tests/scoring.test.ts` : 48 tests (7 fonctions de scoring + 12 tests segmentation)
 - `supabase/tests/utilities.test.ts` : 15 tests (circuit breaker, retry, logger)
 
 ### Ops
