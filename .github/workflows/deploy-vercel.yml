@@ -1,7 +1,10 @@
 name: Deploy to Vercel
 
 on:
-  push:
+  # Deploy only after CI succeeds on main
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -12,6 +15,8 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Only deploy if CI passed (or manual trigger)
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v4
       - name: Setup Node.js

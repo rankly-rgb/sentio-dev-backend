@@ -9,9 +9,22 @@ import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
+import { acquireCronLock, releaseCronLock } from '../_shared/cron-lock.ts'
+import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
+import { CircuitBreaker } from '../_shared/circuit-breaker.ts'
+import { alertSlack } from '../_shared/slack-alert.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
+const MAX_PAGES = 50
+const STRIPE_TIMEOUT_MS = 8000
+
+const stripeCircuitBreaker = new CircuitBreaker({
+  name: 'stripe-api',
+  failureThreshold: 5,
+  resetTimeoutMs: 60000,
+})
 
 // ── Types Stripe ─────────────────────────────────────────────
 interface StripeListResponse<T> {
@@ -69,14 +82,33 @@ async function stripeGet<T>(
   if (params) {
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v)
   }
-  const resp = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  })
-  if (!resp.ok) {
-    const err = await resp.text()
-    throw new Error(`Stripe API ${path} → ${resp.status}: ${err}`)
-  }
-  return resp.json() as Promise<T>
+
+  return retryWithBackoff(
+    () =>
+      stripeCircuitBreaker.execute(async () => {
+        const resp = await fetchWithTimeout(
+          url.toString(),
+          { headers: { Authorization: `Bearer ${apiKey}` } },
+          STRIPE_TIMEOUT_MS,
+        )
+        if (!resp.ok) {
+          const err = await resp.text()
+          throw new Error(`Stripe API ${path} → ${resp.status}: ${err}`)
+        }
+        return resp.json() as Promise<T>
+      }),
+    {
+      maxRetries: 3,
+      baseDelayMs: 1000,
+      maxDelayMs: 15000,
+      jitter: true,
+      retryOn: (err) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        // Retry on timeout, 5xx, rate limits — not on 4xx client errors
+        return msg.includes('timed out') || msg.includes('→ 5') || msg.includes('→ 429')
+      },
+    },
+  )
 }
 
 async function* paginateStripe<T>(
@@ -87,8 +119,18 @@ async function* paginateStripe<T>(
 ): AsyncGenerator<T> {
   let startingAfter: string | undefined
   let hasMore = true
+  let pageCount = 0
 
   while (hasMore) {
+    if (pageCount >= MAX_PAGES) {
+      console.warn(JSON.stringify({
+        level: 'warn',
+        function_name: 'sync-stripe',
+        message: `Pagination limit reached (${MAX_PAGES} pages) for ${path}`,
+      }))
+      break
+    }
+
     const params: Record<string, string> = {
       limit: String(PAGE_SIZE),
       ...extraParams,
@@ -97,6 +139,7 @@ async function* paginateStripe<T>(
 
     const page = await stripeGet<StripeListResponse<T & { id: string }>>(path, apiKey, params)
     logger?.increment('api_calls_made')
+    pageCount++
 
     for (const item of page.data) {
       yield item as unknown as T
@@ -114,8 +157,8 @@ function calcMrrCents(sub: StripeSubscription): number {
   const item = sub.items?.data?.[0]
   const amount = item?.price?.unit_amount ?? sub.plan?.amount ?? 0
   const qty = item?.quantity ?? sub.quantity ?? 1
-  const isAnnual = sub.plan?.interval === 'year'
-  return Math.round((amount * qty) / (isAnnual ? 12 : 1))
+  const interval = sub.plan?.interval ?? (item?.price as Record<string, unknown> & { recurring?: { interval?: string } })?.recurring?.interval ?? 'month'
+  return Math.round((amount * qty) / (interval === 'year' ? 12 : 1))
 }
 
 // ── Sync customers → accounts ─────────────────────────────────
@@ -215,15 +258,26 @@ async function syncSubscriptions(
 
     logger.increment('records_processed')
     logger.increment('subscriptions_processed')
+  }
 
-    // Mettre à jour le MRR sur le compte
-    const isActive = sub.status === 'active' || sub.status === 'trialing'
-    if (isActive) {
-      await supabase
-        .from('accounts')
-        .update({ mrr_cents: mrrCents, arr_cents: mrrCents * 12 })
-        .eq('id', accountRow.id)
-    }
+  // Aggregate MRR across all active subscriptions per account
+  const { data: orgAccounts } = await supabase
+    .from('accounts')
+    .select('id')
+    .eq('organization_id', organizationId)
+
+  for (const acct of orgAccounts ?? []) {
+    const { data: activeSubs } = await supabase
+      .from('subscriptions')
+      .select('mrr_cents')
+      .eq('account_id', acct.id)
+      .in('status', ['active', 'trialing'])
+
+    const totalMrr = (activeSubs ?? []).reduce((sum, s) => sum + (s.mrr_cents ?? 0), 0)
+    await supabase
+      .from('accounts')
+      .update({ mrr_cents: totalMrr, arr_cents: totalMrr * 12 })
+      .eq('id', acct.id)
   }
 }
 
@@ -324,7 +378,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Body optionnel
   }
 
-  const supabase = createServiceClient()
+  let supabase
+  try {
+    supabase = createServiceClient()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', message: msg }))
+    return errorResponse('Server configuration error', 500)
+  }
 
   // Résoudre l'organisation
   let organizationId = body.organization_id
@@ -373,6 +434,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
     isManual,
   })
 
+  // Acquire cron lock to prevent concurrent sync runs
+  const lockAcquired = await acquireCronLock(supabase, 'sync-stripe', 300)
+  if (!lockAcquired) {
+    return errorResponse('Sync already in progress', 409)
+  }
+
   await logger.start()
 
   try {
@@ -396,11 +463,23 @@ Deno.serve(async (req: Request): Promise<Response> => {
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    console.error('[sync-stripe] error:', msg)
+    console.error(JSON.stringify({
+      level: 'error',
+      function_name: 'sync-stripe',
+      organization_id: organizationId,
+      message: msg,
+    }))
 
-    const errorType = msg.includes('rate') ? 'rate_limit' : 'api_error'
+    const errorType = msg.includes('rate') || msg.includes('429') ? 'rate_limit' : 'api_error'
     await logger.fail(msg, errorType)
 
+    await alertSlack(
+      `sync-stripe failed (${syncType}) for org ${organizationId}: ${msg}`,
+      { level: 'critical' },
+    )
+
     return errorResponse(`Sync failed: ${msg}`, 500)
+  } finally {
+    await releaseCronLock(supabase, 'sync-stripe')
   }
 })

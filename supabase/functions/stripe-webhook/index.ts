@@ -8,8 +8,8 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
-
-const STRIPE_API = 'https://api.stripe.com/v1'
+import { writeToDLQ } from '../_shared/dlq.ts'
+import { alertSlack } from '../_shared/slack-alert.ts'
 
 // ── HMAC Stripe signature verification ──────────────────────
 async function verifyStripeSignature(
@@ -140,7 +140,10 @@ async function handleSubscriptionEvent(
     return
   }
 
-  const mrrCents = Math.round((sub.plan?.amount ?? sub.items?.data?.[0]?.price?.unit_amount ?? 0) * (sub.quantity ?? 1) / (sub.plan?.interval === 'year' ? 12 : 1))
+  const unitAmount = sub.plan?.amount ?? sub.items?.data?.[0]?.price?.unit_amount ?? 0
+  const qty = sub.quantity ?? 1
+  const interval = sub.plan?.interval ?? (sub.items?.data?.[0]?.price as Record<string, unknown>)?.recurring?.interval ?? 'month'
+  const mrrCents = Math.round((unitAmount * qty) / (interval === 'year' ? 12 : 1))
   const cancelAt = sub.cancel_at ? new Date(sub.cancel_at * 1000).toISOString().split('T')[0] : null
   const canceledAt = sub.canceled_at ? new Date(sub.canceled_at * 1000).toISOString() : null
   const trialEnd = sub.trial_end ? new Date(sub.trial_end * 1000).toISOString().split('T')[0] : null
@@ -391,7 +394,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return jsonResponse({ received: true, handled: false, type: event.type })
   }
 
-  const supabase = createServiceClient()
+  let supabase
+  try {
+    supabase = createServiceClient()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(JSON.stringify({ level: 'error', function_name: 'stripe-webhook', message: msg }))
+    return jsonResponse({ received: true, error: 'server_configuration_error' })
+  }
 
   // Résoudre l'organisation via le compte Stripe connecté
   const stripeAccountId = event.account
@@ -472,8 +482,30 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return jsonResponse({ received: true, handled: true, type: event.type })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    console.error('[stripe-webhook] Unhandled error:', msg)
+    console.error(JSON.stringify({
+      level: 'error',
+      function_name: 'stripe-webhook',
+      event_id: event.id,
+      event_type: event.type,
+      organization_id: organizationId,
+      message: msg,
+    }))
     await logger.fail(msg)
+
+    // Write to dead letter queue for later retry/investigation
+    await writeToDLQ(supabase, {
+      organization_id: organizationId,
+      provider: 'stripe',
+      event_type: event.type,
+      payload: event,
+      error_message: msg,
+    })
+
+    await alertSlack(
+      `stripe-webhook handler failed for ${event.type} (event ${event.id}): ${msg}`,
+      { level: 'warning' },
+    )
+
     // Toujours 200 pour éviter les retries Stripe sur des erreurs internes
     return jsonResponse({ received: true, error: 'internal_error' })
   }

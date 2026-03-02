@@ -7,7 +7,6 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
-import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
 
 const VALID_EVENT_TYPES = ['login', 'feature_used', 'api_call', 'export', 'report_viewed'] as const
 const VALID_SOURCES = ['api', 'webhook', 'manual'] as const
@@ -84,7 +83,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const source: SourceType = isValidSource(payload.source) ? payload.source : 'api'
 
-  const supabase = createServiceClient()
+  let supabase
+  try {
+    supabase = createServiceClient()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(JSON.stringify({ level: 'error', function_name: 'track-usage', message: msg }))
+    return errorResponse('Server configuration error', 500)
+  }
 
   // ── Résolution du compte ─────────────────────────────────
   let accountId: string | null = payload.account_id ?? null
@@ -122,17 +128,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Cannot resolve account or organization', 400)
   }
 
-  // ── Log sync ─────────────────────────────────────────────
-  const logger = new DataSyncLogger({
-    supabase,
-    organizationId,
-    syncSource: 'usage',
-    syncType: 'webhook',
-    triggeredBy: source,
-    isManual: source === 'manual',
-  })
-  await logger.start()
-
   // ── Insertion de l'événement ─────────────────────────────
   const { error: insertError } = await supabase
     .from('usage_events')
@@ -147,19 +142,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
     })
 
   if (insertError) {
-    console.error('[track-usage] insert error:', insertError.message)
-    await logger.fail(insertError.message, 'validation_error', false)
+    console.error(JSON.stringify({
+      level: 'error',
+      function_name: 'track-usage',
+      message: 'insert error',
+      error: insertError.message,
+      account_id: accountId,
+      event_type: payload.event_type,
+    }))
     return errorResponse('Failed to record usage event', 500)
   }
-
-  logger.increment('records_processed')
-  logger.increment('records_created')
-  logger.increment('usage_events_processed')
-  await logger.complete({
-    event_type: payload.event_type,
-    account_id: accountId,
-    event_count: eventCount,
-  })
 
   return jsonResponse({
     success: true,
