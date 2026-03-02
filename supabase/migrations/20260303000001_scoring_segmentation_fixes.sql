@@ -36,29 +36,18 @@ SELECT
   TRUE
 FROM public.organizations o
 CROSS JOIN (VALUES
-  ('Champions',            'champions',           'high',     '{"health_score_gte": 80}'),
-  ('En expansion',         'en_expansion',        'medium',   '{"expansion_score_gte": 70, "health_score_gte": 60}'),
-  ('Stables',              'stables',             'low',      '{"health_score_gte": 40, "churn_risk_lt": 50}'),
-  ('À risque léger',       'a_risque_leger',      'medium',   '{"churn_risk_gte": 50, "churn_risk_lt": 70}'),
-  ('En danger critique',   'en_danger_critique',  'critical', '{"churn_risk_gte": 70}'),
-  ('Impayés',              'impayes',             'critical', '{"has_overdue_invoices": true}'),
-  ('En churn',             'en_churn',            'critical', '{"mrr_cents_eq": 0}'),
-  ('Nouveaux (< 90j)',     'nouveaux',            'low',      '{"days_since_creation_lt": 90}')
-) AS s(segment_name, segment_type, priority, criteria)
-CROSS JOIN (VALUES
-  ('Champions',            'Comptes en excellente santé'),
-  ('En expansion',         'Comptes avec potentiel d''expansion'),
-  ('Stables',              'Comptes stables sans risque'),
-  ('À risque léger',       'Comptes montrant des signes de risque'),
-  ('En danger critique',   'Comptes en danger imminent de churn'),
-  ('Impayés',              'Comptes avec factures impayées'),
-  ('En churn',             'Comptes ayant churné'),
-  ('Nouveaux (< 90j)',     'Comptes créés il y a moins de 90 jours')
-) AS d(d_name, description)
-WHERE s.segment_name = d.d_name
-  AND NOT EXISTS (
-    SELECT 1 FROM public.account_segments existing
-    WHERE existing.organization_id = o.id
-      AND existing.segment_type = s.segment_type
-      AND existing.is_system_generated = TRUE
-  );
+  ('Champions',            'champions',           'high',     '{"health_score_gte": 80}',                                  'Comptes en excellente sante'),
+  ('En expansion',         'en_expansion',        'medium',   '{"expansion_score_gte": 70, "health_score_gte": 60}',       'Comptes avec potentiel d''expansion'),
+  ('Stables',              'stables',             'low',      '{"health_score_gte": 40, "churn_risk_lt": 50}',             'Comptes stables sans risque'),
+  ('A risque leger',       'a_risque_leger',      'medium',   '{"churn_risk_gte": 50, "churn_risk_lt": 70}',              'Comptes montrant des signes de risque'),
+  ('En danger critique',   'en_danger_critique',  'critical', '{"churn_risk_gte": 70}',                                    'Comptes en danger imminent de churn'),
+  ('Impayes',              'impayes',             'critical', '{"has_overdue_invoices": true}',                            'Comptes avec factures impayees'),
+  ('En churn',             'en_churn',            'critical', '{"mrr_cents_eq": 0}',                                       'Comptes ayant churne'),
+  ('Nouveaux (< 90j)',     'nouveaux',            'low',      '{"days_since_creation_lt": 90}',                            'Comptes crees il y a moins de 90 jours')
+) AS s(segment_name, segment_type, priority, criteria, description)
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.account_segments existing
+  WHERE existing.organization_id = o.id
+    AND existing.segment_type = s.segment_type
+    AND existing.is_system_generated = TRUE
+);
