@@ -84,12 +84,26 @@ Champions, En expansion, Stables, À risque léger, En danger critique, Impayés
 ## Edge Function Pattern (Deno)
 
 Pour toute nouvelle Edge Function :
-1. Auth / vérification HMAC
-2. Parse + validation payload
-3. Résolution du tenant (organization_id)
-4. Logique métier
-5. Persistance
-6. Réponse rapide (< 5s pour webhooks)
+1. CORS check (`handleCors`)
+2. Auth / vérification HMAC
+3. `createServiceClient()` dans try/catch
+4. Parse + validation payload
+5. Résolution du tenant (organization_id)
+6. Logique métier
+7. Persistance
+8. Réponse rapide (< 5s pour webhooks)
+
+Pour les fonctions **cron** (sync-stripe, calculate-scores) :
+1. `acquireCronLock()` → 409 si déjà en cours
+2. try: logique métier + `DataSyncLogger`
+3. catch: `logger.fail()` + `alertSlack()`
+4. finally: `releaseCronLock()`
+
+Pour les **webhooks** (stripe-webhook) :
+1. catch: `writeToDLQ()` + `alertSlack()` + toujours HTTP 200
+
+Appels API externes (Stripe) :
+- Toujours via `fetchWithTimeout(8s)` + `retryWithBackoff(3x)` + `CircuitBreaker`
 
 ## Multi-Tenant & RLS (non-négociable)
 
@@ -155,13 +169,68 @@ Pour chaque tâche :
 - Pas de package sans justification
 - Code explicite > patterns cleveres
 
+## Stability Plan v1 (2026-03-02)
+
+Infrastructure de résilience et observabilité ajoutée aux Edge Functions.
+
+### Shared Utilities (`supabase/functions/_shared/`)
+
+| Module | Rôle |
+|--------|------|
+| `fetch-with-timeout.ts` | Timeout 8s sur appels HTTP externes (AbortController) |
+| `retry-with-backoff.ts` | Retry exponentiel avec jitter (3 tentatives max) |
+| `circuit-breaker.ts` | Circuit breaker in-memory (open après 5 échecs, reset 60s) |
+| `cron-lock.ts` | Verrou distribué via table `cron_locks` avec TTL |
+| `dlq.ts` | Écriture dans `webhook_dead_letter` pour événements échoués |
+| `slack-alert.ts` | Alertes Slack fire-and-forget (5s timeout) |
+| `structured-logger.ts` | Logs JSON avec `correlation_id`, `function_name`, `provider` |
+| `metrics.ts` | Écriture dans `sync_metrics` |
+| `scoring.ts` | Fonctions de scoring pures extraites pour testabilité |
+
+### Patterns de résilience appliqués
+
+- **sync-stripe** : `stripeGet()` → retry + circuit breaker + fetchWithTimeout + pagination max 50 pages + cron lock
+- **calculate-scores** : cron lock + DataSyncLogger par org + Slack alerting
+- **stripe-webhook** : DLQ write + Slack alert sur échec handler
+- **Tous** : try/catch sur `createServiceClient()`, CORS headers sur réponses
+
+### Edge Functions opérationnelles
+
+| Fonction | Trigger | Rôle |
+|----------|---------|------|
+| `health-check` | GET (monitoring externe, chaque 5 min) | DB, locks, syncs, DLQ |
+| `self-monitor` | POST (cron Supabase, chaque 15 min) | Auto-recovery + alertes Slack |
+
+### Bug fixes appliqués
+
+- `calculate-scores` : mutation builder `orgQuery` (filtre org_id silencieusement ignoré)
+- `sync-stripe` + `stripe-webhook` : détection intervalle annuel (`price.recurring.interval`)
+- `sync-stripe` : agrégation MRR multi-abonnement par compte
+- `supabase-client.ts` : headers CORS sur `jsonResponse`/`errorResponse`
+- `track-usage` : suppression overhead DataSyncLogger par événement
+
+### Migration
+
+- `20260302000001_stability_indexes.sql` : 10 index de performance (DLQ, cron_locks, data_syncs, usage_events, invoices, hubspot_companies, score_history)
+
+### Tests (51 passing)
+
+- `supabase/tests/scoring.test.ts` : 36 tests (7 fonctions de scoring)
+- `supabase/tests/utilities.test.ts` : 15 tests (circuit breaker, retry, logger)
+
+### Ops
+
+- `docs/RUNBOOK.md` : 6 procédures d'incident + seuils d'alerte
+- CI gating : `deploy-vercel.yml` attend succès CI avant deploy
+
 ## Layout du repo
 
 - `/src` — code applicatif Next.js
 - `/docs` — documentation et specs
 - `/supabase/functions` — Edge Functions (Deno)
+- `/supabase/functions/_shared` — utilities partagées (logger, retry, CB, DLQ, etc.)
 - `/supabase/migrations` — migrations SQL
-- `/supabase/tests` — tests
+- `/supabase/tests` — tests Vitest
 - `/scripts` — scripts utilitaires
 - `/.claude` — config Claude Code
 - `/.env.example` — template (commité)
