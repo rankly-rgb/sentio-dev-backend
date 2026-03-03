@@ -27,6 +27,7 @@ export const VALID_ACTION_TYPES = [
   'log_note',
   'schedule_review',
   'flag_for_review',
+  'send_email',
 ] as const
 
 export type PlaybookActionType = typeof VALID_ACTION_TYPES[number]
@@ -54,6 +55,8 @@ export type PlaybookType = typeof VALID_PLAYBOOK_TYPES[number]
 
 export const VALID_TEMPLATE_CATEGORIES = [
   'churn_prevention', 'expansion', 'onboarding', 'reactivation', 'renewal', 'winback',
+  'payment_recovery', 'health_monitoring', 'customer_education', 'nps_detractors',
+  'champions_advocacy', 'downgrade_prevention', 'success_planning',
 ] as const
 export type TemplateCategory = typeof VALID_TEMPLATE_CATEGORIES[number]
 
@@ -348,4 +351,102 @@ export function isRecentExecution(
   const lastTime = new Date(lastExecutedAt).getTime()
   const cutoff = Date.now() - cooldownHours * 60 * 60 * 1000
   return lastTime > cutoff
+}
+
+// ── Workflow Steps ──────────────────────────────────────────
+
+export interface WorkflowStep {
+  step_order: number
+  delay_days: number
+  action_type: PlaybookActionType
+  title: string
+  config: Record<string, unknown>
+}
+
+/**
+ * Valide le JSONB `steps` d'un workflow.
+ * Retourne le tableau typé ou throw une erreur descriptive.
+ */
+export function validateWorkflowSteps(steps: unknown): WorkflowStep[] {
+  if (!Array.isArray(steps)) {
+    throw new Error('steps must be a non-empty array')
+  }
+  if (steps.length === 0) {
+    throw new Error('steps must be a non-empty array')
+  }
+
+  const seenOrders = new Set<number>()
+  const validated: WorkflowStep[] = []
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]
+
+    if (!step || typeof step !== 'object' || Array.isArray(step)) {
+      throw new Error('steps[' + i + '] must be an object')
+    }
+
+    const { step_order, delay_days, action_type, title, config } = step as Record<string, unknown>
+
+    // Validate step_order
+    if (typeof step_order !== 'number' || !Number.isInteger(step_order) || step_order < 1) {
+      throw new Error('steps[' + i + '].step_order must be a positive integer')
+    }
+
+    if (seenOrders.has(step_order)) {
+      throw new Error('steps[' + i + '].step_order ' + step_order + ' is duplicated')
+    }
+    seenOrders.add(step_order)
+
+    // Validate delay_days
+    if (typeof delay_days !== 'number' || delay_days < 0) {
+      throw new Error('steps[' + i + '].delay_days must be a non-negative number')
+    }
+
+    // Validate action_type
+    if (!action_type || typeof action_type !== 'string' ||
+        !(VALID_ACTION_TYPES as readonly string[]).includes(action_type)) {
+      throw new Error(
+        'steps[' + i + '].action_type must be one of: ' + VALID_ACTION_TYPES.join(', '),
+      )
+    }
+
+    // Validate title
+    if (!title || typeof title !== 'string') {
+      throw new Error('steps[' + i + '].title must be a non-empty string')
+    }
+
+    // Validate config
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      throw new Error('steps[' + i + '].config must be an object')
+    }
+
+    // For send_email, validate required config fields
+    if (action_type === 'send_email') {
+      if (!config.email_subject || typeof config.email_subject !== 'string') {
+        throw new Error('steps[' + i + '].config.email_subject is required for send_email')
+      }
+      if (!config.email_body_html || typeof config.email_body_html !== 'string') {
+        throw new Error('steps[' + i + '].config.email_body_html is required for send_email')
+      }
+    }
+
+    validated.push({
+      step_order: step_order as number,
+      delay_days: delay_days as number,
+      action_type: action_type as PlaybookActionType,
+      title: title as string,
+      config: config as Record<string, unknown>,
+    })
+  }
+
+  return validated
+}
+
+/**
+ * Calcule la date du prochain step basée sur delay_days depuis une date de référence.
+ */
+export function calculateStepDueDate(delayDays: number, fromDate?: Date): string {
+  const base = fromDate || new Date()
+  const due = new Date(base.getTime() + delayDays * 24 * 60 * 60 * 1000)
+  return due.toISOString()
 }

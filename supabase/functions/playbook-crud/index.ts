@@ -11,6 +11,7 @@ import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import {
   validatePlaybookActions,
   validateConditions,
+  validateWorkflowSteps,
   calculateNextScheduledAt,
   VALID_PLAYBOOK_STATUSES,
   VALID_PLAYBOOK_TYPES,
@@ -84,12 +85,32 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     return errorResponse('title is required and must be a non-empty string', 400)
   }
 
-  // Validate actions
+  // Determine if workflow
+  const isWorkflow = body.is_workflow === true
+
+  // Validate actions (required for non-workflow playbooks, optional for workflows)
   let validatedActions
-  try {
-    validatedActions = validatePlaybookActions(body.actions)
-  } catch (err) {
-    return errorResponse(err instanceof Error ? err.message : 'Invalid actions', 400)
+  if (isWorkflow && !body.actions) {
+    validatedActions = [] // Workflows use steps, actions can be empty
+  } else {
+    try {
+      validatedActions = validatePlaybookActions(body.actions)
+    } catch (err) {
+      return errorResponse(err instanceof Error ? err.message : 'Invalid actions', 400)
+    }
+  }
+
+  // Validate workflow steps (required for workflows)
+  let validatedSteps = null
+  if (isWorkflow) {
+    if (!body.steps) {
+      return errorResponse('steps is required for workflow playbooks', 400)
+    }
+    try {
+      validatedSteps = validateWorkflowSteps(body.steps)
+    } catch (err) {
+      return errorResponse(err instanceof Error ? err.message : 'Invalid steps', 400)
+    }
   }
 
   // Validate trigger_conditions (optional)
@@ -123,27 +144,31 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     return errorResponse(`priority must be one of: ${VALID_PRIORITIES.join(', ')}`, 400)
   }
 
+  const insertPayload: Record<string, unknown> = {
+    organization_id: organizationId,
+    title: title.trim(),
+    actions: validatedActions,
+    trigger_conditions: validatedTrigger,
+    eligibility_criteria: validatedEligibility,
+    description: (body.description as string) ?? null,
+    playbook_type: (body.playbook_type as string) ?? 'manual',
+    template_category: (body.template_category as string) ?? null,
+    priority: (body.priority as string) ?? 'medium',
+    source: (body.source as string) ?? 'manual',
+    segment_id: (body.segment_id as string) ?? null,
+    created_by: (body.created_by as string) ?? null,
+    is_automated: (body.is_automated as boolean) ?? false,
+    execution_frequency: (body.execution_frequency as string) ?? null,
+    is_template: (body.is_template as boolean) ?? false,
+    requires_approval: (body.requires_approval as boolean) ?? false,
+    is_workflow: isWorkflow,
+    steps: validatedSteps,
+    status: 'draft',
+  }
+
   const { data, error } = await supabase
     .from('playbooks')
-    .insert({
-      organization_id: organizationId,
-      title: title.trim(),
-      actions: validatedActions,
-      trigger_conditions: validatedTrigger,
-      eligibility_criteria: validatedEligibility,
-      description: (body.description as string) ?? null,
-      playbook_type: (body.playbook_type as string) ?? 'manual',
-      template_category: (body.template_category as string) ?? null,
-      priority: (body.priority as string) ?? 'medium',
-      source: (body.source as string) ?? 'manual',
-      segment_id: (body.segment_id as string) ?? null,
-      created_by: (body.created_by as string) ?? null,
-      is_automated: (body.is_automated as boolean) ?? false,
-      execution_frequency: (body.execution_frequency as string) ?? null,
-      is_template: (body.is_template as boolean) ?? false,
-      requires_approval: (body.requires_approval as boolean) ?? false,
-      status: 'draft',
-    })
+    .insert(insertPayload)
     .select('*')
     .single()
 
@@ -192,6 +217,9 @@ async function handleList(supabase: SupabaseClient, url: URL, authOrgId: string)
 
   const isTemplate = url.searchParams.get('is_template')
   if (isTemplate !== null) query = query.eq('is_template', isTemplate === 'true')
+
+  const isWorkflow = url.searchParams.get('is_workflow')
+  if (isWorkflow !== null) query = query.eq('is_workflow', isWorkflow === 'true')
 
   const { data, error, count } = await query
 
@@ -332,6 +360,20 @@ async function handleUpdate(supabase: SupabaseClient, id: string, req: Request, 
   }
   if (body.is_template !== undefined) updates.is_template = body.is_template
   if (body.requires_approval !== undefined) updates.requires_approval = body.requires_approval
+  if (body.is_workflow !== undefined) updates.is_workflow = body.is_workflow
+
+  // Validate and update workflow steps
+  if (body.steps !== undefined) {
+    if (body.steps === null) {
+      updates.steps = null
+    } else {
+      try {
+        updates.steps = validateWorkflowSteps(body.steps)
+      } catch (err) {
+        return errorResponse(err instanceof Error ? err.message : 'Invalid steps', 400)
+      }
+    }
+  }
 
   // Handle status transitions
   if (body.status !== undefined) {

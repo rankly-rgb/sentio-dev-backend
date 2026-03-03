@@ -38,6 +38,10 @@ verify_jwt = false
 [functions.health-check]
 verify_jwt = false
 
+# workflow-step-processor : cron (service_role HS256, traite les steps workflow en attente)
+[functions.workflow-step-processor]
+verify_jwt = true
+
 # self-monitor : cron interne (service_role HS256)
 [functions.self-monitor]
 verify_jwt = true

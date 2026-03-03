@@ -13,10 +13,13 @@ import { alertSlack } from '../_shared/slack-alert.ts'
 import {
   evaluateConditions,
   executeAction,
+  calculateStepDueDate,
   type PlaybookAction,
+  type WorkflowStep,
   type AccountData,
   type ActionResult,
 } from '../_shared/playbook-engine.ts'
+import { executeWorkflowStep } from '../_shared/workflow-executor.ts'
 
 const MAX_ACCOUNTS_PER_RUN = 200
 
@@ -171,7 +174,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // ── Execute ─────────────────────────────────────────────
 
+  const isWorkflow = playbook.is_workflow === true
   const actions = (playbook.actions as PlaybookAction[]).sort((a, b) => a.order - b.order)
+  const steps = isWorkflow ? (playbook.steps as WorkflowStep[] || []).sort((a, b) => a.step_order - b.step_order) : []
+  const totalSteps = isWorkflow ? steps.length : actions.length
   const executionSource = body.execution_source ?? 'manual'
   const executionResults: Array<{
     execution_id: string
@@ -182,90 +188,203 @@ Deno.serve(async (req: Request): Promise<Response> => {
     failed: number
   }> = []
 
+  // Resolve CSM email for workflows (org default or first profile)
+  let csmEmail = ''
+  let csmName = ''
+  let orgName = ''
+  if (isWorkflow) {
+    const { data: orgData } = await supabase
+      .from('organizations')
+      .select('name')
+      .eq('id', body.organization_id)
+      .single()
+    orgName = orgData?.name || ''
+
+    const { data: profiles } = await supabase
+      .from('profiles_')
+      .select('email, full_name')
+      .eq('organization_id', body.organization_id)
+      .limit(1)
+    if (profiles && profiles.length > 0) {
+      csmEmail = profiles[0].email || ''
+      csmName = profiles[0].full_name || ''
+    }
+  }
+
   for (const account of finalAccounts) {
     const acc = account as AccountData
     let executionId: string | null = null
 
     try {
-      // Create execution record
-      const { data: execution, error: execError } = await supabase
-        .from('playbook_executions')
-        .insert({
-          organization_id: body.organization_id,
-          playbook_id: body.playbook_id,
-          account_id: acc.id,
-          segment_id: body.segment_id ?? playbook.segment_id ?? null,
-          execution_status: 'running',
-          execution_source: executionSource,
-          total_steps: actions.length,
-          completed_steps: 0,
-          failed_steps: 0,
-          health_score_before: acc.health_score,
-          churn_risk_before: acc.churn_risk_score,
-          started_at: new Date().toISOString(),
-        })
-        .select('id')
-        .single()
+      if (isWorkflow) {
+        // ── Workflow execution: run step 1 now, schedule remaining steps ──
+        const firstStep = steps[0]
+        if (!firstStep) {
+          logger.error('Workflow has no steps', { account_id: acc.id })
+          continue
+        }
 
-      if (execError || !execution) {
-        logger.error('Failed to create execution record', {
-          account_id: acc.id,
-          error: execError?.message,
-        })
-        continue
-      }
+        // Calculate next step due date
+        const nextStep = steps.length > 1 ? steps[1] : null
+        const nextStepDueAt = nextStep ? calculateStepDueDate(nextStep.delay_days) : null
 
-      executionId = execution.id
+        // Create execution record for workflow
+        const { data: execution, error: execError } = await supabase
+          .from('playbook_executions')
+          .insert({
+            organization_id: body.organization_id,
+            playbook_id: body.playbook_id,
+            account_id: acc.id,
+            segment_id: body.segment_id ?? playbook.segment_id ?? null,
+            execution_status: 'running',
+            execution_source: executionSource,
+            total_steps: totalSteps,
+            completed_steps: 0,
+            failed_steps: 0,
+            health_score_before: acc.health_score,
+            churn_risk_before: acc.churn_risk_score,
+            started_at: new Date().toISOString(),
+            current_step: 1,
+            next_step_due_at: nextStepDueAt,
+            workflow_completed: steps.length <= 1,
+          })
+          .select('id')
+          .single()
 
-      // Process actions sequentially
-      const actionResults: ActionResult[] = []
-      let completedSteps = 0
-      let failedSteps = 0
+        if (execError || !execution) {
+          logger.error('Failed to create workflow execution', {
+            account_id: acc.id,
+            error: execError?.message,
+          })
+          continue
+        }
 
-      for (const action of actions) {
-        const result = executeAction(action, acc, {
+        executionId = execution.id
+
+        // Execute step 1 immediately
+        const stepResult = await executeWorkflowStep(firstStep, acc, {
           playbookId: body.playbook_id,
           executionId: execution.id,
+          csmEmail: csmEmail,
+          csmName: csmName,
+          orgName: orgName,
         })
-        actionResults.push(result)
-        if (result.status === 'completed') completedSteps++
-        else if (result.status === 'failed') failedSteps++
-      }
 
-      // Determine final status
-      let finalStatus: string
-      if (failedSteps === 0) finalStatus = 'completed'
-      else if (completedSteps === 0) finalStatus = 'failed'
-      else finalStatus = 'partially_completed'
+        const isCompleted = stepResult.status === 'completed'
+        const workflowDone = steps.length <= 1
 
-      // Update execution record
-      const { error: updateError } = await supabase
-        .from('playbook_executions')
-        .update({
-          execution_status: finalStatus,
-          actions_completed: actionResults,
-          steps_timeline: actionResults,
-          completed_steps: completedSteps,
-          failed_steps: failedSteps,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', execution.id)
+        const updatePayload: Record<string, unknown> = {
+          completed_steps: isCompleted ? 1 : 0,
+          failed_steps: isCompleted ? 0 : 1,
+          actions_completed: [stepResult],
+          steps_timeline: [stepResult],
+        }
 
-      if (updateError) {
-        logger.error('Failed to update execution record', {
+        if (stepResult.action_type === 'send_email' && isCompleted) {
+          updatePayload.emails_sent = 1
+          updatePayload.last_email_sent_at = new Date().toISOString()
+        }
+
+        if (workflowDone) {
+          updatePayload.execution_status = isCompleted ? 'completed' : 'failed'
+          updatePayload.workflow_completed = true
+          updatePayload.completed_at = new Date().toISOString()
+        }
+
+        await supabase
+          .from('playbook_executions')
+          .update(updatePayload)
+          .eq('id', execution.id)
+
+        executionResults.push({
           execution_id: execution.id,
-          error: updateError.message,
+          account_id: acc.id,
+          status: workflowDone ? (isCompleted ? 'completed' : 'failed') : 'running',
+          steps: totalSteps,
+          completed: isCompleted ? 1 : 0,
+          failed: isCompleted ? 0 : 1,
+        })
+      } else {
+        // ── Standard playbook execution (unchanged) ──
+        const { data: execution, error: execError } = await supabase
+          .from('playbook_executions')
+          .insert({
+            organization_id: body.organization_id,
+            playbook_id: body.playbook_id,
+            account_id: acc.id,
+            segment_id: body.segment_id ?? playbook.segment_id ?? null,
+            execution_status: 'running',
+            execution_source: executionSource,
+            total_steps: actions.length,
+            completed_steps: 0,
+            failed_steps: 0,
+            health_score_before: acc.health_score,
+            churn_risk_before: acc.churn_risk_score,
+            started_at: new Date().toISOString(),
+          })
+          .select('id')
+          .single()
+
+        if (execError || !execution) {
+          logger.error('Failed to create execution record', {
+            account_id: acc.id,
+            error: execError?.message,
+          })
+          continue
+        }
+
+        executionId = execution.id
+
+        // Process actions sequentially
+        const actionResults: ActionResult[] = []
+        let completedSteps = 0
+        let failedSteps = 0
+
+        for (const action of actions) {
+          const result = executeAction(action, acc, {
+            playbookId: body.playbook_id,
+            executionId: execution.id,
+          })
+          actionResults.push(result)
+          if (result.status === 'completed') completedSteps++
+          else if (result.status === 'failed') failedSteps++
+        }
+
+        // Determine final status
+        let finalStatus: string
+        if (failedSteps === 0) finalStatus = 'completed'
+        else if (completedSteps === 0) finalStatus = 'failed'
+        else finalStatus = 'partially_completed'
+
+        // Update execution record
+        const { error: updateError } = await supabase
+          .from('playbook_executions')
+          .update({
+            execution_status: finalStatus,
+            actions_completed: actionResults,
+            steps_timeline: actionResults,
+            completed_steps: completedSteps,
+            failed_steps: failedSteps,
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', execution.id)
+
+        if (updateError) {
+          logger.error('Failed to update execution record', {
+            execution_id: execution.id,
+            error: updateError.message,
+          })
+        }
+
+        executionResults.push({
+          execution_id: execution.id,
+          account_id: acc.id,
+          status: finalStatus,
+          steps: actions.length,
+          completed: completedSteps,
+          failed: failedSteps,
         })
       }
-
-      executionResults.push({
-        execution_id: execution.id,
-        account_id: acc.id,
-        status: finalStatus,
-        steps: actions.length,
-        completed: completedSteps,
-        failed: failedSteps,
-      })
     } catch (err) {
       // Mark execution as failed if it was created
       if (executionId) {
@@ -286,9 +405,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
         execution_id: executionId ?? 'unknown',
         account_id: acc.id,
         status: 'failed',
-        steps: actions.length,
+        steps: totalSteps,
         completed: 0,
-        failed: actions.length,
+        failed: totalSteps,
       })
     }
   }
