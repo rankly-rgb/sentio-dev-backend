@@ -248,6 +248,59 @@ Bug fixes critiques sur le pipeline de données + ajout de la segmentation autom
 - `supabase/tests/scoring.test.ts` : 48 tests (7 fonctions de scoring + 12 tests segmentation)
 - `supabase/tests/utilities.test.ts` : 15 tests (circuit breaker, retry, logger)
 
+### Playbooks Backend v1 (2026-03-03)
+
+Implémentation complète du backend playbooks : moteur, CRUD, exécution, scheduler.
+
+**Edge Functions :**
+
+| Fonction | Trigger | Rôle |
+|----------|---------|------|
+| `playbook-crud` | REST (JWT) | CRUD playbooks (POST/GET/PUT/DELETE) avec validation, pagination, soft delete |
+| `playbook-execute` | POST (JWT) | Exécute un playbook sur des comptes spécifiques ou un segment |
+| `playbook-scheduler` | POST (cron) | Exécution automatique des playbooks planifiés (is_automated=true) |
+
+**Shared Utility :**
+
+| Module | Rôle |
+|--------|------|
+| `playbook-engine.ts` | Types, validation JSONB, évaluation de conditions, exécution d'actions (pure) |
+
+**Format JSONB `actions` :**
+```json
+[
+  { "type": "slack_notify", "config": { "channel": "#cs-team" }, "order": 1 },
+  { "type": "create_task", "config": { "title": "Follow-up" }, "order": 2 }
+]
+```
+Types d'actions : `slack_notify`, `create_task`, `assign_owner`, `update_tag`, `log_note`, `schedule_review`, `flag_for_review`
+
+**Format JSONB `trigger_conditions` / `eligibility_criteria` :**
+```json
+{
+  "operator": "AND",
+  "conditions": [
+    { "field": "churn_risk_score", "operator": "gte", "value": 70 },
+    { "field": "plan_tier", "operator": "in", "value": ["growth", "enterprise"] }
+  ]
+}
+```
+Opérateurs : `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`. Logique : `AND` / `OR`.
+
+**API playbook-crud :**
+- `POST /functions/v1/playbook-crud` — Créer (status=draft forcé)
+- `GET /functions/v1/playbook-crud?organization_id=X` — Lister (filtres: status, segment_id, playbook_type, template_category, is_template, page, per_page)
+- `GET /functions/v1/playbook-crud?id=X` — Détail + execution_stats
+- `PUT /functions/v1/playbook-crud?id=X` — Modifier (transitions de statut gérées)
+- `DELETE /functions/v1/playbook-crud?id=X` — Archiver (soft delete)
+
+**API playbook-execute :**
+- `POST /functions/v1/playbook-execute` — Body: `{ playbook_id, organization_id, account_ids | segment_id, execution_source?, cooldown_hours? }`
+
+**V1 : actions loggées mais pas dispatchées** (pas d'appel API externe). Max 200 comptes par run. Idempotence 24h.
+
+**Tests : 61 tests** dans `supabase/tests/playbook-engine.test.ts` (124 total).
+
 ### Ops
 
 - `docs/RUNBOOK.md` : 6 procédures d'incident + seuils d'alerte
