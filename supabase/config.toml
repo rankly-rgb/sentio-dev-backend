@@ -1,9 +1,6 @@
 # Supabase project configuration
 # Ref : https://supabase.com/docs/guides/cli/config
 
-[project]
-id = "upqakxuatlshhqiagbqw"
-
 # stripe-webhook : pas de vérification JWT (Stripe signe ses propres requêtes via HMAC)
 [functions.stripe-webhook]
 verify_jwt = false
@@ -18,4 +15,16 @@ verify_jwt = true
 
 # calculate-scores : déclenché par cron (service_role)
 [functions.calculate-scores]
+verify_jwt = true
+
+# playbook-crud : API CRUD playbooks (utilisateurs authentifiés)
+[functions.playbook-crud]
+verify_jwt = true
+
+# playbook-execute : exécution de playbooks (utilisateurs authentifiés ou service_role)
+[functions.playbook-execute]
+verify_jwt = true
+
+# playbook-scheduler : cron planification automatique (service_role)
+[functions.playbook-scheduler]
 verify_jwt = true
