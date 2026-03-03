@@ -7,6 +7,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
+import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import {
   validatePlaybookActions,
   validateConditions,
@@ -26,6 +27,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
+  // Auth : vérifier le JWT utilisateur (ES256)
+  let auth
+  try {
+    auth = await verifyUserAuth(req)
+  } catch (err) {
+    if (err instanceof AuthError) return errorResponse(err.message, err.status)
+    return errorResponse('Authentication failed', 401)
+  }
+
   let supabase: SupabaseClient
   try {
     supabase = createServiceClient()
@@ -40,7 +50,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   switch (req.method) {
     case 'POST':
-      return handleCreate(supabase, req)
+      return handleCreate(supabase, req, auth.organizationId)
     case 'GET':
       return id ? handleGetOne(supabase, id) : handleList(supabase, url)
     case 'PUT':
@@ -55,7 +65,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 // ── CREATE ──────────────────────────────────────────────────
 
-async function handleCreate(supabase: SupabaseClient, req: Request): Promise<Response> {
+async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: string | null): Promise<Response> {
   let body: Record<string, unknown>
   try {
     body = await req.json()
@@ -63,7 +73,7 @@ async function handleCreate(supabase: SupabaseClient, req: Request): Promise<Res
     return errorResponse('Invalid JSON body', 400)
   }
 
-  const organizationId = body.organization_id as string | undefined
+  const organizationId = (body.organization_id as string | undefined) ?? authOrgId
   const title = body.title as string | undefined
 
   if (!organizationId) return errorResponse('organization_id is required', 400)

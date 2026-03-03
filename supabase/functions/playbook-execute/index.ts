@@ -7,6 +7,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
+import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { createLogger } from '../_shared/structured-logger.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import {
@@ -36,6 +37,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (req.method !== 'POST') return errorResponse('Method not allowed', 405)
 
+  // Auth : vérifier le JWT utilisateur (ES256)
+  let auth
+  try {
+    auth = await verifyUserAuth(req)
+  } catch (err) {
+    if (err instanceof AuthError) return errorResponse(err.message, err.status)
+    return errorResponse('Authentication failed', 401)
+  }
+
   let supabase: SupabaseClient
   try {
     supabase = createServiceClient()
@@ -50,6 +60,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     body = await req.json() as ExecutePayload
   } catch {
     return errorResponse('Invalid JSON body', 400)
+  }
+
+  // Use auth org if not provided in body
+  if (!body.organization_id && auth.organizationId) {
+    body.organization_id = auth.organizationId
   }
 
   const correlationId = crypto.randomUUID()

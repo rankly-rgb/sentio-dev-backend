@@ -17,14 +17,14 @@ verify_jwt = true
 [functions.calculate-scores]
 verify_jwt = true
 
-# playbook-crud : API CRUD playbooks (utilisateurs authentifiés)
+# playbook-crud : JWT vérifié dans le code (ES256 incompatible avec verify_jwt)
 [functions.playbook-crud]
-verify_jwt = true
+verify_jwt = false
 
-# playbook-execute : exécution de playbooks (utilisateurs authentifiés ou service_role)
+# playbook-execute : JWT vérifié dans le code (ES256 incompatible avec verify_jwt)
 [functions.playbook-execute]
-verify_jwt = true
+verify_jwt = false
 
-# playbook-scheduler : cron planification automatique (service_role)
+# playbook-scheduler : cron (service_role HS256, compatible verify_jwt)
 [functions.playbook-scheduler]
 verify_jwt = true
