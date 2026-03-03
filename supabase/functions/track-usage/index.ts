@@ -97,13 +97,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let organizationId: string | null = payload.organization_id ?? null
 
   if (!accountId && payload.stripe_customer_id) {
-    const query = supabase
+    let query = supabase
       .from('accounts')
       .select('id, organization_id')
       .eq('stripe_customer_id', payload.stripe_customer_id)
 
     if (organizationId) {
-      query.eq('organization_id', organizationId)
+      query = query.eq('organization_id', organizationId)
     }
 
     const { data, error } = await query.single()

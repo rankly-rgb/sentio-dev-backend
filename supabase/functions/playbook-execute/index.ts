@@ -184,84 +184,113 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   for (const account of finalAccounts) {
     const acc = account as AccountData
+    let executionId: string | null = null
 
-    // Create execution record
-    const { data: execution, error: execError } = await supabase
-      .from('playbook_executions')
-      .insert({
-        organization_id: body.organization_id,
-        playbook_id: body.playbook_id,
-        account_id: acc.id,
-        segment_id: body.segment_id ?? playbook.segment_id ?? null,
-        execution_status: 'running',
-        execution_source: executionSource,
-        total_steps: actions.length,
-        completed_steps: 0,
-        failed_steps: 0,
-        health_score_before: acc.health_score,
-        churn_risk_before: acc.churn_risk_score,
-        started_at: new Date().toISOString(),
-      })
-      .select('id')
-      .single()
+    try {
+      // Create execution record
+      const { data: execution, error: execError } = await supabase
+        .from('playbook_executions')
+        .insert({
+          organization_id: body.organization_id,
+          playbook_id: body.playbook_id,
+          account_id: acc.id,
+          segment_id: body.segment_id ?? playbook.segment_id ?? null,
+          execution_status: 'running',
+          execution_source: executionSource,
+          total_steps: actions.length,
+          completed_steps: 0,
+          failed_steps: 0,
+          health_score_before: acc.health_score,
+          churn_risk_before: acc.churn_risk_score,
+          started_at: new Date().toISOString(),
+        })
+        .select('id')
+        .single()
 
-    if (execError || !execution) {
-      logger.error('Failed to create execution record', {
-        account_id: acc.id,
-        error: execError?.message,
-      })
-      continue
-    }
+      if (execError || !execution) {
+        logger.error('Failed to create execution record', {
+          account_id: acc.id,
+          error: execError?.message,
+        })
+        continue
+      }
 
-    // Process actions sequentially
-    const actionResults: ActionResult[] = []
-    let completedSteps = 0
-    let failedSteps = 0
+      executionId = execution.id
 
-    for (const action of actions) {
-      const result = executeAction(action, acc, {
-        playbookId: body.playbook_id,
-        executionId: execution.id,
-      })
-      actionResults.push(result)
-      if (result.status === 'completed') completedSteps++
-      else if (result.status === 'failed') failedSteps++
-    }
+      // Process actions sequentially
+      const actionResults: ActionResult[] = []
+      let completedSteps = 0
+      let failedSteps = 0
 
-    // Determine final status
-    let finalStatus: string
-    if (failedSteps === 0) finalStatus = 'completed'
-    else if (completedSteps === 0) finalStatus = 'failed'
-    else finalStatus = 'partially_completed'
+      for (const action of actions) {
+        const result = executeAction(action, acc, {
+          playbookId: body.playbook_id,
+          executionId: execution.id,
+        })
+        actionResults.push(result)
+        if (result.status === 'completed') completedSteps++
+        else if (result.status === 'failed') failedSteps++
+      }
 
-    // Update execution record
-    const { error: updateError } = await supabase
-      .from('playbook_executions')
-      .update({
-        execution_status: finalStatus,
-        actions_completed: actionResults,
-        steps_timeline: actionResults,
-        completed_steps: completedSteps,
-        failed_steps: failedSteps,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', execution.id)
+      // Determine final status
+      let finalStatus: string
+      if (failedSteps === 0) finalStatus = 'completed'
+      else if (completedSteps === 0) finalStatus = 'failed'
+      else finalStatus = 'partially_completed'
 
-    if (updateError) {
-      logger.error('Failed to update execution record', {
+      // Update execution record
+      const { error: updateError } = await supabase
+        .from('playbook_executions')
+        .update({
+          execution_status: finalStatus,
+          actions_completed: actionResults,
+          steps_timeline: actionResults,
+          completed_steps: completedSteps,
+          failed_steps: failedSteps,
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', execution.id)
+
+      if (updateError) {
+        logger.error('Failed to update execution record', {
+          execution_id: execution.id,
+          error: updateError.message,
+        })
+      }
+
+      executionResults.push({
         execution_id: execution.id,
-        error: updateError.message,
+        account_id: acc.id,
+        status: finalStatus,
+        steps: actions.length,
+        completed: completedSteps,
+        failed: failedSteps,
+      })
+    } catch (err) {
+      // Mark execution as failed if it was created
+      if (executionId) {
+        await supabase
+          .from('playbook_executions')
+          .update({
+            execution_status: 'failed',
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', executionId)
+      }
+      logger.error('Execution failed for account', {
+        account_id: acc.id,
+        execution_id: executionId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      executionResults.push({
+        execution_id: executionId ?? 'unknown',
+        account_id: acc.id,
+        status: 'failed',
+        steps: actions.length,
+        completed: 0,
+        failed: actions.length,
       })
     }
-
-    executionResults.push({
-      execution_id: execution.id,
-      account_id: acc.id,
-      status: finalStatus,
-      steps: actions.length,
-      completed: completedSteps,
-      failed: failedSteps,
-    })
   }
 
   // ── Update playbook KPIs ────────────────────────────────

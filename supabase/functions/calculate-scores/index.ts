@@ -109,76 +109,108 @@ async function ensureSystemSegments(
   return segmentMap
 }
 
-// ── Scoring d'un compte ───────────────────────────────────────
-async function scoreAccount(
+// ── Batch size for paginated scoring ────────────────────────────
+const SCORING_BATCH_SIZE = 500
+
+const DEFAULT_USAGE: UsageStats = { login_count: 0, feature_count: 0, total_events: 0, distinct_features: 0, days_active: 0 }
+const DEFAULT_INVOICE: InvoiceStatus = { has_overdue: false, overdue_count: 0 }
+
+// ── Pre-fetch scoring data for a batch of accounts (3 parallel queries instead of 3N) ──
+async function prefetchScoringData(
   supabase: SupabaseClient,
-  account: Account,
-  maxMrrCents: number,
-  _snapshotDate: string,
-): Promise<ScoreResult & { invoiceStatus: InvoiceStatus; daysActive: number }> {
+  accountIds: string[],
+): Promise<{
+  usageMap: Map<string, UsageStats>
+  hubspotMap: Map<string, HubspotData | null>
+  invoiceStatusMap: Map<string, InvoiceStatus>
+}> {
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]
 
-  // Usage stats (30 derniers jours)
-  const { data: usageRows } = await supabase
-    .from('usage_events')
-    .select('event_type, feature_name, event_count, event_date')
-    .eq('account_id', account.id)
-    .gte('event_date', thirtyDaysAgo)
+  const [usageResult, hubspotResult, invoiceResult] = await Promise.all([
+    supabase
+      .from('usage_events')
+      .select('account_id, event_type, feature_name, event_count, event_date')
+      .in('account_id', accountIds)
+      .gte('event_date', thirtyDaysAgo),
+    supabase
+      .from('hubspot_companies')
+      .select('account_id, nps_score, open_ticket_count, open_deal_count, last_meeting_date')
+      .in('account_id', accountIds),
+    supabase
+      .from('invoices')
+      .select('account_id')
+      .in('account_id', accountIds)
+      .in('status', ['open', 'uncollectible']),
+  ])
 
-  const stats: UsageStats = {
-    login_count: 0,
-    feature_count: 0,
-    total_events: 0,
-    distinct_features: 0,
-    days_active: 0,
-  }
-
-  if (usageRows && usageRows.length > 0) {
-    const features = new Set<string>()
-    const dates = new Set<string>()
-    for (const row of usageRows) {
-      stats.total_events += row.event_count ?? 1
-      if (row.event_type === 'login') stats.login_count += row.event_count ?? 1
-      if (row.event_type === 'feature_used') {
-        stats.feature_count += row.event_count ?? 1
-        if (row.feature_name) features.add(row.feature_name)
-      }
-      if (row.event_date) dates.add(row.event_date)
+  // Build usage stats per account
+  const usageMap = new Map<string, UsageStats>()
+  if (usageResult.data) {
+    const grouped = new Map<string, Array<Record<string, unknown>>>()
+    for (const row of usageResult.data) {
+      const list = grouped.get(row.account_id) ?? []
+      list.push(row)
+      grouped.set(row.account_id, list)
     }
-    stats.distinct_features = features.size
-    stats.days_active = dates.size
+    for (const [accountId, rows] of grouped) {
+      const stats: UsageStats = { login_count: 0, feature_count: 0, total_events: 0, distinct_features: 0, days_active: 0 }
+      const features = new Set<string>()
+      const dates = new Set<string>()
+      for (const row of rows) {
+        const count = (row.event_count as number) ?? 1
+        stats.total_events += count
+        if (row.event_type === 'login') stats.login_count += count
+        if (row.event_type === 'feature_used') {
+          stats.feature_count += count
+          if (row.feature_name) features.add(row.feature_name as string)
+        }
+        if (row.event_date) dates.add(row.event_date as string)
+      }
+      stats.distinct_features = features.size
+      stats.days_active = dates.size
+      usageMap.set(accountId, stats)
+    }
   }
 
-  // HubSpot data
-  const { data: hubspotRow } = await supabase
-    .from('hubspot_companies')
-    .select('nps_score, open_ticket_count, open_deal_count, last_meeting_date')
-    .eq('account_id', account.id)
-    .single()
-
-  const hubspot: HubspotData | null = hubspotRow ?? null
-
-  // Status factures (impayées)
-  const { data: overdueInvoices } = await supabase
-    .from('invoices')
-    .select('id')
-    .eq('account_id', account.id)
-    .in('status', ['open', 'uncollectible'])
-
-  const invoiceStatus: InvoiceStatus = {
-    has_overdue: (overdueInvoices?.length ?? 0) > 0,
-    overdue_count: overdueInvoices?.length ?? 0,
+  // Build hubspot data map
+  const hubspotMap = new Map<string, HubspotData | null>()
+  if (hubspotResult.data) {
+    for (const row of hubspotResult.data) {
+      hubspotMap.set(row.account_id, row as unknown as HubspotData)
+    }
   }
 
-  // Calcul des composantes
-  const usageScore = calcUsageScore(stats)
+  // Build invoice status map
+  const invoiceStatusMap = new Map<string, InvoiceStatus>()
+  if (invoiceResult.data) {
+    const counts = new Map<string, number>()
+    for (const row of invoiceResult.data) {
+      counts.set(row.account_id, (counts.get(row.account_id) ?? 0) + 1)
+    }
+    for (const [accountId, count] of counts) {
+      invoiceStatusMap.set(accountId, { has_overdue: true, overdue_count: count })
+    }
+  }
+
+  return { usageMap, hubspotMap, invoiceStatusMap }
+}
+
+// ── Scoring d'un compte (pure — no DB calls) ────────────────────
+function scoreAccountPure(
+  account: Account,
+  maxMrrCents: number,
+  usage: UsageStats,
+  hubspot: HubspotData | null,
+  invoiceStatus: InvoiceStatus,
+): ScoreResult & { invoiceStatus: InvoiceStatus; daysActive: number } {
+  const usageScore = calcUsageScore(usage)
   const financialScore = calcFinancialScore(account.mrr_cents, invoiceStatus, maxMrrCents)
   const engagementScore = calcEngagementScore(hubspot)
   const contractScore = calcContractScore(account)
 
   const healthScore = calcHealthScore(usageScore, financialScore, engagementScore, contractScore)
-  const churnRiskScore = calcChurnRiskScore(healthScore, invoiceStatus, stats.days_active, account)
-  const expansionScore = calcExpansionScore(account, stats)
+  const churnRiskScore = calcChurnRiskScore(healthScore, invoiceStatus, usage.days_active, account)
+  const expansionScore = calcExpansionScore(account, usage)
 
   return {
     health_score: Math.max(0, Math.min(100, healthScore)),
@@ -186,7 +218,7 @@ async function scoreAccount(
     expansion_score: Math.max(0, Math.min(100, expansionScore)),
     product_usage_score: Math.max(0, Math.min(100, usageScore)),
     invoiceStatus,
-    daysActive: stats.days_active,
+    daysActive: usage.days_active,
   }
 }
 
@@ -203,15 +235,7 @@ async function assignSegments(
 
   if (systemSegmentIds.length === 0) return { segmentsAssigned: 0 }
 
-  // Delete old ai_generated memberships for system segments
-  await supabase
-    .from('segment_memberships')
-    .delete()
-    .eq('organization_id', organizationId)
-    .eq('source_type', 'ai_generated')
-    .in('segment_id', systemSegmentIds)
-
-  // Build new memberships
+  // Build new memberships (upsert to avoid delete+insert visibility gap)
   const memberships: Array<Record<string, unknown>> = []
   const segmentAggs: Record<string, { count: number; mrrTotal: number; healthSum: number; churnSum: number }> = {}
 
@@ -256,17 +280,47 @@ async function assignSegments(
     }
   }
 
-  // Batch insert memberships
+  // Batch upsert memberships (atomic — no visibility gap)
+  const newAccountSegmentPairs = new Set<string>()
   if (memberships.length > 0) {
     const CHUNK_SIZE = 100
     for (let i = 0; i < memberships.length; i += CHUNK_SIZE) {
       const { error } = await supabase
         .from('segment_memberships')
-        .insert(memberships.slice(i, i + CHUNK_SIZE))
+        .upsert(memberships.slice(i, i + CHUNK_SIZE), {
+          onConflict: 'organization_id,segment_id,account_id',
+          ignoreDuplicates: false,
+        })
 
       if (error) {
-        console.error('[calculate-scores] segment_memberships insert error:', error.message)
+        console.error('[calculate-scores] segment_memberships upsert error:', error.message)
       }
+    }
+    for (const m of memberships) {
+      newAccountSegmentPairs.add(`${m.account_id}:${m.segment_id}`)
+    }
+  }
+
+  // Clean up stale memberships that are no longer valid
+  const { data: existingMemberships } = await supabase
+    .from('segment_memberships')
+    .select('id, account_id, segment_id')
+    .eq('organization_id', organizationId)
+    .eq('source_type', 'ai_generated')
+    .in('segment_id', systemSegmentIds)
+
+  const staleIds = (existingMemberships ?? [])
+    .filter((m: Record<string, unknown>) => !newAccountSegmentPairs.has(`${m.account_id}:${m.segment_id}`))
+    .map((m: Record<string, unknown>) => m.id as string)
+
+  if (staleIds.length > 0) {
+    const { error: deleteError } = await supabase
+      .from('segment_memberships')
+      .delete()
+      .in('id', staleIds)
+
+    if (deleteError) {
+      console.error('[calculate-scores] stale membership cleanup error:', deleteError.message)
     }
   }
 
@@ -368,113 +422,139 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         const maxMrrCents = maxMrrRow?.mrr_cents ?? 1
 
-        // Récupérer tous les accounts de l'org (avec created_at pour segmentation)
-        const { data: accounts, error: accountsError } = await supabase
-          .from('accounts')
-          .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, health_score, churn_risk_score, created_at')
-          .eq('organization_id', organizationId)
-
-        if (accountsError) {
-          console.error(JSON.stringify({
-            level: 'error',
-            function_name: 'calculate-scores',
-            organization_id: organizationId,
-            message: `accounts query failed: ${accountsError.message}`,
-          }))
-          await logger.fail(accountsError.message)
-          continue
-        }
-
-        if (!accounts?.length) {
-          await logger.complete({ accounts_scored: 0, segments_assigned: 0 })
-          continue
-        }
-
-        // Score each account and collect results
+        // Scorer les accounts par batch paginé (évite OOM et timeout N+1)
         const accountScores = new Map<string, ScoreResult>()
         const accountInvoiceStatus = new Map<string, InvoiceStatus>()
+        const allAccounts: AccountWithCreatedAt[] = []
+        let batchOffset = 0
+        let batchFailed = false
 
-        for (const account of accounts as AccountWithCreatedAt[]) {
-          try {
-            const result = await scoreAccount(supabase, account, maxMrrCents, snapshotDate)
-            const scores: ScoreResult = {
-              health_score: result.health_score,
-              churn_risk_score: result.churn_risk_score,
-              expansion_score: result.expansion_score,
-              product_usage_score: result.product_usage_score,
+        while (true) {
+          const { data: batch, error: batchError } = await supabase
+            .from('accounts')
+            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, health_score, churn_risk_score, created_at')
+            .eq('organization_id', organizationId)
+            .range(batchOffset, batchOffset + SCORING_BATCH_SIZE - 1)
+
+          if (batchError) {
+            console.error(JSON.stringify({
+              level: 'error',
+              function_name: 'calculate-scores',
+              organization_id: organizationId,
+              message: `accounts query failed at offset ${batchOffset}: ${batchError.message}`,
+            }))
+            if (batchOffset === 0) {
+              await logger.fail(batchError.message)
+              batchFailed = true
             }
+            break
+          }
 
-            accountScores.set(account.id, scores)
-            accountInvoiceStatus.set(account.id, result.invoiceStatus)
+          if (!batch?.length) break
 
-            // Upsert dans score_history
-            const { error: historyError } = await supabase
-              .from('score_history')
-              .upsert(
-                {
-                  organization_id: organizationId,
-                  account_id: account.id,
-                  snapshot_date: snapshotDate,
+          allAccounts.push(...(batch as AccountWithCreatedAt[]))
+
+          // Pre-fetch all scoring data in 3 parallel bulk queries (instead of 3N sequential)
+          const batchIds = batch.map((a: { id: string }) => a.id)
+          const { usageMap, hubspotMap, invoiceStatusMap } = await prefetchScoringData(supabase, batchIds)
+
+          // Score each account (pure — no DB calls)
+          const historyRows: Array<Record<string, unknown>> = []
+
+          for (const account of batch as AccountWithCreatedAt[]) {
+            try {
+              const usage = usageMap.get(account.id) ?? DEFAULT_USAGE
+              const hubspot = hubspotMap.get(account.id) ?? null
+              const invoiceStatus = invoiceStatusMap.get(account.id) ?? DEFAULT_INVOICE
+
+              const result = scoreAccountPure(account, maxMrrCents, usage, hubspot, invoiceStatus)
+              const scores: ScoreResult = {
+                health_score: result.health_score,
+                churn_risk_score: result.churn_risk_score,
+                expansion_score: result.expansion_score,
+                product_usage_score: result.product_usage_score,
+              }
+
+              accountScores.set(account.id, scores)
+              accountInvoiceStatus.set(account.id, result.invoiceStatus)
+
+              historyRows.push({
+                organization_id: organizationId,
+                account_id: account.id,
+                snapshot_date: snapshotDate,
+                health_score: scores.health_score,
+                churn_risk_score: scores.churn_risk_score,
+                expansion_score: scores.expansion_score,
+                product_usage_score: scores.product_usage_score,
+                mrr_cents: account.mrr_cents ?? 0,
+              })
+
+              // Update account current scores
+              const { error: updateError } = await supabase
+                .from('accounts')
+                .update({
                   health_score: scores.health_score,
                   churn_risk_score: scores.churn_risk_score,
                   expansion_score: scores.expansion_score,
                   product_usage_score: scores.product_usage_score,
-                  mrr_cents: account.mrr_cents ?? 0,
-                },
-                { onConflict: 'organization_id,account_id,snapshot_date', ignoreDuplicates: false },
-              )
+                  scores_calculated_at: new Date().toISOString(),
+                })
+                .eq('id', account.id)
+
+              if (updateError) {
+                console.error(JSON.stringify({
+                  level: 'error',
+                  function_name: 'calculate-scores',
+                  organization_id: organizationId,
+                  account_id: account.id,
+                  message: `accounts update failed: ${updateError.message}`,
+                }))
+                errors++
+                logger.increment('records_failed')
+                continue
+              }
+
+              accountsScored++
+              logger.increment('records_processed')
+            } catch (err) {
+              console.error(JSON.stringify({
+                level: 'error',
+                function_name: 'calculate-scores',
+                organization_id: organizationId,
+                account_id: (account as { id: string }).id,
+                message: err instanceof Error ? err.message : String(err),
+              }))
+              errors++
+              logger.increment('records_failed')
+            }
+          }
+
+          // Batch upsert score_history for this batch
+          if (historyRows.length > 0) {
+            const { error: historyError } = await supabase
+              .from('score_history')
+              .upsert(historyRows, { onConflict: 'organization_id,account_id,snapshot_date', ignoreDuplicates: false })
 
             if (historyError) {
               console.error(JSON.stringify({
                 level: 'error',
                 function_name: 'calculate-scores',
                 organization_id: organizationId,
-                account_id: account.id,
-                message: `score_history upsert failed: ${historyError.message}`,
+                message: `score_history batch upsert failed: ${historyError.message}`,
               }))
-              errors++
-              logger.increment('records_failed')
-              continue
             }
-
-            // Mettre à jour les scores courants sur l'account
-            const { error: updateError } = await supabase
-              .from('accounts')
-              .update({
-                health_score: scores.health_score,
-                churn_risk_score: scores.churn_risk_score,
-                expansion_score: scores.expansion_score,
-                product_usage_score: scores.product_usage_score,
-                scores_calculated_at: new Date().toISOString(),
-              })
-              .eq('id', account.id)
-
-            if (updateError) {
-              console.error(JSON.stringify({
-                level: 'error',
-                function_name: 'calculate-scores',
-                organization_id: organizationId,
-                account_id: account.id,
-                message: `accounts update failed: ${updateError.message}`,
-              }))
-              errors++
-              logger.increment('records_failed')
-              continue
-            }
-
-            accountsScored++
-            logger.increment('records_processed')
-          } catch (err) {
-            console.error(JSON.stringify({
-              level: 'error',
-              function_name: 'calculate-scores',
-              organization_id: organizationId,
-              account_id: account.id,
-              message: err instanceof Error ? err.message : String(err),
-            }))
-            errors++
-            logger.increment('records_failed')
           }
+
+          // If batch was smaller than page size, we've reached the end
+          if (batch.length < SCORING_BATCH_SIZE) break
+          batchOffset += batch.length
+        }
+
+        if (batchFailed) continue
+
+        if (allAccounts.length === 0) {
+          await logger.complete({ accounts_scored: 0, segments_assigned: 0 })
+          continue
         }
 
         // ── Segment Assignment ──────────────────────────────
@@ -482,7 +562,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           const segResult = await assignSegments(
             supabase,
             organizationId,
-            accounts as AccountWithCreatedAt[],
+            allAccounts,
             accountScores,
             accountInvoiceStatus,
           )
@@ -500,7 +580,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         await logger.fail(msg)
-        errors = -1
+        errors++
       }
 
       results.push({ organization_id: organizationId, accounts_scored: accountsScored, segments_assigned: segmentsAssigned, errors })

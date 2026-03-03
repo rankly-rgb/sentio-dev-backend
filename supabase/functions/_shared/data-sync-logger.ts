@@ -98,22 +98,26 @@ export class DataSyncLogger {
 
   async fail(errorMessage: string, errorType = 'api_error', isRetryable = true): Promise<void> {
     if (!this.syncId) return
-    const completedAt = new Date()
-    const durationSeconds = this.startedAt
-      ? Math.round((completedAt.getTime() - this.startedAt.getTime()) / 1000)
-      : null
+    try {
+      const completedAt = new Date()
+      const durationSeconds = this.startedAt
+        ? Math.round((completedAt.getTime() - this.startedAt.getTime()) / 1000)
+        : null
 
-    await this.supabase
-      .from('data_syncs')
-      .update({
-        sync_status: 'failed',
-        completed_at: completedAt.toISOString(),
-        duration_seconds: durationSeconds,
-        error_message: errorMessage,
-        error_type: errorType,
-        is_retryable: isRetryable,
-        ...this.counts,
-      })
-      .eq('id', this.syncId)
+      await this.supabase
+        .from('data_syncs')
+        .update({
+          sync_status: 'failed',
+          completed_at: completedAt.toISOString(),
+          duration_seconds: durationSeconds,
+          error_message: errorMessage,
+          error_type: errorType,
+          is_retryable: isRetryable,
+          ...this.counts,
+        })
+        .eq('id', this.syncId)
+    } catch (err) {
+      console.error('[DataSyncLogger] fail() threw:', err instanceof Error ? err.message : String(err))
+    }
   }
 }

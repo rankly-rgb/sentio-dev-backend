@@ -8,7 +8,7 @@ import { createClient } from 'jsr:@supabase/supabase-js@2'
 
 export interface AuthResult {
   userId: string
-  organizationId: string | null
+  organizationId: string
 }
 
 /**
@@ -43,15 +43,19 @@ export async function verifyUserAuth(req: Request): Promise<AuthResult> {
   }
 
   // Resolve organization_id from profiles_
-  const { data: profile } = await supabase
+  const { data: profile, error: profileError } = await supabase
     .from('profiles_')
     .select('organization_id')
     .eq('auth_user_id', user.id)
     .single()
 
+  if (profileError || !profile?.organization_id) {
+    throw new AuthError('User has no associated organization', 403)
+  }
+
   return {
     userId: user.id,
-    organizationId: profile?.organization_id ?? null,
+    organizationId: profile.organization_id,
   }
 }
 

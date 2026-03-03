@@ -176,31 +176,37 @@ async function handleSubscriptionEvent(
 
   logger.increment('subscriptions_processed')
 
+  // Fetch previous MRR for THIS specific subscription (not account aggregate)
+  const { data: prevSubRow } = await supabase
+    .from('subscriptions')
+    .select('mrr_cents')
+    .eq('stripe_sub_id', sub.id)
+    .single()
+  const prevSubMrr = prevSubRow?.mrr_cents ?? 0
+
   // Calculer le mouvement MRR
   let movementType: string | null = null
   const previousStatus = previousSub?.status
-  const currentStatus = sub.status
 
   if (event.type === 'customer.subscription.created') {
     movementType = 'new'
   } else if (event.type === 'customer.subscription.deleted') {
     movementType = 'churn'
   } else if (event.type === 'customer.subscription.updated') {
-    const prevMrr = accountRow.mrr_cents ?? 0
-    if (prevMrr === 0 && mrrCents > 0) {
+    if (prevSubMrr === 0 && mrrCents > 0) {
       movementType = previousStatus === 'canceled' ? 'reactivation' : 'new'
-    } else if (mrrCents > prevMrr) {
+    } else if (mrrCents > prevSubMrr) {
       movementType = 'expansion'
-    } else if (mrrCents < prevMrr) {
+    } else if (mrrCents < prevSubMrr) {
       movementType = 'contraction'
     }
   }
 
   if (movementType) {
     const amount = movementType === 'churn'
-      ? -(accountRow.mrr_cents ?? 0)
+      ? -prevSubMrr
       : movementType === 'contraction'
-      ? mrrCents - (accountRow.mrr_cents ?? 0)
+      ? mrrCents - prevSubMrr
       : mrrCents
 
     const { error: mvtError } = await supabase
@@ -370,6 +376,18 @@ const ROUTED_EVENTS = new Set([
 
 // ── Entrypoint ───────────────────────────────────────────────
 Deno.serve(async (req: Request): Promise<Response> => {
+  // CORS preflight handling
+  if (req.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, stripe-signature',
+      },
+    })
+  }
+
   if (req.method !== 'POST') {
     return errorResponse('Method not allowed', 405)
   }

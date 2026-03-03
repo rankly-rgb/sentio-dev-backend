@@ -48,16 +48,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const url = new URL(req.url)
   const id = url.searchParams.get('id')
 
+  const orgId = auth.organizationId
+
   switch (req.method) {
     case 'POST':
-      return handleCreate(supabase, req, auth.organizationId)
+      return handleCreate(supabase, req, orgId)
     case 'GET':
-      return id ? handleGetOne(supabase, id) : handleList(supabase, url)
+      return id ? handleGetOne(supabase, id, orgId) : handleList(supabase, url, orgId)
     case 'PUT':
     case 'PATCH':
-      return id ? handleUpdate(supabase, id, req) : errorResponse('id query parameter required', 400)
+      return id ? handleUpdate(supabase, id, req, orgId) : errorResponse('id query parameter required', 400)
     case 'DELETE':
-      return id ? handleArchive(supabase, id) : errorResponse('id query parameter required', 400)
+      return id ? handleArchive(supabase, id, orgId) : errorResponse('id query parameter required', 400)
     default:
       return errorResponse('Method not allowed', 405)
   }
@@ -65,7 +67,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 // ── CREATE ──────────────────────────────────────────────────
 
-async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: string | null): Promise<Response> {
+async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: string): Promise<Response> {
   let body: Record<string, unknown>
   try {
     body = await req.json()
@@ -73,7 +75,8 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     return errorResponse('Invalid JSON body', 400)
   }
 
-  const organizationId = (body.organization_id as string | undefined) ?? authOrgId
+  // Enforce auth org_id — ignore body.organization_id to prevent cross-tenant writes
+  const organizationId = authOrgId
   const title = body.title as string | undefined
 
   if (!organizationId) return errorResponse('organization_id is required', 400)
@@ -154,9 +157,9 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
 
 // ── LIST ────────────────────────────────────────────────────
 
-async function handleList(supabase: SupabaseClient, url: URL): Promise<Response> {
-  const orgId = url.searchParams.get('organization_id')
-  if (!orgId) return errorResponse('organization_id query parameter required', 400)
+async function handleList(supabase: SupabaseClient, url: URL, authOrgId: string): Promise<Response> {
+  // Use auth org_id — query param ignored to prevent cross-tenant reads
+  const orgId = authOrgId
 
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10))
   const perPage = Math.min(100, Math.max(1, parseInt(url.searchParams.get('per_page') ?? '20', 10)))
@@ -202,20 +205,23 @@ async function handleList(supabase: SupabaseClient, url: URL): Promise<Response>
 
 // ── GET ONE ─────────────────────────────────────────────────
 
-async function handleGetOne(supabase: SupabaseClient, id: string): Promise<Response> {
+async function handleGetOne(supabase: SupabaseClient, id: string, authOrgId: string): Promise<Response> {
   const { data: playbook, error } = await supabase
     .from('playbooks')
     .select('*')
     .eq('id', id)
+    .eq('organization_id', authOrgId)
     .single()
 
   if (error || !playbook) return errorResponse('Playbook not found', 404)
 
-  // Fetch execution stats
+  // Fetch execution stats (limited to last 500 to prevent memory issues)
   const { data: executions } = await supabase
     .from('playbook_executions')
     .select('execution_status, executed_at')
     .eq('playbook_id', id)
+    .order('executed_at', { ascending: false })
+    .limit(500)
 
   const executionList = executions ?? []
   const stats = {
@@ -238,7 +244,7 @@ async function handleGetOne(supabase: SupabaseClient, id: string): Promise<Respo
 
 // ── UPDATE ──────────────────────────────────────────────────
 
-async function handleUpdate(supabase: SupabaseClient, id: string, req: Request): Promise<Response> {
+async function handleUpdate(supabase: SupabaseClient, id: string, req: Request, authOrgId: string): Promise<Response> {
   let body: Record<string, unknown>
   try {
     body = await req.json()
@@ -246,11 +252,12 @@ async function handleUpdate(supabase: SupabaseClient, id: string, req: Request):
     return errorResponse('Invalid JSON body', 400)
   }
 
-  // Fetch current playbook
+  // Fetch current playbook — scoped by org to prevent cross-tenant access
   const { data: current, error: fetchError } = await supabase
     .from('playbooks')
     .select('*')
     .eq('id', id)
+    .eq('organization_id', authOrgId)
     .single()
 
   if (fetchError || !current) return errorResponse('Playbook not found', 404)
@@ -379,6 +386,7 @@ async function handleUpdate(supabase: SupabaseClient, id: string, req: Request):
     .from('playbooks')
     .update(updates)
     .eq('id', id)
+    .eq('organization_id', authOrgId)
     .select('*')
     .single()
 
@@ -392,7 +400,7 @@ async function handleUpdate(supabase: SupabaseClient, id: string, req: Request):
 
 // ── ARCHIVE (soft delete) ───────────────────────────────────
 
-async function handleArchive(supabase: SupabaseClient, id: string): Promise<Response> {
+async function handleArchive(supabase: SupabaseClient, id: string, authOrgId: string): Promise<Response> {
   const { data, error } = await supabase
     .from('playbooks')
     .update({
@@ -400,6 +408,7 @@ async function handleArchive(supabase: SupabaseClient, id: string): Promise<Resp
       deactivated_at: new Date().toISOString(),
     })
     .eq('id', id)
+    .eq('organization_id', authOrgId)
     .select('id, status, deactivated_at')
     .single()
 

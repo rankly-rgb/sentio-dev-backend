@@ -322,11 +322,15 @@ async function updateNextSchedule(
 ): Promise<void> {
   const frequency = playbook.execution_frequency as string | null
   if (frequency && (VALID_EXECUTION_FREQUENCIES as readonly string[]).includes(frequency)) {
-    await supabase
+    const { error } = await supabase
       .from('playbooks')
       .update({
         next_scheduled_at: calculateNextScheduledAt(frequency as ExecutionFrequency),
       })
       .eq('id', playbook.id)
+
+    if (error) {
+      console.error(`[playbook-scheduler] Failed to update next_scheduled_at for playbook ${playbook.id}: ${error.message}`)
+    }
   }
 }

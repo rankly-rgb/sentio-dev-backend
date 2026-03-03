@@ -209,6 +209,17 @@ async function syncSubscriptions(
 ): Promise<void> {
   const extraParams: Record<string, string> = { status: 'all' }
 
+  // Pre-build stripe_customer_id → account.id Map (eliminates N+1 queries)
+  const { data: subSyncAccounts } = await supabase
+    .from('accounts')
+    .select('id, stripe_customer_id')
+    .eq('organization_id', organizationId)
+
+  const customerToAccount = new Map<string, string>()
+  for (const a of subSyncAccounts ?? []) {
+    if (a.stripe_customer_id) customerToAccount.set(a.stripe_customer_id, a.id)
+  }
+
   // Track per-account metadata from active subs for propagation
   const accountSubMeta = new Map<string, Array<{
     mrrCents: number
@@ -219,19 +230,16 @@ async function syncSubscriptions(
   }>>()
 
   for await (const sub of paginateStripe<StripeSubscription>('/subscriptions', apiKey, extraParams, logger)) {
-    // Résoudre l'account
-    const { data: accountRow } = await supabase
-      .from('accounts')
-      .select('id')
-      .eq('organization_id', organizationId)
-      .eq('stripe_customer_id', sub.customer)
-      .single()
+    // Résoudre l'account via la Map pré-construite (O(1) au lieu d'un SELECT)
+    const accountId = customerToAccount.get(sub.customer)
 
-    if (!accountRow) {
+    if (!accountId) {
       console.warn('[sync-stripe] account not found for customer', sub.customer)
       logger.increment('records_failed')
       continue
     }
+
+    const accountRow = { id: accountId }
 
     const mrrCents = calcMrrCents(sub)
     const interval = getSubscriptionInterval(sub)
@@ -294,14 +302,10 @@ async function syncSubscriptions(
     }
   }
 
-  // Aggregate MRR + propagate metadata per account
-  const { data: orgAccounts } = await supabase
-    .from('accounts')
-    .select('id')
-    .eq('organization_id', organizationId)
-
-  for (const acct of orgAccounts ?? []) {
-    const subs = accountSubMeta.get(acct.id) ?? []
+  // Aggregate MRR + propagate metadata per account (using pre-built Map)
+  const allAccountIds = Array.from(customerToAccount.values())
+  for (const acctId of allAccountIds) {
+    const subs = accountSubMeta.get(acctId) ?? []
     const totalMrr = subs.reduce((sum: number, s) => sum + s.mrrCents, 0)
     const totalSeats = subs.reduce((sum: number, s) => sum + s.quantity, 0)
 
@@ -322,10 +326,15 @@ async function syncSubscriptions(
       updateData.contract_end_date = primary.contractEnd
     }
 
-    await supabase
+    const { error: updateErr } = await supabase
       .from('accounts')
       .update(updateData)
-      .eq('id', acct.id)
+      .eq('id', acctId)
+
+    if (updateErr) {
+      console.error('[sync-stripe] account MRR update error:', updateErr.message, 'account:', acctId)
+      logger.increment('records_failed')
+    }
   }
 }
 
@@ -340,28 +349,31 @@ async function syncInvoices(
   const extraParams: Record<string, string> = {}
   if (createdAfter) extraParams['created[gt]'] = String(createdAfter)
 
-  for await (const invoice of paginateStripe<StripeInvoice>('/invoices', apiKey, extraParams, logger)) {
-    const { data: accountRow } = await supabase
-      .from('accounts')
-      .select('id')
-      .eq('organization_id', organizationId)
-      .eq('stripe_customer_id', invoice.customer)
-      .single()
+  // Pre-build lookup Maps (eliminates N+1 queries)
+  const [acctResult, subResult] = await Promise.all([
+    supabase.from('accounts').select('id, stripe_customer_id').eq('organization_id', organizationId),
+    supabase.from('subscriptions').select('id, stripe_sub_id').eq('organization_id', organizationId),
+  ])
 
-    if (!accountRow) {
+  const invoiceCustomerMap = new Map<string, string>()
+  for (const a of acctResult.data ?? []) {
+    if (a.stripe_customer_id) invoiceCustomerMap.set(a.stripe_customer_id, a.id)
+  }
+
+  const stripeSubMap = new Map<string, string>()
+  for (const s of subResult.data ?? []) {
+    if (s.stripe_sub_id) stripeSubMap.set(s.stripe_sub_id, s.id)
+  }
+
+  for await (const invoice of paginateStripe<StripeInvoice>('/invoices', apiKey, extraParams, logger)) {
+    const accountId = invoiceCustomerMap.get(invoice.customer)
+
+    if (!accountId) {
       logger.increment('records_failed')
       continue
     }
 
-    let subscriptionId: string | null = null
-    if (invoice.subscription) {
-      const { data: subRow } = await supabase
-        .from('subscriptions')
-        .select('id')
-        .eq('stripe_sub_id', invoice.subscription)
-        .single()
-      subscriptionId = subRow?.id ?? null
-    }
+    const subscriptionId = invoice.subscription ? (stripeSubMap.get(invoice.subscription) ?? null) : null
 
     const invoiceDate = new Date(invoice.created * 1000).toISOString().split('T')[0]
     const dueDate = invoice.due_date
@@ -376,7 +388,7 @@ async function syncInvoices(
       .upsert(
         {
           organization_id: organizationId,
-          account_id: accountRow.id,
+          account_id: accountId,
           subscription_id: subscriptionId,
           stripe_invoice_id: invoice.id,
           amount_cents: invoice.amount_due,
