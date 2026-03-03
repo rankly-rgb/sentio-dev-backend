@@ -43,7 +43,7 @@ async function getDashboardStats(organizationId: string): Promise<DashboardStats
   return {
     total_accounts: count ?? accounts.length,
     total_mrr_cents: totalMrr,
-    avg_health_score: avgHealth ? Math.round(avgHealth * 10) / 10 : null,
+    avg_health_score: avgHealth ? Math.round(avgHealth) : null,
     accounts_at_risk: atRisk,
     champions_count: champions,
   }
