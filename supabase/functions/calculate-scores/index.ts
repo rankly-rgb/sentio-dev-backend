@@ -111,6 +111,7 @@ async function ensureSystemSegments(
 
 // ── Batch size for paginated scoring ────────────────────────────
 const SCORING_BATCH_SIZE = 500
+const MAX_BATCHES = 200 // Safety guard: 200 * 500 = 100k accounts max per org
 
 const DEFAULT_USAGE: UsageStats = { login_count: 0, feature_count: 0, total_events: 0, distinct_features: 0, days_active: 0 }
 const DEFAULT_INVOICE: InvoiceStatus = { has_overdue: false, overdue_count: 0 }
@@ -131,7 +132,8 @@ async function prefetchScoringData(
       .from('usage_events')
       .select('account_id, event_type, feature_name, event_count, event_date')
       .in('account_id', accountIds)
-      .gte('event_date', thirtyDaysAgo),
+      .gte('event_date', thirtyDaysAgo)
+      .limit(50000),
     supabase
       .from('hubspot_companies')
       .select('account_id, nps_score, open_ticket_count, open_deal_count, last_meeting_date')
@@ -428,8 +430,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
         const allAccounts: AccountWithCreatedAt[] = []
         let batchOffset = 0
         let batchFailed = false
+        let batchCount = 0
 
-        while (true) {
+        while (batchCount < MAX_BATCHES) {
+          batchCount++
           const { data: batch, error: batchError } = await supabase
             .from('accounts')
             .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, health_score, churn_risk_score, created_at')

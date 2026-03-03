@@ -26,7 +26,9 @@ export default function DashboardError({
             Impossible de charger le dashboard
           </h2>
           <p className="text-sm text-slate-500">
-            {error.message || 'Une erreur est survenue lors du chargement des données.'}
+            {error.digest
+              ? `Référence : ${error.digest}`
+              : 'Une erreur est survenue lors du chargement des données.'}
           </p>
           <button
             onClick={reset}

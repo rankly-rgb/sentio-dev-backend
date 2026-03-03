@@ -7,6 +7,7 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse, errorResponse } from '../_shared/supabase-client.ts'
+import { acquireCronLock, releaseCronLock } from '../_shared/cron-lock.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -26,7 +27,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Server configuration error', 500)
   }
 
+  // Prevent concurrent self-monitor runs
+  const lockAcquired = await acquireCronLock(supabase, 'self-monitor', 120)
+  if (!lockAcquired) {
+    return jsonResponse({ success: true, skipped: true, reason: 'already_running' })
+  }
+
   const actions: string[] = []
+
+  try {
 
   // 1. Auto-fail stuck running syncs (> 15 min)
   try {
@@ -137,7 +146,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .select('snapshot_date')
       .order('snapshot_date', { ascending: false })
       .limit(1)
-      .single()
+      .maybeSingle()
 
     if (lastScore?.snapshot_date) {
       const ageMs = Date.now() - new Date(lastScore.snapshot_date).getTime()
@@ -227,6 +236,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       message: 'Failed to check sync failures',
       error: err instanceof Error ? err.message : String(err),
     }))
+  }
+
+  } finally {
+    await releaseCronLock(supabase, 'self-monitor')
   }
 
   return jsonResponse({

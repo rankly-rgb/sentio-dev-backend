@@ -15,8 +15,8 @@ export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request })
 
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    process.env.NEXT_PUBLIC_SUPABASE_URL ?? '',
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '',
     {
       cookies: {
         getAll() {
@@ -34,7 +34,20 @@ export async function middleware(request: NextRequest) {
   )
 
   // Refresh session token — this keeps long sessions alive
-  const { data: { user } } = await supabase.auth.getUser()
+  let user = null
+  try {
+    const { data } = await supabase.auth.getUser()
+    user = data.user
+  } catch {
+    // Auth service down — allow non-protected routes, block protected
+    if (isProtected) {
+      return new Response(
+        JSON.stringify({ error: 'Service temporairement indisponible' }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+    return supabaseResponse
+  }
 
   // Redirect unauthenticated users away from protected routes
   if (isProtected && !user) {

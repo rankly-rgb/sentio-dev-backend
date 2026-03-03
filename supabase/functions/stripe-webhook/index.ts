@@ -29,6 +29,10 @@ async function verifyStripeSignature(
   const v1 = parts['v1']
   if (!timestamp || !v1) return false
 
+  // Reject webhooks older than 5 minutes (replay attack prevention)
+  const webhookAge = Math.abs(Date.now() / 1000 - parseInt(timestamp, 10))
+  if (webhookAge > 300) return false
+
   const encoder = new TextEncoder()
   const key = await crypto.subtle.importKey(
     'raw',
@@ -60,7 +64,7 @@ async function resolveOrganization(
     .from('organizations')
     .select('id')
     .eq('stripe_account_id', stripeAccountId)
-    .single()
+    .maybeSingle()
   return data?.id ?? null
 }
 
@@ -148,6 +152,14 @@ async function handleSubscriptionEvent(
   const canceledAt = sub.canceled_at ? new Date(sub.canceled_at * 1000).toISOString() : null
   const trialEnd = sub.trial_end ? new Date(sub.trial_end * 1000).toISOString().split('T')[0] : null
 
+  // Fetch previous MRR for THIS subscription BEFORE upsert (TOCTOU fix)
+  const { data: prevSubRow } = await supabase
+    .from('subscriptions')
+    .select('mrr_cents')
+    .eq('stripe_sub_id', sub.id)
+    .maybeSingle()
+  const prevSubMrr = prevSubRow?.mrr_cents ?? 0
+
   // Upsert subscription
   const { error: subError } = await supabase
     .from('subscriptions')
@@ -175,14 +187,6 @@ async function handleSubscriptionEvent(
   }
 
   logger.increment('subscriptions_processed')
-
-  // Fetch previous MRR for THIS specific subscription (not account aggregate)
-  const { data: prevSubRow } = await supabase
-    .from('subscriptions')
-    .select('mrr_cents')
-    .eq('stripe_sub_id', sub.id)
-    .single()
-  const prevSubMrr = prevSubRow?.mrr_cents ?? 0
 
   // Calculer le mouvement MRR
   let movementType: string | null = null
@@ -468,6 +472,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
     console.error('[stripe-webhook] Cannot resolve organization for event', event.id)
     // Retourner 200 pour éviter que Stripe ne retry indéfiniment
     return jsonResponse({ received: true, error: 'organization_not_found' })
+  }
+
+  // Idempotency check: skip if this event was already processed
+  const { data: existingSync } = await supabase
+    .from('data_syncs')
+    .select('id')
+    .eq('webhook_event_id', event.id)
+    .eq('sync_status', 'completed')
+    .maybeSingle()
+
+  if (existingSync) {
+    return jsonResponse({ received: true, handled: false, reason: 'duplicate_event' })
   }
 
   const logger = new DataSyncLogger({

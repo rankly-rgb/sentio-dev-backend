@@ -76,6 +76,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq('is_automated', true)
       .eq('status', 'active')
       .lte('next_scheduled_at', now)
+      .order('next_scheduled_at', { ascending: true })
+      .limit(50)
 
     if (pbError) {
       logger.error('Failed to query due playbooks', { error: pbError.message })

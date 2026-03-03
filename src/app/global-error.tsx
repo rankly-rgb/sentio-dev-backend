@@ -1,5 +1,7 @@
 'use client'
 
+import { useEffect } from 'react'
+
 export default function GlobalError({
   error,
   reset,
@@ -7,6 +9,10 @@ export default function GlobalError({
   error: Error & { digest?: string }
   reset: () => void
 }) {
+  useEffect(() => {
+    console.error('[global error boundary]', error.digest ?? 'unknown')
+  }, [error])
+
   return (
     <html lang="fr">
       <body className="min-h-screen flex items-center justify-center bg-slate-50">

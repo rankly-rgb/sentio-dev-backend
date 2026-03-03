@@ -1,3 +1,4 @@
+import { Suspense } from 'react'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { RefreshDataButton } from '@/components/RefreshDataButton'
@@ -67,7 +68,7 @@ export default async function DashboardPage() {
     .from('profiles_')
     .select('organization_id, role, full_name')
     .eq('auth_user_id', user.id)
-    .single()
+    .maybeSingle()
 
   if (!profile?.organization_id) {
     return (
@@ -86,7 +87,7 @@ export default async function DashboardPage() {
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <h1 className="text-xl font-bold text-slate-900">Sentio AI</h1>
           <span className="text-sm text-slate-500">
-            {profile.full_name ?? user.email}
+            {profile.full_name ?? profile.role ?? 'Utilisateur'}
           </span>
         </div>
       </header>
@@ -138,7 +139,9 @@ export default async function DashboardPage() {
             <h3 className="font-semibold text-slate-900">Synchronisations récentes</h3>
             <RefreshDataButton />
           </div>
-          <SyncStatus organizationId={profile.organization_id} />
+          <Suspense fallback={<p className="text-sm text-slate-400">Chargement des synchronisations...</p>}>
+            <SyncStatus organizationId={profile.organization_id} />
+          </Suspense>
         </div>
       </main>
     </div>

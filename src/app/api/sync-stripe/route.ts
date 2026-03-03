@@ -18,7 +18,7 @@ export async function POST() {
     .from('profiles_')
     .select('organization_id, role')
     .eq('auth_user_id', user.id)
-    .single()
+    .maybeSingle()
 
   if (!profile?.organization_id) {
     return NextResponse.json({ error: 'Aucune organisation' }, { status: 403 })

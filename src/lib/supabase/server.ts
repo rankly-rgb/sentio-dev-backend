@@ -27,7 +27,9 @@ export function createSupabaseServerClient() {
 }
 
 export function createSupabaseServiceClient() {
-  const { createClient } = require('@supabase/supabase-js')
+  // Dynamic require to avoid pulling service-role-key into client bundles
+  // eslint-disable-next-line
+  const { createClient } = require('@supabase/supabase-js') as typeof import('@supabase/supabase-js')
   return createClient(
     getSupabaseUrl(),
     getSupabaseServiceKey(),

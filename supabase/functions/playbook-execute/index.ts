@@ -65,10 +65,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Invalid JSON body', 400)
   }
 
-  // Use auth org if not provided in body
-  if (!body.organization_id && auth.organizationId) {
-    body.organization_id = auth.organizationId
-  }
+  // Always enforce the authenticated user's organization (prevent cross-tenant access)
+  body.organization_id = auth.organizationId
 
   const correlationId = crypto.randomUUID()
   const logger = createLogger({
