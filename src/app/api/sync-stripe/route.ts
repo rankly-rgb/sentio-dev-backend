@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server'
-import { createSupabaseServerClient, createSupabaseServiceClient } from '@/lib/supabase/server'
+import { createSupabaseServerClient } from '@/lib/supabase/server'
+
+// Allow up to 60 seconds for Stripe sync (Vercel serverless timeout)
+export const maxDuration = 60
 
 export async function POST() {
   // 1. Vérifier l'auth utilisateur
@@ -22,10 +25,16 @@ export async function POST() {
   }
 
   // 3. Appeler l'Edge Function sync-stripe via service role
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!supabaseUrl || !serviceKey) {
+    return NextResponse.json({ error: 'Configuration serveur manquante' }, { status: 500 })
+  }
 
   try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 55_000)
+
     const resp = await fetch(`${supabaseUrl}/functions/v1/sync-stripe`, {
       method: 'POST',
       headers: {
@@ -37,7 +46,10 @@ export async function POST() {
         sync_type: 'incremental',
         is_manual: true,
       }),
+      signal: controller.signal,
     })
+
+    clearTimeout(timeout)
 
     const data = await resp.json()
 

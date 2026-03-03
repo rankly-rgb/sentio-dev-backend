@@ -13,10 +13,12 @@ interface DashboardStats {
 async function getDashboardStats(organizationId: string): Promise<DashboardStats> {
   const supabase = createSupabaseServerClient()
 
-  const { data: accounts } = await supabase
+  // Safety limit: prevent OOM on orgs with very large account bases
+  const { data: accounts, count } = await supabase
     .from('accounts')
-    .select('id, mrr_cents, health_score, churn_risk_score')
+    .select('mrr_cents, health_score, churn_risk_score', { count: 'exact' })
     .eq('organization_id', organizationId)
+    .limit(10000)
 
   if (!accounts || accounts.length === 0) {
     return {
@@ -39,7 +41,7 @@ async function getDashboardStats(organizationId: string): Promise<DashboardStats
   const champions = accounts.filter((a) => (a.health_score ?? 0) >= 80).length
 
   return {
-    total_accounts: accounts.length,
+    total_accounts: count ?? accounts.length,
     total_mrr_cents: totalMrr,
     avg_health_score: avgHealth ? Math.round(avgHealth * 10) / 10 : null,
     accounts_at_risk: atRisk,

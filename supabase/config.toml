@@ -28,3 +28,16 @@ verify_jwt = false
 # playbook-scheduler : cron (service_role HS256, compatible verify_jwt)
 [functions.playbook-scheduler]
 verify_jwt = true
+
+# admin-proxy : JWT vérifié dans le code (ES256 incompatible avec verify_jwt)
+# Proxy sécurisé pour déclencher sync-stripe, calculate-scores, etc.
+[functions.admin-proxy]
+verify_jwt = false
+
+# health-check : monitoring externe (pas de JWT, GET public)
+[functions.health-check]
+verify_jwt = false
+
+# self-monitor : cron interne (service_role HS256)
+[functions.self-monitor]
+verify_jwt = true

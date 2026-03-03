@@ -18,6 +18,8 @@ jobs:
           cache: 'npm'
       - name: Install dependencies
         run: npm ci
+      - name: Security audit
+        run: npm audit --audit-level=high || true
       - name: TypeScript check
         run: npx tsc --noEmit
       - name: Run tests

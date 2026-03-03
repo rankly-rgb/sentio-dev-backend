@@ -161,7 +161,43 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // No score_history data yet — expected in early setup
   }
 
-  // 5. Check recent sync failures
+  // 5. Auto-fail stuck playbook executions (> 15 min)
+  try {
+    const fifteenMinAgo2 = new Date(Date.now() - 15 * 60 * 1000).toISOString()
+    const { data: stuckExecs } = await supabase
+      .from('playbook_executions')
+      .select('id, playbook_id, account_id')
+      .eq('execution_status', 'running')
+      .lt('started_at', fifteenMinAgo2)
+
+    if (stuckExecs && stuckExecs.length > 0) {
+      for (const exec of stuckExecs) {
+        await supabase
+          .from('playbook_executions')
+          .update({
+            execution_status: 'failed',
+            completed_at: new Date().toISOString(),
+          })
+          .eq('id', exec.id)
+
+        actions.push(`Auto-failed stuck execution ${exec.id} (playbook ${exec.playbook_id})`)
+      }
+
+      await alertSlack(
+        `self-monitor: auto-failed ${stuckExecs.length} stuck playbook execution(s)`,
+        { level: 'warning' },
+      )
+    }
+  } catch (err) {
+    console.error(JSON.stringify({
+      level: 'error',
+      function_name: 'self-monitor',
+      message: 'Failed to check stuck playbook executions',
+      error: err instanceof Error ? err.message : String(err),
+    }))
+  }
+
+  // 6. Check recent sync failures
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
     const { data: recentFailures } = await supabase
