@@ -243,10 +243,12 @@ Bug fixes critiques sur le pipeline de données + ajout de la segmentation autom
 - `20260302000001_stability_indexes.sql` : 10 index de performance (DLQ, cron_locks, data_syncs, usage_events, invoices, hubspot_companies, score_history)
 - `20260303000001_scoring_segmentation_fixes.sql` : contrainte CHECK élargie, source `scoring` dans data_syncs, seed des 8 segments système, index unique partiel `(org_id, segment_type) WHERE is_system_generated`
 
-### Tests (63 passing)
+### Tests (148 passing)
 
 - `supabase/tests/scoring.test.ts` : 48 tests (7 fonctions de scoring + 12 tests segmentation)
 - `supabase/tests/utilities.test.ts` : 15 tests (circuit breaker, retry, logger)
+- `supabase/tests/playbook-engine.test.ts` : 61 tests (types, validation, conditions, actions)
+- `supabase/tests/admin-proxy.test.ts` : 24 tests (auth, routing, validation)
 
 ### Playbooks Backend v1 (2026-03-03)
 
@@ -313,6 +315,52 @@ Opérateurs : `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`. Logique : `
 - API : `GET /playbook-crud?organization_id=X&is_template=true` pour lister les templates
 
 **Tests : 61 tests** dans `supabase/tests/playbook-engine.test.ts` (124 total).
+
+### Stability Audit v2 (2026-03-04)
+
+Audit complet de stabilité sur toutes les couches (71 issues identifiées, 6 phases implémentées). 148 tests passing.
+
+**Phase 1 — Sécurité (3 failles cross-tenant critiques) :**
+- `auth.ts` : rejet des `organization_id` null (bypass authorization)
+- `playbook-crud` : toutes les opérations CRUD scopées par `auth.organizationId` (plus de lecture/écriture cross-tenant)
+- `track-usage` : réassignation explicite du query builder (filtre `organization_id` silencieusement ignoré)
+- `auth/callback` : validation du chemin de redirection (prévention open redirect)
+- `server.js` : supprimé (serveur Express orphelin avec handler non-authentifié)
+- `next.config.js` : ajout Content-Security-Policy header
+
+**Phase 2 — Fiabilité Edge Functions (élimination N+1 queries, crash prevention) :**
+- `calculate-scores` : batching par 500 comptes + 3 queries parallèles bulk (remplace ~1500 queries séquentielles)
+- `calculate-scores` : `scoreAccountPure()` — fonction pure sans appels DB
+- `sync-stripe` : pré-construction de Maps (`customerToAccount`, `invoiceCustomerMap`) avant boucles de pagination
+- `stripe-webhook` : comparaison MRR par subscription (plus par agrégat compte)
+- `cron-lock.ts` : distinction erreur de contention (attendue) vs erreur DB (inattendue)
+- `data-sync-logger.ts` : `fail()` wrappé en try/catch
+- `playbook-execute` : try/catch autour de la boucle d'exécution, mark 'failed' sur crash
+- `playbook-scheduler` : error check sur `updateNextSchedule`
+- `calculate-scores` : `assignSegments()` atomique (upsert + cleanup au lieu de delete + insert)
+- `playbook-crud` : `.limit(500)` sur les requêtes d'exécutions dans handleGetOne
+
+**Phase 3 — Frontend Stability :**
+- `src/middleware.ts` : refresh session Supabase sur chaque requête (sessions longues actives)
+- Error boundaries : `src/app/error.tsx`, `src/app/global-error.tsx`, `src/app/dashboard/error.tsx`
+- `src/app/dashboard/loading.tsx` : skeleton UI pendant le chargement
+- `src/lib/env.ts` : validation des variables d'environnement (remplace assertions `!`)
+- `src/app/api/sync-stripe/route.ts` : `maxDuration=60` + AbortController 55s timeout
+- `src/app/api/health/route.ts` : endpoint health check (env + connectivité DB)
+- `src/app/dashboard/page.tsx` : `.limit(10000)` + count exact pour prévenir OOM
+
+**Phase 4 — Database Hardening :**
+- Migration `20260304000001_stability_phase2_fixes.sql` : CHECK constraint sur `data_syncs.error_type`, unique constraint `segment_memberships`
+- Migration `20260304000002_stability_phase3_4.sql` : ON DELETE CASCADE sur `profiles_.organization_id` FK, CHECK constraints `playbooks.status` + `playbook_executions.execution_status`, index stuck executions
+
+**Phase 5 — CI/CD :**
+- `ci.yml` : ajout `npm audit --audit-level=high` step
+- `deploy-vercel.yml` : workflow de deploy gaté sur succès CI
+- `supabase/config.toml` : enregistrement `health-check` + `self-monitor`
+- `package.json` : `stripe` déplacé de devDependencies vers dependencies
+
+**Phase 6 — Monitoring :**
+- `self-monitor` : check #5 — auto-fail des `playbook_executions` bloquées en 'running' > 15 min
 
 ### Ops
 
