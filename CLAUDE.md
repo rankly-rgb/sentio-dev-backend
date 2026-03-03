@@ -265,6 +265,7 @@ Implémentation complète du backend playbooks : moteur, CRUD, exécution, sched
 | Module | Rôle |
 |--------|------|
 | `playbook-engine.ts` | Types, validation JSONB, évaluation de conditions, exécution d'actions (pure) |
+| `auth.ts` | Vérification JWT ES256 via supabase.auth.getUser() + résolution organization_id |
 
 **Format JSONB `actions` :**
 ```json
@@ -298,6 +299,18 @@ Opérateurs : `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`. Logique : `
 - `POST /functions/v1/playbook-execute` — Body: `{ playbook_id, organization_id, account_ids | segment_id, execution_source?, cooldown_hours? }`
 
 **V1 : actions loggées mais pas dispatchées** (pas d'appel API externe). Max 200 comptes par run. Idempotence 24h.
+
+**Auth ES256 :**
+- Supabase Auth utilise ES256 (ECDSA) pour les JWT utilisateurs
+- `verify_jwt = true` dans config.toml ne valide que HS256 → rejet des JWT utilisateurs
+- Fix : `_shared/auth.ts` vérifie le JWT via `supabase.auth.getUser()` (compatible ES256)
+- `playbook-crud` et `playbook-execute` : `verify_jwt = false` + auth dans le code
+- `playbook-scheduler` : `verify_jwt = true` (cron utilise service_role HS256)
+
+**Templates playbook :**
+- 6 templates système (is_template=true) : churn_prevention, reactivation, expansion, onboarding, renewal, winback
+- Script de seed : `scripts/seed-playbook-templates.ts` (`npx tsx scripts/seed-playbook-templates.ts <org_id>`)
+- API : `GET /playbook-crud?organization_id=X&is_template=true` pour lister les templates
 
 **Tests : 61 tests** dans `supabase/tests/playbook-engine.test.ts` (124 total).
 
