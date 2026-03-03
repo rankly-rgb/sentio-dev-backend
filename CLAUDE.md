@@ -243,7 +243,7 @@ Bug fixes critiques sur le pipeline de données + ajout de la segmentation autom
 - `20260302000001_stability_indexes.sql` : 10 index de performance (DLQ, cron_locks, data_syncs, usage_events, invoices, hubspot_companies, score_history)
 - `20260303000001_scoring_segmentation_fixes.sql` : contrainte CHECK élargie, source `scoring` dans data_syncs, seed des 8 segments système, index unique partiel `(org_id, segment_type) WHERE is_system_generated`
 
-### Tests (148 passing)
+### Tests (189 passing)
 
 - `supabase/tests/scoring.test.ts` : 48 tests (7 fonctions de scoring + 12 tests segmentation)
 - `supabase/tests/utilities.test.ts` : 15 tests (circuit breaker, retry, logger)
@@ -318,7 +318,7 @@ Opérateurs : `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`. Logique : `
 
 ### Stability Audit v2 (2026-03-04)
 
-Audit complet de stabilité sur toutes les couches (71 issues identifiées, 6 phases implémentées). 148 tests passing.
+Audit complet de stabilité sur toutes les couches (71 issues identifiées, 6 phases implémentées).
 
 **Phase 1 — Sécurité (3 failles cross-tenant critiques) :**
 - `auth.ts` : rejet des `organization_id` null (bypass authorization)
@@ -361,6 +361,40 @@ Audit complet de stabilité sur toutes les couches (71 issues identifiées, 6 ph
 
 **Phase 6 — Monitoring :**
 - `self-monitor` : check #5 — auto-fail des `playbook_executions` bloquées en 'running' > 15 min
+
+### Stability Audit v3 (2026-03-04)
+
+Renforcement post-audit v2 : 16 fichiers modifiés, 189 tests passing.
+
+**Data Integrity :**
+- `stripe-webhook` : fix TOCTOU — lecture `prevSubMrr` AVANT l'upsert subscription (corrige expansion/contraction MRR jamais détectées)
+- `stripe-webhook` : idempotency check via `event.id` dans `data_syncs` (prévention traitement en double)
+- `stripe-webhook` : `.maybeSingle()` sur `resolveOrganization` (prévention crash si aucun résultat)
+
+**Sécurité :**
+- `next.config.js` : suppression `unsafe-eval` du CSP, ajout `Permissions-Policy`, `poweredByHeader: false`
+- `dashboard/error.tsx` : affichage `error.digest` au lieu de `error.message` brut (prévention fuite d'info)
+- `global-error.tsx` : ajout `useEffect` logging avec digest
+- `auth/callback` : `decodeURIComponent` pour prévenir bypass open redirect encodé
+- `middleware.ts` : try/catch sur `auth.getUser()` avec 503 si auth service down
+
+**Frontend Resilience :**
+- `login/page.tsx` : support `?next=` redirect param avec protection open redirect + Suspense boundary pour `useSearchParams()`
+- `dashboard/page.tsx` : Suspense boundary autour de `SyncStatus`, `.maybeSingle()` pour profiles
+- `client.ts` : pattern singleton pour prévenir instances multiples de Supabase
+- `middleware.ts` : `?? ''` fallback au lieu d'assertions `!` sur env vars
+
+**Infrastructure :**
+- `self-monitor` : ajout `acquireCronLock`/`releaseCronLock` (prévention exécutions concurrentes)
+- `self-monitor` : `.maybeSingle()` sur score_history (prévention crash si vide)
+- `calculate-scores` : `MAX_BATCHES=200` guard + `.limit(50000)` sur usage_events
+- `playbook-scheduler` : `.limit(50)` sur requête playbooks planifiés
+- `playbook-execute` : enforcement `auth.organizationId` (prévention cross-tenant)
+- `sync-stripe/route.ts` : `.maybeSingle()` pour profiles query
+
+**CI/CD :**
+- `ci.yml` : suppression `|| true` sur `npm audit` (audit bloquant), lint avant tests
+- `server.ts` : correction commentaire eslint-disable
 
 ### Ops
 
