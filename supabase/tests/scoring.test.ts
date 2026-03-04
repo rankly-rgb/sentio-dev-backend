@@ -25,13 +25,15 @@ describe('calcUsageScore', () => {
     days_active: 0,
   }
 
-  it('returns 0 for zero events', () => {
-    expect(calcUsageScore(emptyStats)).toBe(0)
+  it('returns 50 (neutral) for zero events', () => {
+    expect(calcUsageScore(emptyStats)).toBe(50)
   })
 
-  it('returns > 0 for non-zero events', () => {
+  it('returns calculated score (not neutral default) for non-zero events', () => {
     const stats: UsageStats = { ...emptyStats, total_events: 10, days_active: 5, distinct_features: 3 }
-    expect(calcUsageScore(stats)).toBeGreaterThan(0)
+    const score = calcUsageScore(stats)
+    expect(score).toBeGreaterThan(0)
+    expect(score).not.toBe(50) // Not the neutral default
   })
 
   it('returns high score for max activity', () => {
@@ -104,35 +106,43 @@ describe('calcEngagementScore', () => {
     expect(calcEngagementScore(null)).toBe(50)
   })
 
-  it('adds 30 for NPS >= 9 (promoter)', () => {
-    const hubspot: HubspotData = { nps_score: 10, open_ticket_count: null, open_deal_count: null, last_meeting_date: null }
-    expect(calcEngagementScore(hubspot)).toBe(80)
-  })
-
-  it('adds 15 for NPS >= 7', () => {
-    const hubspot: HubspotData = { nps_score: 7, open_ticket_count: null, open_deal_count: null, last_meeting_date: null }
+  it('adds 15 for zero open tickets', () => {
+    const hubspot: HubspotData = { nps_score: null, open_ticket_count: 0, open_deal_count: null, last_meeting_date: null }
     expect(calcEngagementScore(hubspot)).toBe(65)
   })
 
-  it('subtracts 20 for NPS < 5 (detractor)', () => {
-    const hubspot: HubspotData = { nps_score: 3, open_ticket_count: null, open_deal_count: null, last_meeting_date: null }
-    expect(calcEngagementScore(hubspot)).toBe(30)
+  it('subtracts 5 for 1-2 open tickets', () => {
+    const hubspot: HubspotData = { nps_score: null, open_ticket_count: 2, open_deal_count: null, last_meeting_date: null }
+    expect(calcEngagementScore(hubspot)).toBe(45)
   })
 
-  it('adds 10 for zero open tickets', () => {
-    const hubspot: HubspotData = { nps_score: null, open_ticket_count: 0, open_deal_count: null, last_meeting_date: null }
+  it('subtracts 25 for 3+ open tickets', () => {
+    const hubspot: HubspotData = { nps_score: null, open_ticket_count: 5, open_deal_count: null, last_meeting_date: null }
+    expect(calcEngagementScore(hubspot)).toBe(25)
+  })
+
+  it('adds 25 for meeting < 30 days ago', () => {
+    const recent = new Date(Date.now() - 10 * 86400000).toISOString().split('T')[0]
+    const hubspot: HubspotData = { nps_score: null, open_ticket_count: null, open_deal_count: null, last_meeting_date: recent }
+    expect(calcEngagementScore(hubspot)).toBe(75)
+  })
+
+  it('adds 10 for meeting 30-60 days ago', () => {
+    const mid = new Date(Date.now() - 45 * 86400000).toISOString().split('T')[0]
+    const hubspot: HubspotData = { nps_score: null, open_ticket_count: null, open_deal_count: null, last_meeting_date: mid }
     expect(calcEngagementScore(hubspot)).toBe(60)
   })
 
-  it('subtracts 15 for 3+ open tickets', () => {
-    const hubspot: HubspotData = { nps_score: null, open_ticket_count: 5, open_deal_count: null, last_meeting_date: null }
+  it('subtracts 15 for meeting > 90 days ago', () => {
+    const old = new Date(Date.now() - 120 * 86400000).toISOString().split('T')[0]
+    const hubspot: HubspotData = { nps_score: null, open_ticket_count: null, open_deal_count: null, last_meeting_date: old }
     expect(calcEngagementScore(hubspot)).toBe(35)
   })
 
   it('is clamped between 0 and 100', () => {
-    // Worst case: NPS<5 (-20) + 3+ tickets (-15) + no recent meeting (-10) = 50-20-15-10 = 5
+    // Worst case: 3+ tickets (-25) + meeting > 180 days (-25) = 50-25-25 = 0
     const hubspot: HubspotData = {
-      nps_score: 1,
+      nps_score: null,
       open_ticket_count: 10,
       open_deal_count: null,
       last_meeting_date: '2020-01-01',

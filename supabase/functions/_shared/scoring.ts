@@ -32,7 +32,7 @@ export interface InvoiceStatus {
 
 // ── Calcul Usage Score (35%) ──────────────────────────────────
 export function calcUsageScore(stats: UsageStats): number {
-  if (stats.total_events === 0) return 0
+  if (stats.total_events === 0) return 50  // Neutre quand pas de données (cohérent avec engagement/contrat)
 
   const activityScore = Math.min(100, (stats.days_active / 30) * 100)
   const featureScore = Math.min(100, (stats.distinct_features / 10) * 100)
@@ -59,29 +59,28 @@ export function calcFinancialScore(
 }
 
 // ── Calcul Engagement Score (20%) ─────────────────────────────
+// V1 : basé sur tickets + meetings (NPS prévu en V2)
 export function calcEngagementScore(hubspot: HubspotData | null): number {
   if (!hubspot) return 50
 
   let score = 50
 
-  if (hubspot.nps_score !== null) {
-    if (hubspot.nps_score >= 9) score += 30
-    else if (hubspot.nps_score >= 7) score += 15
-    else if (hubspot.nps_score >= 5) score += 0
-    else score -= 20
-  }
-
+  // Tickets support : 0 = bon signe, 3+ = alerte (±25 pts)
   if (hubspot.open_ticket_count !== null) {
-    if (hubspot.open_ticket_count === 0) score += 10
-    else if (hubspot.open_ticket_count >= 3) score -= 15
+    if (hubspot.open_ticket_count === 0) score += 15
+    else if (hubspot.open_ticket_count <= 2) score -= 5
+    else if (hubspot.open_ticket_count >= 3) score -= 25
   }
 
+  // Dernière réunion : récente = engagé, ancienne = désengagé (±25 pts)
   if (hubspot.last_meeting_date) {
     const daysSince = Math.floor(
       (Date.now() - new Date(hubspot.last_meeting_date).getTime()) / 86400000,
     )
-    if (daysSince < 30) score += 10
-    else if (daysSince > 90) score -= 10
+    if (daysSince < 30) score += 25
+    else if (daysSince < 60) score += 10
+    else if (daysSince > 90) score -= 15
+    else if (daysSince > 180) score -= 25
   }
 
   return Math.round(Math.max(0, Math.min(100, score)) * 100) / 100
