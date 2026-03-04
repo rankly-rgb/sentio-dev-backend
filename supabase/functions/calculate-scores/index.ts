@@ -43,6 +43,9 @@ interface ScoreResult {
   churn_risk_score: number
   expansion_score: number
   product_usage_score: number
+  financial_score: number
+  engagement_score: number
+  contract_score: number
 }
 
 // ── Segment definitions (mirrored in migration) ─────────────
@@ -219,6 +222,9 @@ function scoreAccountPure(
     churn_risk_score: Math.max(0, Math.min(100, churnRiskScore)),
     expansion_score: Math.max(0, Math.min(100, expansionScore)),
     product_usage_score: Math.max(0, Math.min(100, usageScore)),
+    financial_score: Math.max(0, Math.min(100, financialScore)),
+    engagement_score: Math.max(0, Math.min(100, engagementScore)),
+    contract_score: Math.max(0, Math.min(100, contractScore)),
     invoiceStatus,
     daysActive: usage.days_active,
   }
@@ -477,6 +483,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 churn_risk_score: result.churn_risk_score,
                 expansion_score: result.expansion_score,
                 product_usage_score: result.product_usage_score,
+                financial_score: result.financial_score,
+                engagement_score: result.engagement_score,
+                contract_score: result.contract_score,
               }
 
               accountScores.set(account.id, scores)
@@ -490,6 +499,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 churn_risk_score: scores.churn_risk_score,
                 expansion_score: scores.expansion_score,
                 product_usage_score: scores.product_usage_score,
+                financial_score: scores.financial_score,
+                engagement_score: scores.engagement_score,
+                contract_score: scores.contract_score,
                 mrr_cents: account.mrr_cents ?? 0,
               })
 
@@ -501,6 +513,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
                   churn_risk_score: scores.churn_risk_score,
                   expansion_score: scores.expansion_score,
                   product_usage_score: scores.product_usage_score,
+                  financial_score: scores.financial_score,
+                  engagement_score: scores.engagement_score,
+                  contract_score: scores.contract_score,
                   scores_calculated_at: new Date().toISOString(),
                 })
                 .eq('id', account.id)
