@@ -117,7 +117,9 @@ function buildInsightInput(
   }
 }
 
-// ── Upsert new insights + auto-resolve stale ones ────────────
+// ── Sync insights: create/update/auto-resolve ────────────────
+// Note: PostgREST upsert does NOT support partial unique indexes,
+// so we use manual select → insert/update instead.
 async function syncInsights(
   supabase: SupabaseClient,
   organizationId: string,
@@ -131,12 +133,55 @@ async function syncInsights(
   // Active insight types produced by rules
   const activeTypes = new Set(candidates.map((c) => c.insight_type))
 
-  // Upsert each candidate (dedup via unique partial index)
+  // Fetch existing active insights for this account
+  const { data: existingInsights } = await supabase
+    .from('ai_insights')
+    .select('id, insight_type')
+    .eq('organization_id', organizationId)
+    .eq('account_id', accountId)
+    .eq('status', 'active')
+
+  const existingByType = new Map<string, string>()
+  for (const ins of existingInsights ?? []) {
+    existingByType.set(ins.insight_type, ins.id)
+  }
+
+  // For each candidate: update if active insight exists, insert otherwise
   for (const candidate of candidates) {
-    const { error } = await supabase
-      .from('ai_insights')
-      .upsert(
-        {
+    const existingId = existingByType.get(candidate.insight_type)
+
+    if (existingId) {
+      // Update existing active insight with fresh data
+      const { error } = await supabase
+        .from('ai_insights')
+        .update({
+          title: candidate.title,
+          description: candidate.description,
+          recommended_action: candidate.recommended_action,
+          priority: candidate.priority,
+          confidence_score: candidate.confidence_score,
+          mrr_impact_cents: candidate.mrr_impact_cents,
+          source_scores: candidate.source_scores,
+          ai_model_version: 'rules-v1',
+        })
+        .eq('id', existingId)
+
+      if (error) {
+        console.error(JSON.stringify({
+          level: 'error',
+          function_name: 'generate-insights',
+          organization_id: organizationId,
+          account_id: accountId,
+          message: `insight update failed (${candidate.insight_type}): ${error.message}`,
+        }))
+      } else {
+        created++ // counted as "processed" even if updated
+      }
+    } else {
+      // Insert new insight
+      const { error } = await supabase
+        .from('ai_insights')
+        .insert({
           organization_id: organizationId,
           account_id: accountId,
           insight_type: candidate.insight_type,
@@ -149,38 +194,28 @@ async function syncInsights(
           source_scores: candidate.source_scores,
           status: 'active',
           ai_model_version: 'rules-v1',
-        },
-        {
-          onConflict: 'organization_id,account_id,insight_type',
-          ignoreDuplicates: false,
-        },
-      )
+        })
 
-    if (error) {
-      console.error(JSON.stringify({
-        level: 'error',
-        function_name: 'generate-insights',
-        organization_id: organizationId,
-        account_id: accountId,
-        message: `insight upsert failed (${candidate.insight_type}): ${error.message}`,
-      }))
-    } else {
-      created++
+      if (error) {
+        console.error(JSON.stringify({
+          level: 'error',
+          function_name: 'generate-insights',
+          organization_id: organizationId,
+          account_id: accountId,
+          message: `insight insert failed (${candidate.insight_type}): ${error.message}`,
+        }))
+      } else {
+        created++
+      }
     }
   }
 
   // Auto-resolve active insights whose condition has disappeared
-  const { data: activeInsights } = await supabase
-    .from('ai_insights')
-    .select('id, insight_type')
-    .eq('organization_id', organizationId)
-    .eq('account_id', accountId)
-    .eq('status', 'active')
+  const toResolve = (existingInsights ?? []).filter(
+    (ins: { insight_type: string }) => !activeTypes.has(ins.insight_type as InsightCandidate['insight_type']),
+  )
 
-  if (activeInsights) {
-    const toResolve = activeInsights.filter(
-      (ins: { insight_type: string }) => !activeTypes.has(ins.insight_type as InsightCandidate['insight_type']),
-    )
+  if (toResolve.length > 0) {
 
     for (const ins of toResolve) {
       const { error } = await supabase
