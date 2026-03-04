@@ -42,6 +42,14 @@ verify_jwt = false
 [functions.workflow-step-processor]
 verify_jwt = true
 
+# generate-insights : cron (service_role HS256, génération quotidienne d'insights)
+[functions.generate-insights]
+verify_jwt = true
+
+# insights-crud : JWT vérifié dans le code (ES256 incompatible avec verify_jwt)
+[functions.insights-crud]
+verify_jwt = false
+
 # self-monitor : cron interne (service_role HS256)
 [functions.self-monitor]
 verify_jwt = true

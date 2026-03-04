@@ -500,6 +500,47 @@ Tests : 190 passing (aucune régression).
 - 50 companies disponibles, données d'engagement très pauvres (pas de NPS, pas de tickets, 1 seule avec meetings)
 - Propriétés exploitables : `hs_num_open_deals`, `hs_last_booked_meeting_date`, `hs_last_logged_outgoing_email_date`, `lifecyclestage`
 
+### AI Insights Backend v1 (2026-03-05)
+
+Implémentation complète du moteur de génération d'insights IA + API CRUD.
+
+**Edge Functions :**
+
+| Fonction | Trigger | Rôle |
+|----------|---------|------|
+| `generate-insights` | POST (cron) | Génère quotidiennement les insights basés sur les scores |
+| `insights-crud` | REST (JWT) | API CRUD insights (GET list/detail/stats, PATCH statut) |
+
+**Shared Utility :**
+
+| Module | Rôle |
+|--------|------|
+| `insight-rules.ts` | Règles de génération pures (5 types d'insights, 100% testable) |
+
+**5 types d'insights (rules-v1) :**
+
+| Type | Condition | Priority |
+|------|-----------|----------|
+| `churn_prediction` | churn_risk >= 70 | critical (>=85), high |
+| `expansion_opportunity` | expansion >= 70 AND health >= 60 | high (>=85), medium |
+| `renewal_alert` | contract_end_date < 60j | critical (<30j), high |
+| `payment_risk` | overdue > 15j | critical (>30j), high |
+| `usage_drop` | usage drop > 30% sur 14j | high (>50%), medium |
+
+**Déduplication :** Index unique partiel `(org_id, account_id, insight_type) WHERE status = 'active'` — 1 seul insight actif par type par account.
+
+**Auto-résolution :** Si la condition a disparu (ex: churn_risk redescendu < 50), l'insight est auto-résolu (status='resolved').
+
+**API insights-crud :**
+- `GET /functions/v1/insights-crud` — Liste paginée (filtres: insight_type, priority, status, account_id, sort, page, per_page)
+- `GET /functions/v1/insights-crud?id=X` — Détail
+- `GET /functions/v1/insights-crud?stats=true` — Compteurs agrégés (par type/priority/status + total MRR impact)
+- `PATCH /functions/v1/insights-crud?id=X` — Transition statut (active→acknowledged→resolved/dismissed)
+
+**Migration :** `20260305000003_insights_improvements.sql` — FK CASCADE, index déduplication, colonne `source_scores` JSONB
+
+**Tests :** ~40 tests dans `supabase/tests/insight-rules.test.ts`
+
 ## Layout du repo
 
 - `/src` — code applicatif Next.js
