@@ -71,6 +71,10 @@ Churn Risk = 100 - Health Score + facteurs de risque additifs (capped 100)
 Expansion Score = (seat_usage_pct × 60%) + (feature_ceiling × 40%)
 ```
 
+**Valeurs neutres (pas de données = 50)** : Usage, Engagement, Contrat retournent 50 quand aucune donnée n'est disponible. Financial retourne 0 (pas de MRR = pas de revenus).
+
+**Engagement V1** : basé sur tickets support (±25 pts) + dernière réunion (±25 pts). NPS retiré du V1 (prévu V2).
+
 ## Segments SaaS B2B
 
 Champions, En expansion, Stables, À risque léger, En danger critique, Impayés, En churn, Nouveaux (< 90j).
@@ -243,9 +247,9 @@ Bug fixes critiques sur le pipeline de données + ajout de la segmentation autom
 - `20260302000001_stability_indexes.sql` : 10 index de performance (DLQ, cron_locks, data_syncs, usage_events, invoices, hubspot_companies, score_history)
 - `20260303000001_scoring_segmentation_fixes.sql` : contrainte CHECK élargie, source `scoring` dans data_syncs, seed des 8 segments système, index unique partiel `(org_id, segment_type) WHERE is_system_generated`
 
-### Tests (189 passing)
+### Tests (190 passing)
 
-- `supabase/tests/scoring.test.ts` : 48 tests (7 fonctions de scoring + 12 tests segmentation)
+- `supabase/tests/scoring.test.ts` : 49 tests (7 fonctions de scoring + 12 tests segmentation)
 - `supabase/tests/utilities.test.ts` : 15 tests (circuit breaker, retry, logger)
 - `supabase/tests/playbook-engine.test.ts` : 61 tests (types, validation, conditions, actions)
 - `supabase/tests/admin-proxy.test.ts` : 24 tests (auth, routing, validation)
@@ -400,6 +404,54 @@ Renforcement post-audit v2 : 16 fichiers modifiés, 189 tests passing.
 
 - `docs/RUNBOOK.md` : 6 procédures d'incident + seuils d'alerte
 - CI gating : `deploy-vercel.yml` attend succès CI avant deploy
+
+### Scoring Audit V1 (2026-03-04)
+
+Audit du pipeline de scoring santé lors de l'ouverture d'un compte client.
+
+**Problèmes identifiés :**
+- Sous-scores `financial_score`, `engagement_score`, `contract_score` calculés mais non persistés (seul `product_usage_score` est stocké)
+- `calcUsageScore` retournait 0 quand pas de données (punitif), contrairement à engagement/contrat (50, neutre)
+- `calcEngagementScore` dépendait de `nps_score` — donnée indisponible en V1 (pas de collecte NPS)
+- Pas de fonction `sync-hubspot` — table `hubspot_companies` toujours vide
+- `stripe-webhook` ne propage pas `contract_end_date` vers `accounts` (seulement `sync-stripe` le fait)
+
+**Corrections appliquées :**
+- `calcUsageScore` : retourne 50 (neutre) quand `total_events = 0`, cohérent avec engagement et contrat
+- `calcEngagementScore` : NPS supprimé du V1 (roadmap V2), poids redistribué sur tickets (±25 pts) et meetings (±25 pts)
+- Tests mis à jour (190 passing)
+
+**Valeurs neutres par sous-score (pas de données) :**
+
+| Sous-score | Valeur neutre | Raison |
+|-----------|--------------|--------|
+| Usage | 50 | Pas de tracking produit = neutre |
+| Financial | 0 | Pas de MRR = pas de revenus |
+| Engagement | 50 | Pas de HubSpot = neutre |
+| Contrat | 50 | Pas de date contrat = neutre |
+
+**Engagement V1 (sans NPS) :**
+
+| Signal | Pts |
+|--------|-----|
+| 0 tickets | +15 |
+| 1-2 tickets | -5 |
+| 3+ tickets | -25 |
+| Meeting < 30j | +25 |
+| Meeting 30-60j | +10 |
+| Meeting > 90j | -15 |
+| Meeting > 180j | -25 |
+
+**Reste à faire (backlog) :**
+- Persister les 3 sous-scores manquants (`financial_score`, `engagement_score`, `contract_score`)
+- Créer `sync-hubspot` Edge Function
+- Propager `contract_end_date` dans `stripe-webhook`
+- NPS : collecte + intégration scoring (V2)
+
+**HubSpot API :**
+- Token `pat-eu` (Private App Token EU) fonctionnel via `api.hubapi.com`
+- 50 companies disponibles, données d'engagement très pauvres (pas de NPS, pas de tickets, 1 seule avec meetings)
+- Propriétés exploitables : `hs_num_open_deals`, `hs_last_booked_meeting_date`, `hs_last_logged_outgoing_email_date`, `lifecyclestage`
 
 ## Layout du repo
 
