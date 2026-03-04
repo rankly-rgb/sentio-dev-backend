@@ -174,13 +174,26 @@ function KpiCard({ label, value, description, variant = 'neutral' }: KpiCardProp
 }
 
 async function SyncStatus({ organizationId }: { organizationId: string }) {
-  const supabase = createSupabaseServerClient()
-  const { data: syncs } = await supabase
-    .from('data_syncs')
-    .select('sync_source, sync_type, sync_status, completed_at, records_processed')
-    .eq('organization_id', organizationId)
-    .order('created_at', { ascending: false })
-    .limit(5)
+  let syncs
+  try {
+    const supabase = createSupabaseServerClient()
+    const { data, error } = await supabase
+      .from('data_syncs')
+      .select('sync_source, sync_type, sync_status, completed_at, records_processed')
+      .eq('organization_id', organizationId)
+      .order('created_at', { ascending: false })
+      .limit(5)
+
+    if (error) throw error
+    syncs = data
+  } catch (err) {
+    console.error('[SyncStatus]', err)
+    return (
+      <p className="text-sm text-slate-400">
+        Impossible de charger les synchronisations.
+      </p>
+    )
+  }
 
   if (!syncs?.length) {
     return (

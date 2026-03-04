@@ -312,7 +312,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
     await alertSlack(`playbook-scheduler: global failure: ${msg}`, { level: 'critical' })
     return errorResponse(`Scheduler failed: ${msg}`, 500)
   } finally {
-    await releaseCronLock(supabase, LOCK_KEY)
+    try {
+      await releaseCronLock(supabase, LOCK_KEY)
+    } catch (lockErr) {
+      console.error(JSON.stringify({
+        level: 'error',
+        function_name: LOCK_KEY,
+        message: `Failed to release cron lock: ${lockErr instanceof Error ? lockErr.message : String(lockErr)}`,
+      }))
+    }
   }
 })
 

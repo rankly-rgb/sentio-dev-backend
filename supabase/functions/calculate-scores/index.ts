@@ -420,9 +420,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
           .eq('organization_id', organizationId)
           .order('mrr_cents', { ascending: false })
           .limit(1)
-          .single()
+          .maybeSingle()
 
-        const maxMrrCents = maxMrrRow?.mrr_cents ?? 1
+        const maxMrrCents = maxMrrRow?.mrr_cents || 1
 
         // Scorer les accounts par batch paginé (évite OOM et timeout N+1)
         const accountScores = new Map<string, ScoreResult>()

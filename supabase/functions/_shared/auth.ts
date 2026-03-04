@@ -31,15 +31,26 @@ export async function verifyUserAuth(req: Request): Promise<AuthResult> {
   }
 
   // Create a client with the user's token to verify it
-  const supabase = createClient(url, anonKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  })
+  let supabase
+  try {
+    supabase = createClient(url, anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: { headers: { Authorization: `Bearer ${token}` } },
+    })
+  } catch {
+    throw new AuthError('Auth service configuration error', 500)
+  }
 
-  const { data: { user }, error } = await supabase.auth.getUser(token)
-
-  if (error || !user) {
-    throw new AuthError('Invalid or expired token', 401)
+  let user
+  try {
+    const { data, error } = await supabase.auth.getUser(token)
+    if (error || !data.user) {
+      throw new AuthError('Invalid or expired token', 401)
+    }
+    user = data.user
+  } catch (err) {
+    if (err instanceof AuthError) throw err
+    throw new AuthError('Auth service unavailable', 503)
   }
 
   // Resolve organization_id from profiles_
@@ -47,7 +58,7 @@ export async function verifyUserAuth(req: Request): Promise<AuthResult> {
     .from('profiles_')
     .select('organization_id')
     .eq('auth_user_id', user.id)
-    .single()
+    .maybeSingle()
 
   if (profileError || !profile?.organization_id) {
     throw new AuthError('User has no associated organization', 403)

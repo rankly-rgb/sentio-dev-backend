@@ -478,10 +478,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq('sync_status', 'completed')
       .order('completed_at', { ascending: false })
       .limit(1)
-      .single()
+      .maybeSingle()
 
     if (lastSync?.completed_at) {
-      createdAfter = Math.floor(new Date(lastSync.completed_at).getTime() / 1000) - 3600 // -1h de marge
+      const lastSyncMs = new Date(lastSync.completed_at).getTime()
+      // Guard against future timestamps or invalid dates
+      if (lastSyncMs > 0 && lastSyncMs <= Date.now()) {
+        createdAfter = Math.floor(lastSyncMs / 1000) - 3600 // -1h de marge
+      } else {
+        console.warn(JSON.stringify({
+          level: 'warn',
+          function_name: 'sync-stripe',
+          message: `Invalid lastSync timestamp: ${lastSync.completed_at}, falling back to full sync`,
+        }))
+      }
     }
   }
 

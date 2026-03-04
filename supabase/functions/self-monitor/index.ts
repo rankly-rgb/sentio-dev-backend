@@ -206,7 +206,34 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }))
   }
 
-  // 6. Check recent sync failures
+  // 6. Clean old DLQ entries (> 30 days)
+  try {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+    const { data: oldDlq } = await supabase
+      .from('webhook_dead_letter')
+      .select('id')
+      .lt('created_at', thirtyDaysAgo)
+      .limit(500)
+
+    if (oldDlq && oldDlq.length > 0) {
+      const ids = oldDlq.map((d: { id: string }) => d.id)
+      await supabase
+        .from('webhook_dead_letter')
+        .delete()
+        .in('id', ids)
+
+      actions.push(`Cleaned ${oldDlq.length} old DLQ entries (> 30 days)`)
+    }
+  } catch (err) {
+    console.error(JSON.stringify({
+      level: 'error',
+      function_name: 'self-monitor',
+      message: 'Failed to clean old DLQ entries',
+      error: err instanceof Error ? err.message : String(err),
+    }))
+  }
+
+  // 7. Check recent sync failures
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
     const { data: recentFailures } = await supabase
@@ -239,7 +266,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   } finally {
-    await releaseCronLock(supabase, 'self-monitor')
+    try {
+      await releaseCronLock(supabase, 'self-monitor')
+    } catch (lockErr) {
+      console.error(JSON.stringify({
+        level: 'error',
+        function_name: 'self-monitor',
+        message: `Failed to release cron lock: ${lockErr instanceof Error ? lockErr.message : String(lockErr)}`,
+      }))
+    }
   }
 
   return jsonResponse({

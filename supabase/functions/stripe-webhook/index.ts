@@ -137,7 +137,7 @@ async function handleSubscriptionEvent(
     .select('id, mrr_cents')
     .eq('organization_id', organizationId)
     .eq('stripe_customer_id', sub.customer)
-    .single()
+    .maybeSingle()
 
   if (!accountRow) {
     console.warn('[stripe-webhook] account not found for customer', sub.customer)
@@ -268,7 +268,7 @@ async function handleInvoiceEvent(
     .select('id')
     .eq('organization_id', organizationId)
     .eq('stripe_customer_id', invoice.customer)
-    .single()
+    .maybeSingle()
 
   if (!accountRow) return
 
@@ -279,7 +279,7 @@ async function handleInvoiceEvent(
       .from('subscriptions')
       .select('id')
       .eq('stripe_sub_id', invoice.subscription)
-      .single()
+      .maybeSingle()
     subscriptionId = subRow?.id ?? null
   }
 
@@ -452,7 +452,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .from('accounts')
         .select('organization_id')
         .eq('stripe_customer_id', obj.customer)
-        .single()
+        .maybeSingle()
       organizationId = data?.organization_id ?? null
     }
     // Fallback ultime : prendre la première org active (environnement single-tenant ou dev)
@@ -463,7 +463,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .eq('is_active', true)
         .order('created_at', { ascending: true })
         .limit(1)
-        .single()
+        .maybeSingle()
       organizationId = data?.id ?? null
     }
   }

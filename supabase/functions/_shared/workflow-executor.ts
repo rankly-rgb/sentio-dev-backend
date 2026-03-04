@@ -120,7 +120,10 @@ export function interpolateTemplate(
   // {{account.field}} — champs generiques
   result = result.replace(/\{\{account\.(\w+)\}\}/g, function(_match, field) {
     const value = accountRecord[field]
-    if (value === null || value === undefined) return ''
+    if (value === null || value === undefined) {
+      console.warn(`[workflow-executor] Missing account field in template: ${field}`)
+      return ''
+    }
     return String(value)
   })
 

@@ -24,7 +24,24 @@ export async function POST() {
     return NextResponse.json({ error: 'Aucune organisation' }, { status: 403 })
   }
 
-  // 3. Appeler l'Edge Function sync-stripe via service role
+  // 3. Rate limit: 60s cooldown between syncs per org
+  const { data: lastSync } = await supabase
+    .from('data_syncs')
+    .select('created_at')
+    .eq('organization_id', profile.organization_id)
+    .eq('sync_source', 'stripe')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (lastSync?.created_at && Date.now() - new Date(lastSync.created_at).getTime() < 60_000) {
+    return NextResponse.json(
+      { error: 'Sync trop fréquent. Attendez 1 minute entre chaque synchronisation.' },
+      { status: 429 },
+    )
+  }
+
+  // 4. Appeler l'Edge Function sync-stripe via service role
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!supabaseUrl || !serviceKey) {
