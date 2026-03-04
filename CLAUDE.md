@@ -541,6 +541,26 @@ Implémentation complète du moteur de génération d'insights IA + API CRUD.
 
 **Tests :** ~40 tests dans `supabase/tests/insight-rules.test.ts`
 
+### Auth Session Stability (2026-03-04)
+
+Fix de la perte de session client après ~1 minute d'inactivité de navigation.
+
+**Cause racine :**
+- Aucun listener `onAuthStateChange` côté client — le token JWT expirait silencieusement
+- Le middleware ne rafraîchit la session que sur navigation (route change), pas pendant l'inactivité
+- Les Server Components continuaient de rendre avec un cookie périmé → erreurs 401 → écran blanc
+
+**Correction :**
+- `src/components/AuthListener.tsx` : composant client monté au root (`layout.tsx`) qui écoute `onAuthStateChange`
+  - `TOKEN_REFRESHED` → `router.refresh()` (force les Server Components à re-fetcher avec le nouveau cookie)
+  - `SIGNED_OUT` → `router.refresh()` + redirect `/auth/login`
+- `src/app/layout.tsx` : `<AuthListener />` monté dans le `<body>`
+
+**Comportement attendu :**
+- `createBrowserClient` (@supabase/ssr) auto-refresh le JWT avant expiration (par défaut)
+- Le listener détecte le refresh et synchronise les cookies serveur via `router.refresh()`
+- Le middleware reste actif comme filet de sécurité sur les navigations
+
 ## Layout du repo
 
 - `/src` — code applicatif Next.js
