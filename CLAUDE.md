@@ -400,6 +400,29 @@ Renforcement post-audit v2 : 16 fichiers modifiés, 189 tests passing.
 - `ci.yml` : suppression `|| true` sur `npm audit` (audit bloquant), lint avant tests
 - `server.ts` : correction commentaire eslint-disable
 
+### Stability Audit v4 (2026-03-04)
+
+Renforcement post-audit v3 : 10 fichiers modifiés, 190 tests passing.
+
+**Batch A — Data Integrity :**
+- `stripe-webhook` : tous les `.single()` restants → `.maybeSingle()` (handleSubscriptionEvent account lookup, handleInvoiceEvent account + subscription lookups, entrypoint fallback queries)
+- `sync-stripe` : lastSync query `.single()` → `.maybeSingle()`, validation timestamp avant arithmétique (guard dates futures/invalides)
+- `calculate-scores` : maxMrrRow `.single()` → `.maybeSingle()`, `?? 1` → `|| 1` pour maxMrrCents (gère cas 0)
+
+**Batch B — Crash Prevention :**
+- `auth.ts` : try/catch séparés sur `createClient` (500) et `getUser` (503 si service down), profiles query `.maybeSingle()`
+- `playbook-scheduler` : `releaseCronLock` wrappé try/catch dans finally (prévention lock permanent si DB error)
+- `self-monitor` : même safety wrapper `releaseCronLock`
+
+**Batch C — Frontend Resilience :**
+- `RefreshDataButton` : AbortController + 65s timeout, try/catch sur `resp.json()`, auto-clear résultat 5s via useEffect, distinction erreur abort, aria-label, focus ring
+- `SyncStatus` : try/catch avec fallback UI (graceful degradation)
+- `sync-stripe/route.ts` : rate limit 60s par org (query `data_syncs` avant appel Edge Function), réponse 429
+
+**Batch D — Housekeeping :**
+- `self-monitor` : check #6 — nettoyage DLQ > 30 jours (batch delete `.limit(500)`)
+- `workflow-executor` : `console.warn` sur champs template manquants (observabilité interpolation)
+
 ### Ops
 
 - `docs/RUNBOOK.md` : 6 procédures d'incident + seuils d'alerte
