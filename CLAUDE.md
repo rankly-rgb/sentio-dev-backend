@@ -466,10 +466,34 @@ Audit du pipeline de scoring santé lors de l'ouverture d'un compte client.
 | Meeting > 180j | -25 |
 
 **Reste à faire (backlog) :**
-- Persister les 3 sous-scores manquants (`financial_score`, `engagement_score`, `contract_score`)
 - Créer `sync-hubspot` Edge Function
 - Propager `contract_end_date` dans `stripe-webhook`
 - NPS : collecte + intégration scoring (V2)
+
+### Scoring Sub-Scores Persistence (2026-03-05)
+
+Complétion de la décomposition du score de santé : les 3 sous-scores manquants sont désormais persistés.
+
+**Cause racine :**
+- `financial_score`, `engagement_score`, `contract_score` étaient calculés dans `scoreAccountPure()` mais jetés — seul `product_usage_score` était retourné et stocké
+- Les colonnes n'existaient pas dans les tables `accounts` et `score_history`
+
+**Corrections appliquées :**
+- Migration `20260305000002_add_subscores_columns.sql` : ajout `financial_score`, `engagement_score`, `contract_score` (NUMERIC 5,2, nullable, CHECK 0-100) aux tables `accounts` et `score_history`
+- `calculate-scores/index.ts` : `ScoreResult` étendu avec les 3 champs
+- `calculate-scores/index.ts` : `scoreAccountPure()` retourne les 3 sous-scores
+- `calculate-scores/index.ts` : upsert `score_history` + update `accounts` incluent les 3 sous-scores
+
+**Sous-scores persistés (complet) :**
+
+| Colonne | Table `accounts` | Table `score_history` | Statut |
+|---------|-----------------|----------------------|--------|
+| `product_usage_score` | Oui | Oui | Existait |
+| `financial_score` | Oui | Oui | **Ajouté** |
+| `engagement_score` | Oui | Oui | **Ajouté** |
+| `contract_score` | Oui | Oui | **Ajouté** |
+
+Tests : 190 passing (aucune régression).
 
 **HubSpot API :**
 - Token `pat-eu` (Private App Token EU) fonctionnel via `api.hubapi.com`
