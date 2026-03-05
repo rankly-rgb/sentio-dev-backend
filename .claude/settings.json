@@ -5,7 +5,13 @@
       "Bash(claude plugin marketplace add:*)",
       "Bash(claude plugin marketplace list)",
       "Bash(claude plugin:*)",
-      "Bash(TMPDIR=/home/codespace/.claude/tmp claude plugin install playwright-skill@playwright-skill)"
+      "Bash(TMPDIR=/home/codespace/.claude/tmp claude plugin install playwright-skill@playwright-skill)",
+      "Bash(git pull:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(npm run:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }
