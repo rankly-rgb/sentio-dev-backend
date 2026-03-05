@@ -191,6 +191,32 @@ Migration `20260305000002_add_subscores_columns.sql` : ajout `financial_score`, 
 
 ---
 
+## UI Freeze Instrumentation (2026-03-05)
+
+Ajout d'instrumentation temporaire (`// TEMP DEBUG`) pour rendre les freezes UI intermittents visibles et traçables. Préfixe uniforme `[SENTIO_DEBUG]` pour filtrage console/logs Vercel.
+
+**Nouveau composant :**
+- `src/components/GlobalErrorCatcher.tsx` — `'use client'`, monté dans root layout. Capture :
+  - `window.unhandledrejection` → promesses rejetées silencieuses
+  - `window.error` → erreurs non captées par React
+  - `PerformanceObserver('longtask')` → tâches bloquantes > 50ms
+
+**Error boundaries enrichis :**
+- `global-error.tsx`, `error.tsx`, `dashboard/error.tsx` : log structuré avec `message`, `stack`, `digest`, `timestamp`, `url` (au lieu du digest seul)
+
+**Logs aux points critiques :**
+
+| Fichier | Point instrumenté | Signal |
+|---------|-------------------|--------|
+| `AuthListener.tsx` | mount/unmount + `onAuthStateChange` | Boucles de refresh token, déconnexions inattendues |
+| `RefreshDataButton.tsx` | fetch start/end/error | Appels API lents ou échoués avec `duration_ms` |
+| `middleware.ts` | `getUser()` | Auth lent (> 2s) ou erreur auth service |
+| `dashboard/page.tsx` | Query `accounts` | Durée query côté serveur |
+
+**Réversibilité :** `grep -r "TEMP DEBUG" src/` → supprimer les blocs correspondants + `GlobalErrorCatcher.tsx`.
+
+---
+
 ## Backlog
 
 - Créer `sync-hubspot` Edge Function
