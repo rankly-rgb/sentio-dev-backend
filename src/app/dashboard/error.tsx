@@ -9,8 +9,17 @@ export default function DashboardError({
   error: Error & { digest?: string }
   reset: () => void
 }) {
+  // TEMP DEBUG — enriched error logging for freeze diagnosis
   useEffect(() => {
-    console.error('[dashboard error boundary]', error)
+    console.error('[SENTIO_DEBUG][dashboard-error-boundary]', {
+      type: 'error_boundary',
+      boundary: 'dashboard',
+      message: error.message,
+      stack: error.stack,
+      digest: error.digest ?? 'unknown',
+      timestamp: new Date().toISOString(),
+      url: typeof window !== 'undefined' ? window.location.href : 'ssr',
+    })
   }, [error])
 
   return (

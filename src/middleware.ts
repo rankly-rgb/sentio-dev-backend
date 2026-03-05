@@ -36,9 +36,28 @@ export async function middleware(request: NextRequest) {
   // Refresh session token — this keeps long sessions alive
   let user = null
   try {
+    // TEMP DEBUG — measure auth latency
+    const authStart = Date.now()
     const { data } = await supabase.auth.getUser()
+    const authDuration = Date.now() - authStart
     user = data.user
-  } catch {
+    // TEMP DEBUG — log slow auth (> 2s)
+    if (authDuration > 2000) {
+      console.error('[SENTIO_DEBUG][middleware-auth]', {
+        type: 'slow_auth',
+        duration_ms: authDuration,
+        pathname,
+        timestamp: new Date().toISOString(),
+      })
+    }
+  } catch (err) {
+    // TEMP DEBUG — log auth failure
+    console.error('[SENTIO_DEBUG][middleware-auth]', {
+      type: 'auth_error',
+      message: err instanceof Error ? err.message : String(err),
+      pathname,
+      timestamp: new Date().toISOString(),
+    })
     // Auth service down — allow non-protected routes, block protected
     if (isProtected) {
       return new Response(

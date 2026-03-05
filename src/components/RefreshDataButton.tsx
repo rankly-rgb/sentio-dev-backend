@@ -23,9 +23,25 @@ export function RefreshDataButton() {
     const timeout = setTimeout(() => controller.abort(), 65_000)
 
     try {
+      // TEMP DEBUG — log fetch start
+      const fetchStart = performance.now()
+      console.error('[SENTIO_DEBUG][refresh-data]', {
+        type: 'fetch_start',
+        timestamp: new Date().toISOString(),
+        url: '/api/sync-stripe',
+      })
+
       const resp = await fetch('/api/sync-stripe', {
         method: 'POST',
         signal: controller.signal,
+      })
+
+      // TEMP DEBUG — log fetch end
+      console.error('[SENTIO_DEBUG][refresh-data]', {
+        type: 'fetch_end',
+        duration_ms: Math.round(performance.now() - fetchStart),
+        status: resp.status,
+        timestamp: new Date().toISOString(),
       })
 
       let data
@@ -44,6 +60,14 @@ export function RefreshDataButton() {
       setResult({ type: 'success', message: 'Synchronisation lancée' })
       router.refresh()
     } catch (err) {
+      // TEMP DEBUG — log fetch error
+      console.error('[SENTIO_DEBUG][refresh-data]', {
+        type: 'fetch_error',
+        message: err instanceof Error ? err.message : String(err),
+        name: err instanceof DOMException ? err.name : undefined,
+        timestamp: new Date().toISOString(),
+      })
+
       if (err instanceof DOMException && err.name === 'AbortError') {
         setResult({ type: 'error', message: 'Délai d\'attente dépassé' })
       } else {

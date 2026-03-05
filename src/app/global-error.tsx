@@ -9,8 +9,17 @@ export default function GlobalError({
   error: Error & { digest?: string }
   reset: () => void
 }) {
+  // TEMP DEBUG — enriched error logging for freeze diagnosis
   useEffect(() => {
-    console.error('[global error boundary]', error.digest ?? 'unknown')
+    console.error('[SENTIO_DEBUG][global-error-boundary]', {
+      type: 'error_boundary',
+      boundary: 'global',
+      message: error.message,
+      stack: error.stack,
+      digest: error.digest ?? 'unknown',
+      timestamp: new Date().toISOString(),
+      url: typeof window !== 'undefined' ? window.location.href : 'ssr',
+    })
   }, [error])
 
   return (

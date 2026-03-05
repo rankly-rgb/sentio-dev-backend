@@ -14,12 +14,24 @@ interface DashboardStats {
 async function getDashboardStats(organizationId: string): Promise<DashboardStats> {
   const supabase = createSupabaseServerClient()
 
+  // TEMP DEBUG — measure dashboard query latency
+  const queryStart = Date.now()
+
   // Safety limit: prevent OOM on orgs with very large account bases
   const { data: accounts, count } = await supabase
     .from('accounts')
     .select('mrr_cents, health_score, churn_risk_score', { count: 'exact' })
     .eq('organization_id', organizationId)
     .limit(10000)
+
+  // TEMP DEBUG — log query duration
+  console.error('[SENTIO_DEBUG][dashboard-query]', {
+    type: 'accounts_query',
+    duration_ms: Date.now() - queryStart,
+    rows: accounts?.length ?? 0,
+    organization_id: organizationId,
+    timestamp: new Date().toISOString(),
+  })
 
   if (!accounts || accounts.length === 0) {
     return {

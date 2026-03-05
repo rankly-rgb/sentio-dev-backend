@@ -9,8 +9,17 @@ export default function Error({
   error: Error & { digest?: string }
   reset: () => void
 }) {
+  // TEMP DEBUG — enriched error logging for freeze diagnosis
   useEffect(() => {
-    console.error('[app error boundary]', error)
+    console.error('[SENTIO_DEBUG][app-error-boundary]', {
+      type: 'error_boundary',
+      boundary: 'app',
+      message: error.message,
+      stack: error.stack,
+      digest: error.digest ?? 'unknown',
+      timestamp: new Date().toISOString(),
+      url: typeof window !== 'undefined' ? window.location.href : 'ssr',
+    })
   }, [error])
 
   return (

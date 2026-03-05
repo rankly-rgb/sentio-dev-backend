@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import { Inter } from 'next/font/google'
 import './globals.css'
 import { AuthListener } from '@/components/AuthListener'
+import { GlobalErrorCatcher } from '@/components/GlobalErrorCatcher' // TEMP DEBUG
 
 const inter = Inter({ subsets: ['latin'] })
 
@@ -15,6 +16,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="fr">
       <body className={inter.className}>
         <AuthListener />
+        <GlobalErrorCatcher />
         {children}
       </body>
     </html>
