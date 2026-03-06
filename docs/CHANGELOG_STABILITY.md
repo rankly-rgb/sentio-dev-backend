@@ -217,6 +217,42 @@ Ajout d'instrumentation temporaire (`// TEMP DEBUG`) pour rendre les freezes UI 
 
 ---
 
+## Export Playbook Intelligent v1 (2026-03-07)
+
+Backend complet pour l'export intelligent de comptes par playbook en CSV/JSON.
+
+**Migration `20260307000001_create_playbook_exports.sql` :**
+- Table `playbook_exports` : organisation_id, playbook_id, format, account_count, mrr_at_risk_cents, filters_applied
+- RLS `org_isolation` standard
+- Index idempotence : unique sur `(org_id, playbook_id, format, filters, minute)` — empêche les doublons d'export
+- Trigger `update_updated_at_column()`
+
+**RPC `20260307000002_playbook_export_rpc.sql` :**
+- `get_playbook_export_summary(p_playbook_id, p_filters)` — SECURITY DEFINER
+- Verification explicite organization_id (cross-tenant prevention)
+- Retourne : total_accounts, total_mrr_at_risk_cents, by_priority (P0/P1/P2), by_segment
+
+**Edge Function `export-playbook-accounts` :**
+- Pipeline : CORS → Auth (ES256) → Tenant → Query accounts → Join HubSpot/invoices/usage/segments → Compute priority/trigger_reason/hubspot_import_note → Sort (P0 > P1 > P2, MRR desc) → Log export → Slack fire-and-forget → CSV ou JSON
+- Priority : P0 = churn_risk >= 70 ET days_to_renewal < 30, P1 = churn_risk >= 50 OU days_to_renewal < 60, P2 = defaut
+- Filtres : priority, segment, churn_risk_min, mrr_min_cents, billing_interval
+- CSV : 18 colonnes incluant trigger_reason et hubspot_import_note pre-redigee en français
+- Zero-PII : uniquement stripe_customer_id et hubspot_company_id
+- Montants en centimes en base, convertis en euros dans le CSV uniquement
+
+**Shared helpers `_shared/export-helpers.ts` :**
+- Fonctions pures extraites pour testabilite (pas d'imports Deno/jsr)
+- `computePriority`, `computeDaysToRenewal`, `buildTriggerReason`, `buildHubspotImportNote`, `sortAccounts`, `buildCsv`, `formatActionType`
+
+**Tests : 39 nouveaux tests (283 total) :**
+- Priority : 3 cas limites (P0/P1/P2) + valeurs nulles + boundaries exactes
+- trigger_reason : 1, 2 et 3 signaux actifs + signaux inactifs
+- Sort : P0 > P1 > P2, MRR decroissant intra-priorite
+- CSV : colonnes, null handling, escaping virgules/guillemets, count = JSON count
+- Filtres : churn_risk_min, mrr_min_cents
+
+---
+
 ## Backlog
 
 - Créer `sync-hubspot` Edge Function
