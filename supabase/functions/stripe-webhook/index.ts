@@ -433,18 +433,38 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return jsonResponse({ received: true, error: 'server_configuration_error' })
   }
 
-  // Résoudre l'organisation via le compte Stripe connecté
+  // Résoudre l'organisation via le compte Stripe connecté (Connect) ou customer lookup
   const stripeAccountId = event.account
-  if (!stripeAccountId) {
-    // Event depuis le compte Stripe principal — utiliser le premier org disponible
-    // (cas webhooks directs sans Connect)
-    console.warn('[stripe-webhook] No account in event, trying direct org lookup')
-  }
-
   let organizationId: string | null = null
 
   if (stripeAccountId) {
+    // Connect path : event.account contient le stripe_account_id du compte connecté
     organizationId = await resolveOrganization(supabase, stripeAccountId)
+    if (organizationId) {
+      console.log(JSON.stringify({
+        level: 'info',
+        function_name: 'stripe-webhook',
+        message: 'Connect resolution succeeded',
+        stripe_account_id: stripeAccountId,
+        organization_id: organizationId,
+        event_type: event.type,
+      }))
+    } else {
+      // Connect account not linked via OAuth yet — reject
+      console.error(JSON.stringify({
+        level: 'error',
+        function_name: 'stripe-webhook',
+        message: 'Connect resolution failed — stripe_account_id not found in organizations',
+        stripe_account_id: stripeAccountId,
+        event_id: event.id,
+        event_type: event.type,
+      }))
+      await alertSlack(
+        `stripe-webhook: Connect account ${stripeAccountId} not linked to any org. Event ${event.id} (${event.type}) dropped.`,
+        { level: 'warning' },
+      )
+      return jsonResponse({ received: true, handled: false, reason: 'connect_account_not_linked' })
+    }
   } else {
     // Fallback : chercher via stripe_customer_id si disponible dans l'objet
     const obj = event.data.object as { customer?: string }
@@ -476,10 +496,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
+  // Safety net (should not be reached — both branches above return early on failure)
   if (!organizationId) {
-    console.error('[stripe-webhook] Cannot resolve organization for event', event.id)
-    // Retourner 200 pour éviter que Stripe ne retry indéfiniment
-    return jsonResponse({ received: true, error: 'organization_not_found' })
+    return jsonResponse({ received: true, handled: false, reason: 'organization_not_found' })
   }
 
   // Idempotency check: skip if this event was already processed
