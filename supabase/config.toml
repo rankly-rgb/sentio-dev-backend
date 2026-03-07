@@ -66,3 +66,8 @@ verify_jwt = false
 # Routes : GET/POST /, POST /test, POST /regenerate-secret, POST /disable
 [functions.webhook-config]
 verify_jwt = false
+
+# integration-oauth : JWT vérifié dans le code pour authorize/status/revoke
+# Callbacks OAuth (redirect browser) protégés par state CSRF, pas de JWT
+[functions.integration-oauth]
+verify_jwt = false
