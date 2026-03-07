@@ -377,6 +377,7 @@ const ROUTED_EVENTS = new Set([
   'invoice.paid',
   'invoice.payment_failed',
   'invoice.voided',
+  'customer.subscription.trial_will_end',
 ])
 
 // ── Entrypoint ───────────────────────────────────────────────
@@ -544,6 +545,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       case 'invoice.voided':
         await handleInvoiceEvent(supabase, organizationId, event, logger)
         break
+      case 'customer.subscription.trial_will_end':
+        // Handled by subscription handler + webhook dispatch below
+        await handleSubscriptionEvent(supabase, organizationId, event, logger)
+        break
     }
 
     // Webhook sortant : payment_failed
@@ -567,6 +572,35 @@ Deno.serve(async (req: Request): Promise<Response> => {
             expansion_score: acct.expansion_score ?? 0,
             mrr_cents: acct.mrr_cents ?? 0,
             trigger_reason: `Facture impayée (${inv.id})`,
+          })
+        }
+      }
+    }
+
+    // Webhook sortant : renewal_reminder (trial ending)
+    if (event.type === 'customer.subscription.trial_will_end') {
+      const sub = event.data.object as StripeSubscription
+      if (sub.customer) {
+        const { data: acct } = await supabase
+          .from('accounts')
+          .select('id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, mrr_cents')
+          .eq('organization_id', organizationId)
+          .eq('stripe_customer_id', sub.customer)
+          .maybeSingle()
+        if (acct) {
+          const trialEndStr = sub.trial_end
+            ? new Date(sub.trial_end * 1000).toISOString().split('T')[0]
+            : 'inconnue'
+          await dispatchWebhook(supabase, organizationId, 'renewal_reminder', {
+            account_id: acct.id,
+            stripe_customer_id: acct.stripe_customer_id,
+            ...(acct.hubspot_company_id ? { hubspot_company_id: acct.hubspot_company_id } : {}),
+          }, {
+            health_score: acct.health_score ?? 0,
+            churn_risk_score: acct.churn_risk_score ?? 0,
+            expansion_score: acct.expansion_score ?? 0,
+            mrr_cents: acct.mrr_cents ?? 0,
+            trigger_reason: `Fin de période d'essai le ${trialEndStr} (${sub.id})`,
           })
         }
       }
