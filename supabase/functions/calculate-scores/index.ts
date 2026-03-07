@@ -16,6 +16,7 @@ import { createServiceClient, errorResponse, jsonResponse } from '../_shared/sup
 import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
 import { acquireCronLock, releaseCronLock } from '../_shared/cron-lock.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
+import { dispatchWebhook } from '../_shared/webhook-dispatcher.ts'
 import {
   type Account,
   type UsageStats,
@@ -36,6 +37,8 @@ import {
 // ── Types internes ──────────────────────────────────────────
 interface AccountWithCreatedAt extends Account {
   created_at: string
+  stripe_customer_id?: string
+  hubspot_company_id?: string
 }
 
 interface ScoreResult {
@@ -442,7 +445,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           batchCount++
           const { data: batch, error: batchError } = await supabase
             .from('accounts')
-            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, health_score, churn_risk_score, created_at')
+            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, health_score, churn_risk_score, created_at, stripe_customer_id, hubspot_company_id')
             .eq('organization_id', organizationId)
             .range(batchOffset, batchOffset + SCORING_BATCH_SIZE - 1)
 
@@ -593,6 +596,28 @@ Deno.serve(async (req: Request): Promise<Response> => {
             organization_id: organizationId,
             message: `segment assignment failed: ${err instanceof Error ? err.message : String(err)}`,
           }))
+        }
+
+        // ── Webhook sortant : churn_risk_critical ──────────────
+        // Dispatcher pour les comptes qui viennent de dépasser le seuil 70
+        for (const account of allAccounts) {
+          const scores = accountScores.get(account.id)
+          if (!scores) continue
+          const prevChurn = account.churn_risk_score
+          if (scores.churn_risk_score >= 70 && (prevChurn == null || prevChurn < 70)) {
+            if (!account.stripe_customer_id) continue
+            await dispatchWebhook(supabase, organizationId, 'churn_risk_critical', {
+              account_id: account.id,
+              stripe_customer_id: account.stripe_customer_id!,
+              ...(account.hubspot_company_id ? { hubspot_company_id: account.hubspot_company_id } : {}),
+            }, {
+              health_score: scores.health_score,
+              churn_risk_score: scores.churn_risk_score,
+              expansion_score: scores.expansion_score,
+              mrr_cents: account.mrr_cents ?? 0,
+              trigger_reason: `churn_risk ${prevChurn ?? 'N/A'} → ${scores.churn_risk_score} (seuil 70)`,
+            })
+          }
         }
 
         await logger.complete({ accounts_scored: accountsScored, segments_assigned: segmentsAssigned, errors })

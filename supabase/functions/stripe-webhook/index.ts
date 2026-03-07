@@ -10,6 +10,7 @@ import { createServiceClient, errorResponse, jsonResponse } from '../_shared/sup
 import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
 import { writeToDLQ } from '../_shared/dlq.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
+import { dispatchWebhook } from '../_shared/webhook-dispatcher.ts'
 
 // ── HMAC Stripe signature verification ──────────────────────
 async function verifyStripeSignature(
@@ -517,6 +518,32 @@ Deno.serve(async (req: Request): Promise<Response> => {
       case 'invoice.voided':
         await handleInvoiceEvent(supabase, organizationId, event, logger)
         break
+    }
+
+    // Webhook sortant : payment_failed
+    if (event.type === 'invoice.payment_failed') {
+      const inv = event.data.object as StripeInvoice
+      if (inv.customer) {
+        const { data: acct } = await supabase
+          .from('accounts')
+          .select('id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, mrr_cents')
+          .eq('organization_id', organizationId)
+          .eq('stripe_customer_id', inv.customer)
+          .maybeSingle()
+        if (acct) {
+          await dispatchWebhook(supabase, organizationId, 'payment_failed', {
+            account_id: acct.id,
+            stripe_customer_id: acct.stripe_customer_id,
+            ...(acct.hubspot_company_id ? { hubspot_company_id: acct.hubspot_company_id } : {}),
+          }, {
+            health_score: acct.health_score ?? 0,
+            churn_risk_score: acct.churn_risk_score ?? 0,
+            expansion_score: acct.expansion_score ?? 0,
+            mrr_cents: acct.mrr_cents ?? 0,
+            trigger_reason: `Facture impayée (${inv.id})`,
+          })
+        }
+      }
     }
 
     await logger.complete({ event_type: event.type, event_id: event.id })

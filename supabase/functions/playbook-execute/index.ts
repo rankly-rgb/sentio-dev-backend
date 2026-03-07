@@ -20,6 +20,7 @@ import {
   type ActionResult,
 } from '../_shared/playbook-engine.ts'
 import { executeWorkflowStep } from '../_shared/workflow-executor.ts'
+import { dispatchWebhook, mapPlaybookToEvent } from '../_shared/webhook-dispatcher.ts'
 
 const MAX_ACCOUNTS_PER_RUN = 200
 
@@ -127,7 +128,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: accounts } = await supabase
     .from('accounts')
-    .select('id, organization_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
+    .select('id, organization_id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
     .eq('organization_id', body.organization_id)
     .in('id', accountIds)
 
@@ -438,6 +439,30 @@ Deno.serve(async (req: Request): Promise<Response> => {
       `Playbook "${playbook.title}" : ${failedCount}/${executionResults.length} exécutions échouées`,
       { level: 'warning' },
     )
+  }
+
+  // ── Webhook sortant pour chaque exécution réussie ─────
+  const webhookEvent = mapPlaybookToEvent(playbook.trigger_conditions)
+  if (webhookEvent) {
+    for (const result of executionResults) {
+      if (result.status === 'failed') continue
+      const acc = finalAccounts.find((a: Record<string, unknown>) => a.id === result.account_id) as Record<string, unknown> | undefined
+      if (!acc || !acc.stripe_customer_id) continue
+      await dispatchWebhook(supabase, body.organization_id, webhookEvent, {
+        account_id: acc.id as string,
+        stripe_customer_id: acc.stripe_customer_id as string,
+        ...(acc.hubspot_company_id ? { hubspot_company_id: acc.hubspot_company_id as string } : {}),
+      }, {
+        health_score: (acc.health_score as number) ?? 0,
+        churn_risk_score: (acc.churn_risk_score as number) ?? 0,
+        expansion_score: (acc.expansion_score as number) ?? 0,
+        mrr_cents: (acc.mrr_cents as number) ?? 0,
+        trigger_reason: `Playbook "${playbook.title}" exécuté`,
+      }, {
+        playbook_id: playbook.id,
+        playbook_name: playbook.title,
+      })
+    }
   }
 
   logger.info('Playbook execution completed', {
