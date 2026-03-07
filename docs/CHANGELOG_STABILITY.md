@@ -265,24 +265,49 @@ Backend complet pour l'ecran de detail de segment : RPC paginee + export CSV.
 - Cross-tenant : triple verification organization_id (accounts, segment_memberships, account_segments)
 - GRANT EXECUTE to authenticated
 
-**Edge Function `export-segment-csv` :**
-- GET `/functions/v1/export-segment-csv?segment=champions&sort_by=mrr_cents&sort_order=desc`
-- Pipeline : CORS -> Auth (ES256) -> Validate params -> Service Client -> RPC -> CSV -> Metric -> Response
-- 12 colonnes CSV : stripe_customer_id, hubspot_company_id, plan_tier, billing_interval, mrr_eur, seat_count, seat_limit, contract_end_date, health_score, churn_risk_score, expansion_score, product_usage_score
-- En-tete Zero-PII : `# Sentio AI Export — Zero-PII compliant. Identifiants techniques uniquement.`
-- Montants : mrr_cents -> mrr_eur (divise par 100, 2 decimales)
-- Metric log : sync_metrics avec type `segment_export`
-- Filename : `sentio_segment_<SEGMENT>_<DATE>.csv`
+---
 
-**Shared helpers :**
-- `_shared/validators.ts` : `isValidSegment()`, `isValidSortField()`, `isValidSortOrder()` — pures, sans imports Deno
-- `_shared/segment-export-helpers.ts` : `buildSegmentCsv()`, `convertMrrCentsToEur()` — pures, sans imports Deno
+## Export Segment CSV v2 (2026-03-07)
 
-**Tests : 22 nouveaux tests (305 total) :**
-- Zero-PII : CSV sans email/nom/telephone/adresse
-- MRR conversion : 150000 -> "1500.00", null -> ""
-- CSV : colonnes, null handling, escaping virgules/guillemets, count
-- Validators : 8 segments valides, noms codebase (a_risque_leger/en_danger_critique), rejet alternatives
+Refactoring de `export-segment-csv` pour aligner le backend sur les filtres du frontend.
+
+**Probleme** : l'ancien export utilisait une RPC `get_segment_accounts` basee sur `segment_memberships`, tandis que le frontend utilise des filtres in-memory sur les scores. Resultat : le CSV exporte pouvait contenir des comptes differents de ceux affiches a l'ecran.
+
+**Solution** : query directe `accounts` + filtrage in-memory identique au frontend.
+
+**Edge Function `export-segment-csv` (reecrite) :**
+- GET `/functions/v1/export-segment-csv?segment=champions`
+- Pipeline : CORS -> Auth (ES256) -> Validate segment -> Service Client -> Query accounts (org_id, ORDER BY mrr_cents DESC) -> Filter in-memory (SEGMENT_FILTERS) -> CSV avec BOM -> Response
+- Suppression des params `sort_by`/`sort_order` (tri fixe mrr_cents DESC)
+- Pas de LIMIT : export complet de tous les comptes du segment
+- BOM UTF-8 (`\uFEFF`) pour compatibilite Excel FR
+- Messages d'erreur en francais
+- Filename : `segment-<SEGMENT>.csv`
+- 12 colonnes CSV (inchangees) : stripe_customer_id, hubspot_company_id, plan_tier, billing_interval, mrr_eur, seat_count, seat_limit, contract_end_date, health_score, churn_risk_score, expansion_score, product_usage_score
+
+**Shared helpers `_shared/segment-export-helpers.ts` :**
+- `SEGMENT_FILTERS` : 8 filtres purs, mirroir exact de `segment-queries.ts` (frontend)
+- `created_at` ajoute a `SegmentAccountRow` (necessaire pour filtre `nouveaux` < 90 jours)
+- `buildSegmentCsv()` : BOM UTF-8 en prefixe, plus de commentaire Zero-PII en ligne
+
+**Filtres de segment (SEGMENT_FILTERS) :**
+
+| Segment | Critere |
+|---------|---------|
+| `champions` | health > 80 ET expansion > 70 |
+| `en_expansion` | expansion > 75 |
+| `stables` | health 60-80 ET churn_risk < 30 |
+| `a_risque_leger` | health 40-59 OU churn_risk 30-50 |
+| `en_danger_critique` | health < 40 OU churn_risk > 70 |
+| `impayes` | churn_risk > 80 ET health < 50 |
+| `en_churn` | churn_risk > 90 |
+| `nouveaux` | created_at < 90 jours |
+
+**Tests : 49 tests (332 total) :**
+- BOM UTF-8 : presence + header apres BOM
+- 8 filtres de segment : boundaries exactes, null handling
+- CSV : colonnes, null, escaping, empty export
+- Validators : segments, sort fields, sort orders
 
 ---
 
