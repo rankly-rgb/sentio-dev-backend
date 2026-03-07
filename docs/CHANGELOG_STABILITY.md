@@ -336,13 +336,15 @@ Systeme de webhook sortant universel permettant a Sentio AI de declencher des ac
 - Echec : increment failure_count (RPC atomique), DLQ write, auto-disable a 5 echecs + alerte Slack
 - Ne throw jamais (fire-and-forget pour ne pas bloquer le flux principal)
 
-**Edge Functions :**
+**Edge Function `webhook-config` (single function, sub-path routing) :**
 
-| Fonction | Trigger | Role |
-|----------|---------|------|
-| `configure-webhook` | REST (JWT) | GET config (secret masque), POST creer/MAJ, DELETE desactiver |
-| `test-webhook` | POST (JWT) | Envoie payload test `cus_TEST_sentio_demo`, retourne status_code + latency_ms |
-| `regenerate-webhook-secret` | POST (JWT) | Genere nouveau secret HMAC, retourne en clair une fois, log audit |
+| Route | Methode | Role |
+|-------|---------|------|
+| `/webhook-config` | GET | Config actuelle (secret masque) |
+| `/webhook-config` | POST | Creer ou mettre a jour (endpoint_url, active_events) |
+| `/webhook-config/test` | POST | Envoie payload test `cus_TEST_sentio_demo`, retourne status_code + latency_ms |
+| `/webhook-config/regenerate-secret` | POST | Genere nouveau secret HMAC, retourne en clair une fois, log audit |
+| `/webhook-config/disable` | POST | Desactive le webhook (soft delete) |
 
 **Payload standardise :**
 ```json

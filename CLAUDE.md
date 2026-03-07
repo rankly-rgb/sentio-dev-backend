@@ -74,9 +74,7 @@ Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financi
 | `workflow-step-processor` | POST | Workflow steps |
 | `export-playbook-accounts` | POST (JWT) | Export CSV/JSON comptes playbook |
 | `export-segment-csv` | GET (JWT) | Export CSV comptes par segment (filtrage in-memory, BOM UTF-8) |
-| `configure-webhook` | REST (JWT) | CRUD config webhook sortant (GET/POST/DELETE) |
-| `test-webhook` | POST (JWT) | Envoi d'un webhook de test au endpoint client |
-| `regenerate-webhook-secret` | POST (JWT) | Régénération du secret HMAC webhook |
+| `webhook-config` | REST (JWT) | Config webhook sortant (GET/POST, /test, /regenerate-secret, /disable) |
 
 ### Pattern Edge Function (obligatoire)
 

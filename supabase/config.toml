@@ -62,14 +62,7 @@ verify_jwt = false
 [functions.export-segment-csv]
 verify_jwt = false
 
-# configure-webhook : JWT vérifié dans le code (ES256 incompatible avec verify_jwt)
-[functions.configure-webhook]
-verify_jwt = false
-
-# test-webhook : JWT vérifié dans le code (ES256 incompatible avec verify_jwt)
-[functions.test-webhook]
-verify_jwt = false
-
-# regenerate-webhook-secret : JWT vérifié dans le code (ES256 incompatible avec verify_jwt)
-[functions.regenerate-webhook-secret]
+# webhook-config : JWT vérifié dans le code (ES256 incompatible avec verify_jwt)
+# Routes : GET/POST /, POST /test, POST /regenerate-secret, POST /disable
+[functions.webhook-config]
 verify_jwt = false
