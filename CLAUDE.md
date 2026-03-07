@@ -73,6 +73,7 @@ Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financi
 | `admin-proxy` | REST (JWT) | Admin API |
 | `workflow-step-processor` | POST | Workflow steps |
 | `export-playbook-accounts` | POST (JWT) | Export CSV/JSON comptes playbook |
+| `export-segment-csv` | GET (JWT) | Export CSV comptes par segment |
 
 ### Pattern Edge Function (obligatoire)
 

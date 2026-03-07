@@ -253,6 +253,39 @@ Backend complet pour l'export intelligent de comptes par playbook en CSV/JSON.
 
 ---
 
+## Segment Detail Backend v1 (2026-03-07)
+
+Backend complet pour l'ecran de detail de segment : RPC paginee + export CSV.
+
+**Migration `20260307000003_segment_detail_rpc.sql` :**
+- RPC `get_segment_accounts(p_segment, p_sort_by, p_sort_order, p_limit, p_offset)`
+- SECURITY DEFINER avec `SET search_path = public`
+- Utilise `segment_memberships` + `account_segments` (source de verite, pas de criteres inline)
+- Validation segment/sort_by/sort_order dans la fonction, cap p_limit a 10000
+- Cross-tenant : triple verification organization_id (accounts, segment_memberships, account_segments)
+- GRANT EXECUTE to authenticated
+
+**Edge Function `export-segment-csv` :**
+- GET `/functions/v1/export-segment-csv?segment=champions&sort_by=mrr_cents&sort_order=desc`
+- Pipeline : CORS -> Auth (ES256) -> Validate params -> Service Client -> RPC -> CSV -> Metric -> Response
+- 12 colonnes CSV : stripe_customer_id, hubspot_company_id, plan_tier, billing_interval, mrr_eur, seat_count, seat_limit, contract_end_date, health_score, churn_risk_score, expansion_score, product_usage_score
+- En-tete Zero-PII : `# Sentio AI Export — Zero-PII compliant. Identifiants techniques uniquement.`
+- Montants : mrr_cents -> mrr_eur (divise par 100, 2 decimales)
+- Metric log : sync_metrics avec type `segment_export`
+- Filename : `sentio_segment_<SEGMENT>_<DATE>.csv`
+
+**Shared helpers :**
+- `_shared/validators.ts` : `isValidSegment()`, `isValidSortField()`, `isValidSortOrder()` — pures, sans imports Deno
+- `_shared/segment-export-helpers.ts` : `buildSegmentCsv()`, `convertMrrCentsToEur()` — pures, sans imports Deno
+
+**Tests : 22 nouveaux tests (305 total) :**
+- Zero-PII : CSV sans email/nom/telephone/adresse
+- MRR conversion : 150000 -> "1500.00", null -> ""
+- CSV : colonnes, null handling, escaping virgules/guillemets, count
+- Validators : 8 segments valides, noms codebase (a_risque_leger/en_danger_critique), rejet alternatives
+
+---
+
 ## Backlog
 
 - Créer `sync-hubspot` Edge Function
