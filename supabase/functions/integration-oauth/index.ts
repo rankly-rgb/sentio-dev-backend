@@ -18,7 +18,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
-import { storeVaultSecret, deleteVaultSecret, updateVaultSecret } from '../_shared/vault.ts'
+import { storeVaultSecret, deleteVaultSecret } from '../_shared/vault.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import {
   isValidProvider,
@@ -78,7 +78,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const orgId = auth.organizationId
-  const userId = auth.userId
 
   // ── GET /{provider}/authorize ───────────────────────────────
   if (segments.length === 2 && segments[1] === 'authorize' && req.method === 'GET') {
@@ -299,7 +298,12 @@ async function handleCallback(req: Request, provider: OAuthProvider): Promise<Re
     return errorResponse(`Erreur lors de l'echange OAuth ${provider} : ${msg}`, 500)
   }
 
-  // 4. Redirect vers le frontend si redirect_after est fourni
+  // 4. Declencher le sync initial en fire-and-forget
+  //    Le sync peut prendre 30-60s — ne pas bloquer le callback (Edge Function < 5s)
+  //    On appelle sync-stripe/sync-hubspot via HTTP interne sans attendre la reponse.
+  triggerInitialSync(provider, orgId)
+
+  // 5. Redirect vers le frontend si redirect_after est fourni
   if (redirectAfter) {
     return new Response(null, {
       status: 302,
@@ -510,4 +514,40 @@ async function revokeProviderToken(
       10_000,
     )
   }
+}
+
+// ── Trigger initial sync (fire-and-forget) ────────────────────
+// Le sync peut prendre 30-60s — on ne bloque pas le callback.
+// On appelle la Edge Function sync-stripe (ou sync-hubspot quand disponible)
+// via HTTP interne. Le .catch() garantit que l'echec du sync
+// ne casse pas la reponse callback.
+
+function triggerInitialSync(provider: OAuthProvider, orgId: string): void {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  if (!supabaseUrl || !serviceRoleKey) return
+
+  const functionName = provider === 'stripe' ? 'sync-stripe' : 'sync-hubspot'
+  const url = `${supabaseUrl}/functions/v1/${functionName}`
+
+  // Fire-and-forget : pas de await, pas de blocage
+  fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${serviceRoleKey}`,
+    },
+    body: JSON.stringify({
+      organization_id: orgId,
+      sync_type: 'initial',
+    }),
+  }).catch((err) => {
+    console.error(JSON.stringify({
+      level: 'warning',
+      function_name: 'integration-oauth',
+      message: `Failed to trigger initial ${provider} sync (non-blocking)`,
+      organization_id: orgId,
+      error: err instanceof Error ? err.message : String(err),
+    }))
+  })
 }
