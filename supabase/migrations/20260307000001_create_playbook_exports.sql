@@ -40,13 +40,18 @@ CREATE INDEX IF NOT EXISTS idx_playbook_exports_org
 
 -- Idempotency: unique per org + playbook + filters + minute window
 -- Prevents duplicate exports within the same minute
+-- date_trunc is STABLE, not IMMUTABLE — wrap it for index usage
+CREATE OR REPLACE FUNCTION public.date_trunc_minute_immutable(ts TIMESTAMPTZ)
+RETURNS TIMESTAMPTZ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS
+$$SELECT date_trunc('minute', ts AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'$$;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_playbook_exports_idempotent
   ON public.playbook_exports (
     organization_id,
     playbook_id,
     format,
     filters_applied,
-    date_trunc('minute', exported_at)
+    public.date_trunc_minute_immutable(exported_at)
   );
 
 -- ============================================================================
