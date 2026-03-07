@@ -20,6 +20,7 @@ import { createServiceClient, errorResponse, jsonResponse } from '../_shared/sup
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { storeVaultSecret, deleteVaultSecret } from '../_shared/vault.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import { alertSlack } from '../_shared/slack-alert.ts'
 import {
   isValidProvider,
   isStateExpired,
@@ -519,8 +520,9 @@ async function revokeProviderToken(
 // ── Trigger initial sync (fire-and-forget) ────────────────────
 // Le sync peut prendre 30-60s — on ne bloque pas le callback.
 // On appelle la Edge Function sync-stripe (ou sync-hubspot quand disponible)
-// via HTTP interne. Le .catch() garantit que l'echec du sync
-// ne casse pas la reponse callback.
+// via HTTP interne. Pattern identique a self-monitor :
+// - Log dans data_syncs (table persistante)
+// - Alerte Slack sur echec
 
 function triggerInitialSync(provider: OAuthProvider, orgId: string): void {
   const supabaseUrl = Deno.env.get('SUPABASE_URL')
@@ -530,7 +532,7 @@ function triggerInitialSync(provider: OAuthProvider, orgId: string): void {
   const functionName = provider === 'stripe' ? 'sync-stripe' : 'sync-hubspot'
   const url = `${supabaseUrl}/functions/v1/${functionName}`
 
-  // Fire-and-forget : pas de await, pas de blocage
+  // Fire-and-forget : .then()/.catch() chain — jamais de await
   fetch(url, {
     method: 'POST',
     headers: {
@@ -541,13 +543,72 @@ function triggerInitialSync(provider: OAuthProvider, orgId: string): void {
       organization_id: orgId,
       sync_type: 'initial',
     }),
-  }).catch((err) => {
-    console.error(JSON.stringify({
-      level: 'warning',
-      function_name: 'integration-oauth',
-      message: `Failed to trigger initial ${provider} sync (non-blocking)`,
-      organization_id: orgId,
-      error: err instanceof Error ? err.message : String(err),
-    }))
   })
+    .then(async (resp) => {
+      // Logger le resultat dans data_syncs (table persistante)
+      const svc = createServiceClient()
+      if (resp.ok) {
+        await svc.from('data_syncs').insert({
+          organization_id: orgId,
+          sync_source: provider === 'stripe' ? 'stripe' : 'hubspot',
+          sync_type: 'initial',
+          sync_status: 'completed',
+          triggered_by: 'oauth_callback',
+          is_manual: false,
+          started_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+          summary: { trigger: 'oauth_callback', function: functionName },
+        })
+      } else {
+        const errorBody = await resp.text().catch(() => 'unknown')
+        await svc.from('data_syncs').insert({
+          organization_id: orgId,
+          sync_source: provider === 'stripe' ? 'stripe' : 'hubspot',
+          sync_type: 'initial',
+          sync_status: 'failed',
+          triggered_by: 'oauth_callback',
+          is_manual: false,
+          started_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+          error_message: `Initial sync returned HTTP ${resp.status}: ${errorBody.substring(0, 200)}`,
+          is_retryable: true,
+        })
+        await alertSlack(
+          `Initial ${provider} sync failed for org ${orgId} after OAuth connect (HTTP ${resp.status}). Manual sync may be needed.`,
+          { level: 'warning' },
+        )
+      }
+    })
+    .catch(async (err) => {
+      const errorMsg = err instanceof Error ? err.message : String(err)
+      console.error(JSON.stringify({
+        level: 'error',
+        function_name: 'integration-oauth',
+        message: `Failed to trigger initial ${provider} sync`,
+        organization_id: orgId,
+        error: errorMsg,
+      }))
+      // Logger l'echec dans data_syncs si possible
+      try {
+        const svc = createServiceClient()
+        await svc.from('data_syncs').insert({
+          organization_id: orgId,
+          sync_source: provider === 'stripe' ? 'stripe' : 'hubspot',
+          sync_type: 'initial',
+          sync_status: 'failed',
+          triggered_by: 'oauth_callback',
+          is_manual: false,
+          started_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+          error_message: `Failed to call ${functionName}: ${errorMsg}`,
+          is_retryable: true,
+        })
+      } catch {
+        // Last resort — si meme data_syncs echoue, on a deja le console.error
+      }
+      await alertSlack(
+        `Initial ${provider} sync FAILED for org ${orgId}: ${errorMsg}. Connection succeeded but data not synced.`,
+        { level: 'critical' },
+      )
+    })
 }
