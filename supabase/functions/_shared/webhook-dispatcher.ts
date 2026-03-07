@@ -9,6 +9,7 @@ import { fetchWithTimeout } from './fetch-with-timeout.ts'
 import { retryWithBackoff } from './retry-with-backoff.ts'
 import { CircuitBreaker } from './circuit-breaker.ts'
 import { alertSlack } from './slack-alert.ts'
+import { getWebhookSecret } from './vault.ts'
 
 // Re-export pure functions from webhook-helpers (testables sans Deno)
 export {
@@ -70,7 +71,7 @@ export async function dispatchWebhook(
     // 1. Fetch webhook config for this org
     const { data: config, error: cfgError } = await supabase
       .from('webhook_configs')
-      .select('id, organization_id, endpoint_url, webhook_secret, active_events, is_active, failure_count')
+      .select('id, organization_id, endpoint_url, webhook_secret, vault_secret_id, active_events, is_active, failure_count')
       .eq('organization_id', organizationId)
       .eq('provider', 'webhook')
       .eq('is_active', true)
@@ -79,11 +80,18 @@ export async function dispatchWebhook(
     if (cfgError || !config) return // No active webhook config — silent no-op
     if (!config.endpoint_url) return
 
+    // Lire le secret depuis Vault en priorite, fallback sur colonne en clair
+    const resolvedSecret = await getWebhookSecret(supabase, {
+      vault_secret_id: config.vault_secret_id,
+      webhook_secret: config.webhook_secret,
+    })
+    if (!resolvedSecret) return // Pas de secret disponible — impossible de signer
+
     const wc: WebhookConfig = {
       id: config.id,
       organization_id: config.organization_id,
       endpoint_url: config.endpoint_url,
-      secret: config.webhook_secret,
+      secret: resolvedSecret,
       active_events: config.active_events ?? [],
       is_active: config.is_active,
       failure_count: config.failure_count ?? 0,

@@ -16,6 +16,7 @@ import { createServiceClient, errorResponse, jsonResponse } from '../_shared/sup
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { computeHmacSignature } from '../_shared/webhook-dispatcher.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import { getWebhookSecret, storeVaultSecret, updateVaultSecret } from '../_shared/vault.ts'
 
 const VALID_EVENTS = [
   'churn_risk_critical',
@@ -74,13 +75,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (subPath === 'test' && req.method === 'POST') {
     const { data: config, error: cfgError } = await supabase
       .from('webhook_configs')
-      .select('endpoint_url, webhook_secret')
+      .select('endpoint_url, webhook_secret, vault_secret_id')
       .eq('organization_id', orgId)
       .eq('provider', 'webhook')
       .maybeSingle()
 
     if (cfgError || !config || !config.endpoint_url) {
       return errorResponse('Aucune configuration webhook trouvée', 404)
+    }
+
+    const secret = await getWebhookSecret(supabase, config)
+    if (!secret) {
+      return errorResponse('Secret webhook introuvable', 500)
     }
 
     const testPayload = {
@@ -102,7 +108,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
 
     const payloadStr = JSON.stringify(testPayload)
-    const signature = await computeHmacSignature(payloadStr, config.webhook_secret)
+    const signature = await computeHmacSignature(payloadStr, secret)
     const timestamp = Math.floor(Date.now() / 1000).toString()
 
     const startTime = Date.now()
@@ -146,7 +152,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (subPath === 'regenerate-secret' && req.method === 'POST') {
     const { data: existing } = await supabase
       .from('webhook_configs')
-      .select('id')
+      .select('id, vault_secret_id')
       .eq('organization_id', orgId)
       .eq('provider', 'webhook')
       .maybeSingle()
@@ -159,9 +165,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('')
 
+    // Stocker dans Vault : update si existant, sinon creer
+    let vaultId = existing.vault_secret_id
+    try {
+      if (vaultId) {
+        await updateVaultSecret(supabase, vaultId, newSecret)
+      } else {
+        vaultId = await storeVaultSecret(supabase, newSecret, `wh_${existing.id}`, `Webhook HMAC secret for config ${existing.id}`)
+      }
+    } catch {
+      return errorResponse('Erreur lors du stockage du secret dans le vault', 500)
+    }
+
     const { error: updateError } = await supabase
       .from('webhook_configs')
-      .update({ webhook_secret: newSecret, failure_count: 0 })
+      .update({ vault_secret_id: vaultId, webhook_secret: null, failure_count: 0 })
       .eq('id', existing.id)
 
     if (updateError) {
@@ -213,7 +231,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method === 'GET') {
     const { data: config, error } = await supabase
       .from('webhook_configs')
-      .select('id, endpoint_url, webhook_secret, active_events, is_active, last_triggered_at, failure_count, created_at, updated_at')
+      .select('id, endpoint_url, webhook_secret, vault_secret_id, active_events, is_active, last_triggered_at, failure_count, created_at, updated_at')
       .eq('organization_id', orgId)
       .eq('provider', 'webhook')
       .maybeSingle()
@@ -221,11 +239,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (error) return errorResponse('Erreur lors de la récupération de la configuration', 500)
     if (!config) return jsonResponse({ configured: false })
 
+    // Lire le secret pour afficher un apercu masque
+    const secret = await getWebhookSecret(supabase, config)
+    const secretPreview = secret ? maskSecret(secret) : '(non disponible)'
+
     return jsonResponse({
       configured: true,
       id: config.id,
       endpoint_url: config.endpoint_url,
-      secret_preview: maskSecret(config.webhook_secret),
+      secret_preview: secretPreview,
       active_events: config.active_events,
       is_active: config.is_active,
       last_triggered_at: config.last_triggered_at,
@@ -262,7 +284,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     const { data: existing } = await supabase
       .from('webhook_configs')
-      .select('id, webhook_secret')
+      .select('id, webhook_secret, vault_secret_id')
       .eq('organization_id', orgId)
       .eq('provider', 'webhook')
       .maybeSingle()
@@ -284,24 +306,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
       if (updateError) return errorResponse('Erreur lors de la mise à jour', 500)
 
+      const secret = await getWebhookSecret(supabase, existing)
+      const secretPreview = secret ? maskSecret(secret) : '(non disponible)'
+
       return jsonResponse({
         success: true,
         message: 'Configuration webhook mise à jour',
         id: existing.id,
-        secret_preview: maskSecret(existing.webhook_secret),
+        secret_preview: secretPreview,
       })
     }
 
+    // Creation : generer le secret et le stocker dans Vault
     const newSecret = Array.from(crypto.getRandomValues(new Uint8Array(32)))
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('')
 
+    // Creer d'abord la config pour avoir l'ID, puis stocker dans Vault
     const { data: created, error: createError } = await supabase
       .from('webhook_configs')
       .insert({
         organization_id: orgId,
         provider: 'webhook',
-        webhook_secret: newSecret,
+        webhook_secret: null,
         endpoint_url: body.endpoint_url,
         active_events: body.active_events ?? VALID_EVENTS,
         is_active: true,
@@ -312,6 +339,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     if (createError || !created) {
       return errorResponse('Erreur lors de la création de la configuration', 500)
+    }
+
+    // Stocker le secret dans Vault et lier a la config
+    try {
+      const vaultId = await storeVaultSecret(supabase, newSecret, `wh_${created.id}`, `Webhook HMAC secret for config ${created.id}`)
+      await supabase
+        .from('webhook_configs')
+        .update({ vault_secret_id: vaultId })
+        .eq('id', created.id)
+    } catch {
+      // Vault storage failed — fallback: stocker en clair (sera migre plus tard)
+      await supabase
+        .from('webhook_configs')
+        .update({ webhook_secret: newSecret })
+        .eq('id', created.id)
     }
 
     return jsonResponse({
