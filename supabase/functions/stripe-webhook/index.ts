@@ -456,16 +456,23 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .maybeSingle()
       organizationId = data?.organization_id ?? null
     }
-    // Fallback ultime : prendre la première org active (environnement single-tenant ou dev)
+    // Aucun fallback : si le tenant n'est pas résolu, rejeter l'événement.
+    // L'ancien fallback routait silencieusement vers le 1er org actif — dangereux en multi-tenant.
     if (!organizationId) {
-      const { data } = await supabase
-        .from('organizations')
-        .select('id')
-        .eq('is_active', true)
-        .order('created_at', { ascending: true })
-        .limit(1)
-        .maybeSingle()
-      organizationId = data?.id ?? null
+      console.error(JSON.stringify({
+        level: 'error',
+        function_name: 'stripe-webhook',
+        message: 'Tenant resolution failed — no fallback, rejecting event',
+        event_id: event.id,
+        event_type: event.type,
+        customer: (event.data.object as { customer?: string }).customer ?? null,
+      }))
+      await alertSlack(
+        `stripe-webhook: tenant resolution failed for event ${event.id} (${event.type}). Event dropped.`,
+        { level: 'warning' },
+      )
+      // Retourner 200 pour éviter les retries Stripe, mais ne PAS traiter l'événement
+      return jsonResponse({ received: true, handled: false, reason: 'tenant_not_found' })
     }
   }
 
