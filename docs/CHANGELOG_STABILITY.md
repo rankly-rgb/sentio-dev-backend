@@ -311,6 +311,85 @@ Refactoring de `export-segment-csv` pour aligner le backend sur les filtres du f
 
 ---
 
+## Webhook Universel Sortant v1 (2026-03-07)
+
+Systeme de webhook sortant universel permettant a Sentio AI de declencher des actions dans n'importe quel outil tiers (Brevo, Klaviyo, Salesforce, backend custom) sans integration specifique. Zero-PII garanti : seul le `stripe_customer_id` (identifiant technique anonyme) est transmis. Le mapping vers l'email est fait cote client via l'integration Stripe native de leur outil.
+
+**Migration `20260307000004_webhook_outbound.sql` :**
+- Extension `webhook_configs` : `active_events` (JSONB), `last_triggered_at`, `failure_count`
+- Provider CHECK elargi : `stripe`, `hubspot`, `usage`, `webhook`
+- Extension `webhook_dead_letter` : provider CHECK ajoute `outbound_webhook`
+- RPC `increment_webhook_failure(p_org_id)` : incrementation atomique + RETURNING
+
+**Shared helpers `_shared/webhook-helpers.ts` (pures, testables Vitest) :**
+- `buildPayload()` : construit le payload standardise (event, account, signals, metadata)
+- `isEventActive()` : verifie si un evenement est dans la liste active_events
+- `shouldDisableWebhook()` : true si failure_count >= 5
+- `computeHmacSignature()` : HMAC-SHA256 via crypto.subtle
+- `mapPlaybookToEvent()` : mappe trigger_conditions d'un playbook vers un WebhookEvent
+- `containsPII()` : detection recursive de champs PII dans un objet
+
+**Shared module `_shared/webhook-dispatcher.ts` (orchestrateur Deno) :**
+- Re-exporte les fonctions pures de webhook-helpers.ts
+- `dispatchWebhook()` : query config → filtre event → build payload → signe HMAC → envoie avec retry(3x) + circuit breaker(5 fails/60s reset) + timeout(10s)
+- Succes : reset failure_count, update last_triggered_at
+- Echec : increment failure_count (RPC atomique), DLQ write, auto-disable a 5 echecs + alerte Slack
+- Ne throw jamais (fire-and-forget pour ne pas bloquer le flux principal)
+
+**Edge Functions :**
+
+| Fonction | Trigger | Role |
+|----------|---------|------|
+| `configure-webhook` | REST (JWT) | GET config (secret masque), POST creer/MAJ, DELETE desactiver |
+| `test-webhook` | POST (JWT) | Envoie payload test `cus_TEST_sentio_demo`, retourne status_code + latency_ms |
+| `regenerate-webhook-secret` | POST (JWT) | Genere nouveau secret HMAC, retourne en clair une fois, log audit |
+
+**Payload standardise :**
+```json
+{
+  "event": "churn_risk_critical",
+  "triggered_at": "2026-03-07T...",
+  "organization_id": "uuid",
+  "account": {
+    "account_id": "uuid",
+    "stripe_customer_id": "cus_xxx",
+    "hubspot_company_id": "hs_xxx"
+  },
+  "signals": {
+    "health_score": 28,
+    "churn_risk_score": 84,
+    "expansion_score": 12,
+    "mrr_cents": 49900,
+    "trigger_reason": "churn_risk > 70"
+  },
+  "metadata": { "playbook_id": "..." }
+}
+```
+
+**Headers HTTP sortants :**
+- `X-Sentio-Event` : type d'evenement
+- `X-Sentio-Signature` : HMAC-SHA256 hex
+- `X-Sentio-Timestamp` : unix timestamp
+- `X-Sentio-Version` : `1`
+
+**6 evenements supportes :**
+`churn_risk_critical`, `payment_failed`, `renewal_reminder`, `expansion_opportunity`, `health_score_drop`, `onboarding_completed`
+
+**Integrations dans les Edge Functions existantes :**
+- `playbook-execute` : dispatch webhook apres chaque execution reussie (event mappe via `mapPlaybookToEvent`)
+- `stripe-webhook` : dispatch `payment_failed` sur `invoice.payment_failed`
+- `calculate-scores` : dispatch `churn_risk_critical` quand un compte franchit le seuil 70
+
+**Tests : 31 nouveaux tests (363 total) :**
+- Payload : champs requis, hubspot optionnel, metadata, stripe_customer_id toujours present
+- Zero-PII : pas d'email/nom/phone dans le payload, detection PII recursive
+- isEventActive : filtre actif/inactif, liste vide
+- shouldDisableWebhook : boundaries 4/5
+- HMAC : format hex 64 chars, deterministe, different par payload/secret
+- mapPlaybookToEvent : churn_risk, health_score, expansion, null, vide, non-reconnu
+
+---
+
 ## Backlog
 
 - Créer `sync-hubspot` Edge Function

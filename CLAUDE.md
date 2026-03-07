@@ -27,7 +27,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 | Langage | TypeScript 5.x (target ES5 — pas de `[...new Set()]`) |
 | Styling | Tailwind CSS 3.x |
 | Auth | @supabase/ssr (cookies, PKCE, ES256) |
-| Tests | Vitest (332 tests) |
+| Tests | Vitest (363 tests) |
 | CI/CD | GitHub Actions + Vercel |
 
 **Phase actuelle** : setup/dev. Production intentionnellement inactif.
@@ -74,6 +74,9 @@ Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financi
 | `workflow-step-processor` | POST | Workflow steps |
 | `export-playbook-accounts` | POST (JWT) | Export CSV/JSON comptes playbook |
 | `export-segment-csv` | GET (JWT) | Export CSV comptes par segment (filtrage in-memory, BOM UTF-8) |
+| `configure-webhook` | REST (JWT) | CRUD config webhook sortant (GET/POST/DELETE) |
+| `test-webhook` | POST (JWT) | Envoi d'un webhook de test au endpoint client |
+| `regenerate-webhook-secret` | POST (JWT) | Régénération du secret HMAC webhook |
 
 ### Pattern Edge Function (obligatoire)
 
