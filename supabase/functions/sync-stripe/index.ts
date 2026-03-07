@@ -14,6 +14,7 @@ import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
 import { CircuitBreaker } from '../_shared/circuit-breaker.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
+import { getVaultSecret } from '../_shared/vault.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
@@ -72,15 +73,67 @@ interface StripeInvoice {
   status_transitions?: { paid_at?: number | null }
 }
 
+// ── Credentials OAuth par org ──────────────────────────────────
+
+interface StripeCredentials {
+  apiKey: string
+  stripeAccount: string | null // Stripe-Account header pour Connect
+}
+
+async function getStripeCredentials(
+  supabase: SupabaseClient,
+  organizationId: string,
+): Promise<StripeCredentials> {
+  // Priorite 1 : token OAuth par org depuis Vault
+  const { data: integration } = await supabase
+    .from('organization_integrations')
+    .select('vault_access_token_id, provider_account_id, status')
+    .eq('organization_id', organizationId)
+    .eq('provider', 'stripe')
+    .eq('status', 'active')
+    .maybeSingle()
+
+  if (integration?.vault_access_token_id) {
+    const accessToken = await getVaultSecret(supabase, integration.vault_access_token_id)
+    if (accessToken) {
+      return {
+        apiKey: accessToken,
+        stripeAccount: integration.provider_account_id,
+      }
+    }
+  }
+
+  // Fallback temporaire : cle globale depuis env var
+  // A supprimer apres migration complete de tous les orgs vers OAuth
+  const globalKey = Deno.env.get('STRIPE_SECRET_KEY')
+  if (globalKey) {
+    console.warn(JSON.stringify({
+      level: 'warn',
+      function_name: 'sync-stripe',
+      message: 'Using global STRIPE_SECRET_KEY fallback — org needs OAuth migration',
+      organization_id: organizationId,
+    }))
+    return { apiKey: globalKey, stripeAccount: null }
+  }
+
+  throw new Error('No Stripe credentials available: no OAuth token and no global key')
+}
+
 // ── Helpers Stripe API ────────────────────────────────────────
 async function stripeGet<T>(
   path: string,
   apiKey: string,
   params?: Record<string, string>,
+  stripeAccount?: string | null,
 ): Promise<T> {
   const url = new URL(`${STRIPE_API_BASE}${path}`)
   if (params) {
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v)
+  }
+
+  const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}` }
+  if (stripeAccount) {
+    headers['Stripe-Account'] = stripeAccount
   }
 
   return retryWithBackoff(
@@ -88,7 +141,7 @@ async function stripeGet<T>(
       stripeCircuitBreaker.execute(async () => {
         const resp = await fetchWithTimeout(
           url.toString(),
-          { headers: { Authorization: `Bearer ${apiKey}` } },
+          { headers },
           STRIPE_TIMEOUT_MS,
         )
         if (!resp.ok) {
@@ -116,6 +169,7 @@ async function* paginateStripe<T>(
   apiKey: string,
   extraParams?: Record<string, string>,
   logger?: DataSyncLogger,
+  stripeAccount?: string | null,
 ): AsyncGenerator<T> {
   let startingAfter: string | undefined
   let hasMore = true
@@ -137,7 +191,7 @@ async function* paginateStripe<T>(
     }
     if (startingAfter) params['starting_after'] = startingAfter
 
-    const page = await stripeGet<StripeListResponse<T & { id: string }>>(path, apiKey, params)
+    const page = await stripeGet<StripeListResponse<T & { id: string }>>(path, apiKey, params, stripeAccount)
     logger?.increment('api_calls_made')
     pageCount++
 
@@ -169,14 +223,14 @@ function calcMrrCents(sub: StripeSubscription): number {
 async function syncCustomers(
   supabase: SupabaseClient,
   organizationId: string,
-  apiKey: string,
+  creds: StripeCredentials,
   logger: DataSyncLogger,
   createdAfter?: number,
 ): Promise<void> {
   const extraParams: Record<string, string> = {}
   if (createdAfter) extraParams['created[gt]'] = String(createdAfter)
 
-  for await (const customer of paginateStripe<StripeCustomer>('/customers', apiKey, extraParams, logger)) {
+  for await (const customer of paginateStripe<StripeCustomer>('/customers', creds.apiKey, extraParams, logger, creds.stripeAccount)) {
     const { error } = await supabase
       .from('accounts')
       .upsert(
@@ -204,7 +258,7 @@ async function syncCustomers(
 async function syncSubscriptions(
   supabase: SupabaseClient,
   organizationId: string,
-  apiKey: string,
+  creds: StripeCredentials,
   logger: DataSyncLogger,
 ): Promise<void> {
   const extraParams: Record<string, string> = { status: 'all' }
@@ -229,7 +283,7 @@ async function syncSubscriptions(
     contractEnd: string | null
   }>>()
 
-  for await (const sub of paginateStripe<StripeSubscription>('/subscriptions', apiKey, extraParams, logger)) {
+  for await (const sub of paginateStripe<StripeSubscription>('/subscriptions', creds.apiKey, extraParams, logger, creds.stripeAccount)) {
     // Résoudre l'account via la Map pré-construite (O(1) au lieu d'un SELECT)
     const accountId = customerToAccount.get(sub.customer)
 
@@ -342,7 +396,7 @@ async function syncSubscriptions(
 async function syncInvoices(
   supabase: SupabaseClient,
   organizationId: string,
-  apiKey: string,
+  creds: StripeCredentials,
   logger: DataSyncLogger,
   createdAfter?: number,
 ): Promise<void> {
@@ -365,7 +419,7 @@ async function syncInvoices(
     if (s.stripe_sub_id) stripeSubMap.set(s.stripe_sub_id, s.id)
   }
 
-  for await (const invoice of paginateStripe<StripeInvoice>('/invoices', apiKey, extraParams, logger)) {
+  for await (const invoice of paginateStripe<StripeInvoice>('/invoices', creds.apiKey, extraParams, logger, creds.stripeAccount)) {
     const accountId = invoiceCustomerMap.get(invoice.customer)
 
     if (!accountId) {
@@ -420,14 +474,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Method not allowed', 405)
   }
 
-  const apiKey = Deno.env.get('STRIPE_SECRET_KEY')
-  if (!apiKey) {
-    return errorResponse('STRIPE_SECRET_KEY not configured', 500)
-  }
-
   let body: {
     organization_id?: string
-    sync_type?: 'incremental' | 'full_sync'
+    sync_type?: 'incremental' | 'full_sync' | 'initial'
     created_after?: number
     is_manual?: boolean
   } = {}
@@ -447,21 +496,31 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Server configuration error', 500)
   }
 
-  // Résoudre l'organisation
-  let organizationId = body.organization_id
+  // Résoudre l'organisation — organization_id obligatoire
+  const organizationId = body.organization_id
   if (!organizationId) {
-    const { data } = await supabase
-      .from('organizations')
-      .select('id')
-      .eq('is_active', true)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .single()
-    organizationId = data?.id
+    return errorResponse('organization_id is required', 400)
   }
 
-  if (!organizationId) {
-    return errorResponse('No active organization found', 404)
+  // Verifier que l'org existe et est active
+  const { data: org } = await supabase
+    .from('organizations')
+    .select('id')
+    .eq('id', organizationId)
+    .eq('is_active', true)
+    .maybeSingle()
+
+  if (!org) {
+    return errorResponse('Organization not found or inactive', 404)
+  }
+
+  // Recuperer les credentials Stripe (OAuth Vault → fallback env var)
+  let creds: StripeCredentials
+  try {
+    creds = await getStripeCredentials(supabase, organizationId)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return errorResponse(`Stripe credentials error: ${msg}`, 500)
   }
 
   const syncType = body.sync_type ?? 'incremental'
@@ -514,9 +573,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   try {
     // Sync dans l'ordre : customers → subscriptions (always full) → invoices
-    await syncCustomers(supabase, organizationId, apiKey, logger, createdAfter)
-    await syncSubscriptions(supabase, organizationId, apiKey, logger)
-    await syncInvoices(supabase, organizationId, apiKey, logger, createdAfter)
+    await syncCustomers(supabase, organizationId, creds, logger, createdAfter)
+    await syncSubscriptions(supabase, organizationId, creds, logger)
+    await syncInvoices(supabase, organizationId, creds, logger, createdAfter)
 
     // Mettre à jour le timestamp de sync sur l'organisation
     await supabase
