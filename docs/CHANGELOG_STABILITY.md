@@ -392,8 +392,34 @@ Systeme de webhook sortant universel permettant a Sentio AI de declencher des ac
 
 ---
 
+## OAuth Multi-tenant + Completions v1 (2026-03-08)
+
+Audit du prompt "OAuth Multi-tenant + Webhook Universel Sortant" : 3 ecarts corriges + documentation.
+
+**Migration `20260308000003_cron_refresh_hubspot_tokens.sql` :**
+- Cron `refresh-hubspot-tokens` : `0 */5 * * *` (toutes les 5h, avant expiration 6h HubSpot)
+- Cron `cleanup-expired-oauth-states` : `0 * * * *` (nettoyage horaire des states CSRF expires)
+
+**stripe-webhook : `customer.subscription.trial_will_end` :**
+- Ajout dans `ROUTED_EVENTS`
+- Handler via `handleSubscriptionEvent` existant
+- Dispatch webhook `renewal_reminder` avec date de fin de trial dans `trigger_reason`
+- Permet aux clients de declencher des actions (email Brevo, task CRM) avant expiration du trial
+
+**Tests : 29 nouveaux tests (425 total) :**
+- `oauth-integration.test.ts` : 8 suites couvrant les scenarios requis par le prompt
+- OAuth state TTL 10 min : 5 tests (validite, expiration, boundary)
+- OAuth state single-use : 2 tests (Map-based simulation, expiry check)
+- Tenant resolution null sans fallback : 3 tests (Connect, customer, chain complete)
+- Revocation ordre operations : 2 tests (provider API > Vault > DB, echec partiel)
+- Refresh token failure Slack : 3 tests (status expired, isTokenExpiringSoon, message format)
+- Webhook payload Zero-PII : 4 tests (clean, email inject, nested PII, stripe_customer_id ok)
+- Webhook HMAC depuis Vault : 4 tests (signature, differentes cles, determinisme, priorite Vault)
+- Circuit breaker 5 echecs : 6 tests (boundaries, escalation flow, reset)
+
+---
+
 ## Backlog
 
-- Créer `sync-hubspot` Edge Function
 - Propager `contract_end_date` dans `stripe-webhook`
 - NPS : collecte + intégration scoring (V2)

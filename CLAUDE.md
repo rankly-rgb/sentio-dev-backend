@@ -27,7 +27,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 | Langage | TypeScript 5.x (target ES5 — pas de `[...new Set()]`) |
 | Styling | Tailwind CSS 3.x |
 | Auth | @supabase/ssr (cookies, PKCE, ES256) |
-| Tests | Vitest (363 tests) |
+| Tests | Vitest (425 tests) |
 | CI/CD | GitHub Actions + Vercel |
 
 **Phase actuelle** : setup/dev. Production intentionnellement inactif.
@@ -37,7 +37,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 ```bash
 npm run dev          # Serveur Next.js local
 npm run build        # Build production
-npm run test         # Tests Vitest (332 tests)
+npm run test         # Tests Vitest (425 tests)
 npm run lint         # ESLint
 npm run typecheck    # TypeScript check (tsc --noEmit)
 npm run verify       # typecheck + lint + test + build (post-modification)
@@ -75,6 +75,9 @@ Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financi
 | `export-playbook-accounts` | POST (JWT) | Export CSV/JSON comptes playbook |
 | `export-segment-csv` | GET (JWT) | Export CSV comptes par segment (filtrage in-memory, BOM UTF-8) |
 | `webhook-config` | REST (JWT) | Config webhook sortant (GET/POST, /test, /regenerate-secret, /disable) |
+| `integration-oauth` | REST (JWT/CSRF) | OAuth Stripe Connect + HubSpot (authorize, callback, status, revoke) |
+| `sync-hubspot` | POST (cron) | Sync HubSpot companies (OAuth Vault, Zero-PII) |
+| `refresh-hubspot-tokens` | POST (cron 5h) | Refresh tokens HubSpot avant expiration 6h |
 
 ### Pattern Edge Function (obligatoire)
 
@@ -151,7 +154,7 @@ Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financi
 
 ## Tables principales
 
-`organizations`, `accounts`, `subscriptions`, `invoices`, `mrr_movements`, `usage_events`, `hubspot_companies`, `score_history`, `customer_segments`, `segment_memberships`, `ai_insights`, `playbooks`, `playbook_executions`, `playbook_exports`, `data_syncs`, `webhook_configs`, `webhook_dead_letter`, `cron_locks`
+`organizations`, `accounts`, `subscriptions`, `invoices`, `mrr_movements`, `usage_events`, `hubspot_companies`, `score_history`, `customer_segments`, `segment_memberships`, `ai_insights`, `playbooks`, `playbook_executions`, `playbook_exports`, `data_syncs`, `webhook_configs`, `webhook_dead_letter`, `cron_locks`, `organization_integrations`, `oauth_states`
 
 ## Variables d'environnement
 
@@ -162,5 +165,10 @@ Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financi
 | `SUPABASE_SERVICE_ROLE_KEY` | Oui | Server/Edge Functions |
 | `STRIPE_SECRET_KEY` | Oui | API Stripe |
 | `STRIPE_WEBHOOK_SECRET` | Oui | HMAC webhooks |
-| `HUBSPOT_API_KEY` | Non | API HubSpot |
+| `HUBSPOT_API_KEY` | Non | API HubSpot (legacy, remplacé par OAuth) |
 | `SLACK_WEBHOOK_URL` | Non | Alertes monitoring |
+| `STRIPE_CONNECT_CLIENT_ID` | Non | OAuth Stripe Connect (ca_xxx) |
+| `STRIPE_OAUTH_REDIRECT_URI` | Non | Callback OAuth Stripe |
+| `HUBSPOT_CLIENT_ID` | Non | OAuth HubSpot app |
+| `HUBSPOT_CLIENT_SECRET` | Non | OAuth HubSpot app |
+| `HUBSPOT_OAUTH_REDIRECT_URI` | Non | Callback OAuth HubSpot |
