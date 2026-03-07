@@ -57,3 +57,7 @@ verify_jwt = true
 # export-playbook-accounts : JWT vérifié dans le code (ES256 incompatible avec verify_jwt)
 [functions.export-playbook-accounts]
 verify_jwt = false
+
+# export-segment-csv : JWT vérifié dans le code (ES256 incompatible avec verify_jwt)
+[functions.export-segment-csv]
+verify_jwt = false
