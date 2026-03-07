@@ -3,6 +3,7 @@ import {
   buildSegmentCsv,
   convertMrrCentsToEur,
   SEGMENT_CSV_COLUMNS,
+  SEGMENT_FILTERS,
   type SegmentAccountRow,
 } from '../functions/_shared/segment-export-helpers'
 import {
@@ -15,7 +16,7 @@ import {
 // ── Helper ──────────────────────────────────────────────────
 
 function makeRow(overrides: Partial<SegmentAccountRow> = {}): SegmentAccountRow {
-  return {
+  const base: SegmentAccountRow = {
     stripe_customer_id: 'cus_test123',
     hubspot_company_id: 'hub_test456',
     plan_tier: 'growth',
@@ -28,8 +29,9 @@ function makeRow(overrides: Partial<SegmentAccountRow> = {}): SegmentAccountRow 
     churn_risk_score: 35,
     expansion_score: 65,
     product_usage_score: 58,
-    ...overrides,
+    created_at: '2025-01-15T00:00:00Z',
   }
+  return Object.assign(base, overrides)
 }
 
 // ── Zero-PII check ──────────────────────────────────────────
@@ -41,17 +43,25 @@ describe('Zero-PII compliance', () => {
     expect(lower).not.toContain('email')
     expect(lower).not.toContain('phone')
     expect(lower).not.toContain('address')
-    // Column headers should not have "name" (except segment_name-like technical fields)
-    const headerLine = csv.split('\n')[1] // line after comment
+    const headerLine = csv.split('\n')[0].replace(/^\uFEFF/, '') // skip BOM
     expect(headerLine).not.toContain('first_name')
     expect(headerLine).not.toContain('last_name')
     expect(headerLine).not.toContain('company_name')
   })
+})
 
-  it('CSV starts with Zero-PII compliance comment', () => {
+// ── BOM UTF-8 ───────────────────────────────────────────────
+
+describe('BOM UTF-8', () => {
+  it('CSV starts with UTF-8 BOM for Excel FR compatibility', () => {
     const csv = buildSegmentCsv([makeRow()])
-    expect(csv.startsWith('# Sentio AI Export')).toBe(true)
-    expect(csv).toContain('Zero-PII compliant')
+    expect(csv.charCodeAt(0)).toBe(0xFEFF)
+  })
+
+  it('first line after BOM is the column header', () => {
+    const csv = buildSegmentCsv([makeRow()])
+    const firstLine = csv.replace(/^\uFEFF/, '').split('\n')[0]
+    expect(firstLine).toBe(SEGMENT_CSV_COLUMNS.join(','))
   })
 })
 
@@ -86,17 +96,17 @@ describe('buildSegmentCsv', () => {
     expect(SEGMENT_CSV_COLUMNS.length).toBe(12)
   })
 
-  it('produces header + comment + data rows', () => {
+  it('produces header + data rows (no comment line)', () => {
     const csv = buildSegmentCsv([makeRow(), makeRow()])
-    const lines = csv.trim().split('\n')
-    // line 0: comment, line 1: header, lines 2-3: data
-    expect(lines.length).toBe(4)
+    const lines = csv.replace(/^\uFEFF/, '').trim().split('\n')
+    // line 0: header, lines 1-2: data
+    expect(lines.length).toBe(3)
   })
 
   it('converts mrr_cents to mrr_eur in CSV', () => {
     const csv = buildSegmentCsv([makeRow({ mrr_cents: 150000 })])
-    const dataLine = csv.trim().split('\n')[2]
-    expect(dataLine).toContain('1500.00')
+    const lines = csv.replace(/^\uFEFF/, '').trim().split('\n')
+    expect(lines[1]).toContain('1500.00')
   })
 
   it('handles null values as empty strings', () => {
@@ -107,40 +117,153 @@ describe('buildSegmentCsv', () => {
       seat_count: null,
       health_score: null,
     })])
-    const dataLine = csv.trim().split('\n')[2]
-    const fields = dataLine.split(',')
-    // hubspot_company_id (index 1) should be empty
-    expect(fields[1]).toBe('')
-    // plan_tier (index 2) should be empty
-    expect(fields[2]).toBe('')
-    // mrr_eur (index 4) should be empty
-    expect(fields[4]).toBe('')
+    const lines = csv.replace(/^\uFEFF/, '').trim().split('\n')
+    const fields = lines[1].split(',')
+    expect(fields[1]).toBe('') // hubspot_company_id
+    expect(fields[2]).toBe('') // plan_tier
+    expect(fields[4]).toBe('') // mrr_eur
   })
 
   it('escapes commas in values', () => {
     const csv = buildSegmentCsv([makeRow({ plan_tier: 'growth,enterprise' })])
-    const dataLine = csv.trim().split('\n')[2]
-    expect(dataLine).toContain('"growth,enterprise"')
+    const lines = csv.replace(/^\uFEFF/, '').trim().split('\n')
+    expect(lines[1]).toContain('"growth,enterprise"')
   })
 
   it('escapes double quotes in values', () => {
     const csv = buildSegmentCsv([makeRow({ plan_tier: 'tier "pro"' })])
-    const dataLine = csv.trim().split('\n')[2]
-    expect(dataLine).toContain('"tier ""pro"""')
+    const lines = csv.replace(/^\uFEFF/, '').trim().split('\n')
+    expect(lines[1]).toContain('"tier ""pro"""')
   })
 
   it('produces empty CSV (header only) for zero accounts', () => {
     const csv = buildSegmentCsv([])
-    const lines = csv.trim().split('\n')
-    expect(lines.length).toBe(2) // comment + header
+    const lines = csv.replace(/^\uFEFF/, '').trim().split('\n')
+    expect(lines.length).toBe(1) // header only
   })
 
   it('row count matches input length', () => {
     const accounts = [makeRow(), makeRow(), makeRow()]
     const csv = buildSegmentCsv(accounts)
-    const lines = csv.trim().split('\n')
-    // comment + header + 3 data lines
-    expect(lines.length - 2).toBe(accounts.length)
+    const lines = csv.replace(/^\uFEFF/, '').trim().split('\n')
+    // header + 3 data lines
+    expect(lines.length - 1).toBe(accounts.length)
+  })
+})
+
+// ── Segment Filters ─────────────────────────────────────────
+
+describe('SEGMENT_FILTERS', () => {
+  it('has a filter for each valid segment', () => {
+    for (const seg of VALID_SEGMENTS) {
+      expect(typeof SEGMENT_FILTERS[seg]).toBe('function')
+    }
+  })
+
+  describe('champions', () => {
+    it('matches health > 80 AND expansion > 70', () => {
+      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: 85, expansion_score: 75 }))).toBe(true)
+    })
+    it('rejects health = 80 (not strictly >)', () => {
+      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: 80, expansion_score: 75 }))).toBe(false)
+    })
+    it('rejects expansion = 70 (not strictly >)', () => {
+      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: 85, expansion_score: 70 }))).toBe(false)
+    })
+  })
+
+  describe('en_expansion', () => {
+    it('matches expansion > 75', () => {
+      expect(SEGMENT_FILTERS.en_expansion(makeRow({ expansion_score: 80 }))).toBe(true)
+    })
+    it('rejects expansion = 75', () => {
+      expect(SEGMENT_FILTERS.en_expansion(makeRow({ expansion_score: 75 }))).toBe(false)
+    })
+  })
+
+  describe('stables', () => {
+    it('matches health 60-80 AND churn_risk < 30', () => {
+      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 70, churn_risk_score: 20 }))).toBe(true)
+    })
+    it('matches health = 60 (boundary inclusive)', () => {
+      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 60, churn_risk_score: 10 }))).toBe(true)
+    })
+    it('matches health = 80 (boundary inclusive)', () => {
+      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 80, churn_risk_score: 10 }))).toBe(true)
+    })
+    it('rejects churn_risk = 30', () => {
+      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 70, churn_risk_score: 30 }))).toBe(false)
+    })
+  })
+
+  describe('a_risque_leger', () => {
+    it('matches health 40-59', () => {
+      expect(SEGMENT_FILTERS.a_risque_leger(makeRow({ health_score: 50, churn_risk_score: 10 }))).toBe(true)
+    })
+    it('matches churn_risk 30-50', () => {
+      expect(SEGMENT_FILTERS.a_risque_leger(makeRow({ health_score: 80, churn_risk_score: 40 }))).toBe(true)
+    })
+    it('rejects health >= 60 AND churn_risk < 30', () => {
+      expect(SEGMENT_FILTERS.a_risque_leger(makeRow({ health_score: 70, churn_risk_score: 20 }))).toBe(false)
+    })
+  })
+
+  describe('en_danger_critique', () => {
+    it('matches health < 40', () => {
+      expect(SEGMENT_FILTERS.en_danger_critique(makeRow({ health_score: 30, churn_risk_score: 50 }))).toBe(true)
+    })
+    it('matches churn_risk > 70', () => {
+      expect(SEGMENT_FILTERS.en_danger_critique(makeRow({ health_score: 60, churn_risk_score: 75 }))).toBe(true)
+    })
+    it('rejects health = 40 AND churn_risk = 70', () => {
+      expect(SEGMENT_FILTERS.en_danger_critique(makeRow({ health_score: 40, churn_risk_score: 70 }))).toBe(false)
+    })
+  })
+
+  describe('impayes', () => {
+    it('matches churn_risk > 80 AND health < 50', () => {
+      expect(SEGMENT_FILTERS.impayes(makeRow({ churn_risk_score: 85, health_score: 40 }))).toBe(true)
+    })
+    it('rejects churn_risk = 80', () => {
+      expect(SEGMENT_FILTERS.impayes(makeRow({ churn_risk_score: 80, health_score: 40 }))).toBe(false)
+    })
+    it('rejects health = 50', () => {
+      expect(SEGMENT_FILTERS.impayes(makeRow({ churn_risk_score: 85, health_score: 50 }))).toBe(false)
+    })
+  })
+
+  describe('en_churn', () => {
+    it('matches churn_risk > 90', () => {
+      expect(SEGMENT_FILTERS.en_churn(makeRow({ churn_risk_score: 95 }))).toBe(true)
+    })
+    it('rejects churn_risk = 90', () => {
+      expect(SEGMENT_FILTERS.en_churn(makeRow({ churn_risk_score: 90 }))).toBe(false)
+    })
+  })
+
+  describe('nouveaux', () => {
+    it('matches account created less than 90 days ago', () => {
+      const recent = new Date()
+      recent.setDate(recent.getDate() - 30)
+      expect(SEGMENT_FILTERS.nouveaux(makeRow({ created_at: recent.toISOString() }))).toBe(true)
+    })
+    it('rejects account created more than 90 days ago', () => {
+      const old = new Date()
+      old.setDate(old.getDate() - 100)
+      expect(SEGMENT_FILTERS.nouveaux(makeRow({ created_at: old.toISOString() }))).toBe(false)
+    })
+    it('rejects null created_at', () => {
+      expect(SEGMENT_FILTERS.nouveaux(makeRow({ created_at: null }))).toBe(false)
+    })
+  })
+
+  describe('null score handling', () => {
+    it('treats null scores as 0 for champions', () => {
+      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: null, expansion_score: null }))).toBe(false)
+    })
+    it('treats null churn_risk as 0 for en_churn', () => {
+      expect(SEGMENT_FILTERS.en_churn(makeRow({ churn_risk_score: null }))).toBe(false)
+    })
   })
 })
 
@@ -156,14 +279,12 @@ describe('isValidSegment', () => {
   it('rejects invalid segment', () => {
     expect(isValidSegment('invalid')).toBe(false)
     expect(isValidSegment('')).toBe(false)
-    expect(isValidSegment('Champions')).toBe(false) // case sensitive
+    expect(isValidSegment('Champions')).toBe(false)
   })
 
   it('uses correct segment names from codebase', () => {
-    // Verify codebase naming (a_risque_leger, en_danger_critique)
     expect(isValidSegment('a_risque_leger')).toBe(true)
     expect(isValidSegment('en_danger_critique')).toBe(true)
-    // Reject alternative naming
     expect(isValidSegment('risque_leger')).toBe(false)
     expect(isValidSegment('danger_critique')).toBe(false)
   })
