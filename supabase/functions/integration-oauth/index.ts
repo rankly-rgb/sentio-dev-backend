@@ -119,19 +119,31 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .lt('expires_at', new Date().toISOString())
 
     // Stocker le state
+    const statePayload = {
+      organization_id: orgId,
+      provider,
+      state,
+      redirect_after: redirectAfter,
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    }
+    console.log(JSON.stringify({ level: 'info', step: 'authorize_insert_state', provider, state_prefix: state.substring(0, 8), org_id: orgId }))
+
     const { error: stateError } = await supabase
       .from('oauth_states')
-      .insert({
-        organization_id: orgId,
-        provider,
-        state,
-        redirect_after: redirectAfter,
-        expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-      })
+      .insert(statePayload)
 
     if (stateError) {
+      console.error(JSON.stringify({ level: 'error', step: 'authorize_insert_state_failed', error: stateError.message, code: stateError.code, details: stateError.details }))
       return errorResponse('Erreur lors de la creation du state OAuth', 500)
     }
+
+    // Verify the state was persisted
+    const { data: verifyState, error: verifyError } = await supabase
+      .from('oauth_states')
+      .select('id, state')
+      .eq('state', state)
+      .maybeSingle()
+    console.log(JSON.stringify({ level: 'info', step: 'authorize_verify_state', found: !!verifyState, verify_error: verifyError?.message ?? null }))
 
     // Construire l'URL OAuth
     let authorizationUrl: string
@@ -265,6 +277,8 @@ async function handleCallback(req: Request, provider: OAuthProvider): Promise<Re
   }
 
   // 1. Valider le state anti-CSRF
+  console.log(JSON.stringify({ level: 'info', step: 'callback_lookup_state', provider, state_prefix: params.state.substring(0, 8), state_length: params.state.length }))
+
   const { data: storedState, error: stateError } = await supabase
     .from('oauth_states')
     .select('*')
@@ -272,8 +286,33 @@ async function handleCallback(req: Request, provider: OAuthProvider): Promise<Re
     .eq('provider', provider)
     .maybeSingle()
 
+  console.log(JSON.stringify({ level: 'info', step: 'callback_lookup_result', found: !!storedState, error: stateError?.message ?? null, error_code: stateError?.code ?? null }))
+
   if (stateError || !storedState) {
-    return errorResponse('State OAuth invalide ou inconnu', 400)
+    // Debug: list all states for this provider
+    const { data: allStates, error: listErr } = await supabase
+      .from('oauth_states')
+      .select('state, provider, expires_at, created_at')
+      .eq('provider', provider)
+    // TEMP DEBUG: return diagnostic info to help resolve the issue
+    return jsonResponse({
+      error: 'State OAuth invalide ou inconnu',
+      debug: {
+        state_prefix: params.state.substring(0, 12),
+        state_length: params.state.length,
+        provider,
+        lookup_error: stateError?.message ?? null,
+        lookup_error_code: stateError?.code ?? null,
+        existing_states_count: allStates?.length ?? 0,
+        existing_states: allStates?.map(s => ({
+          prefix: s.state.substring(0, 12),
+          provider: s.provider,
+          expires_at: s.expires_at,
+          created_at: s.created_at,
+        })) ?? [],
+        list_error: listErr?.message ?? null,
+      },
+    }, 400)
   }
 
   if (isStateExpired(storedState.expires_at)) {
