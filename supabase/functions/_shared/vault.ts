@@ -1,6 +1,7 @@
 // ============================================================
 // Supabase Vault — Helper pour stocker/lire des secrets chiffres
-// Utilise vault.secrets (chiffrement AES-256-GCM cote serveur)
+// Utilise vault.secrets via RPC SQL (le schema vault n'est pas
+// accessible via .from() qui cible le schema public par defaut)
 // Les valeurs dechiffrees ne sont JAMAIS loggees.
 // ============================================================
 
@@ -15,13 +16,10 @@ export async function getVaultSecret(
   vaultSecretId: string,
 ): Promise<string | null> {
   const { data, error } = await supabase
-    .from('vault.decrypted_secrets')
-    .select('decrypted_secret')
-    .eq('id', vaultSecretId)
-    .maybeSingle()
+    .rpc('vault_read_secret', { secret_id: vaultSecretId })
 
-  if (error || !data) return null
-  return data.decrypted_secret
+  if (error || !data || data.length === 0) return null
+  return data[0].decrypted_secret
 }
 
 /**
@@ -35,19 +33,16 @@ export async function storeVaultSecret(
   description?: string,
 ): Promise<string> {
   const { data, error } = await supabase
-    .from('vault.secrets')
-    .insert({
-      secret: value,
-      name,
-      ...(description ? { description } : {}),
+    .rpc('vault_store_secret', {
+      p_secret: value,
+      p_name: name,
+      p_description: description ?? '',
     })
-    .select('id')
-    .single()
 
   if (error || !data) {
     throw new Error(`Failed to store secret in vault: ${error?.message ?? 'unknown error'}`)
   }
-  return data.id
+  return data as string
 }
 
 /**
@@ -59,9 +54,10 @@ export async function updateVaultSecret(
   newValue: string,
 ): Promise<void> {
   const { error } = await supabase
-    .from('vault.secrets')
-    .update({ secret: newValue })
-    .eq('id', vaultSecretId)
+    .rpc('vault_update_secret', {
+      secret_id: vaultSecretId,
+      new_secret: newValue,
+    })
 
   if (error) {
     throw new Error(`Failed to update vault secret: ${error.message}`)
@@ -76,9 +72,7 @@ export async function deleteVaultSecret(
   vaultSecretId: string,
 ): Promise<void> {
   const { error } = await supabase
-    .from('vault.secrets')
-    .delete()
-    .eq('id', vaultSecretId)
+    .rpc('vault_delete_secret', { secret_id: vaultSecretId })
 
   if (error) {
     throw new Error(`Failed to delete vault secret: ${error.message}`)
