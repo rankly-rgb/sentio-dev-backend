@@ -61,6 +61,7 @@ export function buildHubSpotAuthorizeUrl(
   clientId: string,
   redirectUri: string,
   state: string,
+  hubspotDomain = 'app-eu1.hubspot.com',
 ): string {
   const params = new URLSearchParams({
     client_id: clientId,
@@ -68,7 +69,7 @@ export function buildHubSpotAuthorizeUrl(
     scope: HUBSPOT_SCOPES.join(' '),
     state,
   })
-  return `https://app.hubspot.com/oauth/authorize?${params.toString()}`
+  return `https://${hubspotDomain}/oauth/authorize?${params.toString()}`
 }
 
 // ── Parsing callback ──────────────────────────────────────────

@@ -98,7 +98,7 @@ describe('buildStripeAuthorizeUrl', () => {
 describe('buildHubSpotAuthorizeUrl', () => {
   it('builds correct HubSpot OAuth URL', () => {
     const url = buildHubSpotAuthorizeUrl('hs_client', 'https://example.com/callback', 'state-xyz')
-    expect(url).toContain('https://app.hubspot.com/oauth/authorize')
+    expect(url).toContain('https://app-eu1.hubspot.com/oauth/authorize')
     expect(url).toContain('client_id=hs_client')
     expect(url).toContain('state=state-xyz')
     expect(url).toContain('redirect_uri=')
