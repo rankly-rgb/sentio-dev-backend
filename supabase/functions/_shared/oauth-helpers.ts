@@ -17,7 +17,7 @@ export interface OAuthState {
 // ── Scopes autorises par provider ─────────────────────────────
 // Zero-PII : jamais de contacts.read (HubSpot) ni de write (Stripe)
 
-export const STRIPE_SCOPES = ['read_only'] as const
+export const STRIPE_SCOPES = ['read_write'] as const
 export const HUBSPOT_SCOPES = ['crm.objects.companies.read', 'crm.objects.deals.read'] as const
 
 // ── Validation ────────────────────────────────────────────────

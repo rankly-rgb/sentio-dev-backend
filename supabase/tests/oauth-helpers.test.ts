@@ -80,16 +80,15 @@ describe('buildStripeAuthorizeUrl', () => {
     const url = buildStripeAuthorizeUrl('ca_test123', 'https://example.com/callback', 'state-abc')
     expect(url).toContain('https://connect.stripe.com/oauth/authorize')
     expect(url).toContain('client_id=ca_test123')
-    expect(url).toContain('scope=read_only')
+    expect(url).toContain('scope=read_write')
     expect(url).toContain('state=state-abc')
     expect(url).toContain('redirect_uri=')
     expect(url).toContain('response_type=code')
   })
 
-  it('uses read_only scope only (Zero-PII)', () => {
+  it('uses read_write scope (required by Stripe Connect Standard)', () => {
     const url = buildStripeAuthorizeUrl('ca_x', 'https://cb.co', 'st')
-    expect(url).toContain('scope=read_only')
-    expect(url).not.toContain('write')
+    expect(url).toContain('scope=read_write')
   })
 })
 
@@ -223,8 +222,8 @@ describe('buildIntegrationSummary', () => {
 // ── Scope constants ───────────────────────────────────────────
 
 describe('Scope constants', () => {
-  it('STRIPE_SCOPES contains only read_only', () => {
-    expect(STRIPE_SCOPES).toEqual(['read_only'])
+  it('STRIPE_SCOPES contains read_write', () => {
+    expect(STRIPE_SCOPES).toEqual(['read_write'])
   })
 
   it('HUBSPOT_SCOPES contains companies.read and deals.read', () => {
