@@ -464,6 +464,33 @@ Alternative a OAuth Connect pour connecter un compte Stripe. Permet aux entrepri
 
 ---
 
+## Auto-Profile on Signup v1 (2026-03-09)
+
+Correction du bug ou les playbooks/workflows etaient invisibles pour les utilisateurs non-admin. Cause racine : aucun profil `profiles_` n'etait cree automatiquement a l'inscription, donc `user_organization_id()` retournait NULL et le RLS bloquait tout.
+
+**Migration `20260309000002_auto_profile_on_signup.sql` :**
+- Trigger function `handle_new_user()` SECURITY DEFINER sur `auth.users` AFTER INSERT
+- Recherche invitation valide (non expiree, non acceptee) par email
+- Cree `profiles_` avec `organization_id` + `role` depuis l'invitation (ou NULL si pas d'invitation)
+- Marque l'invitation comme acceptee (`accepted_at = NOW()`)
+- Backfill : boucle DO sur `auth.users LEFT JOIN profiles_` pour creer les profils manquants des utilisateurs existants
+
+**Auth callback safeguard `src/app/auth/callback/route.ts` :**
+- `ensureProfile()` appele apres `exchangeCodeForSession`
+- Belt-and-suspenders : rattrape les cas ou le trigger DB n'a pas encore cree le profil (race condition, utilisateurs pre-existants)
+- Utilise `service_role` pour bypasser le RLS lors de la creation du profil
+- Non-bloquant : un echec ne casse pas le flux d'authentification
+
+**Shared helpers `_shared/profile-helpers.ts` (NOUVEAU) :**
+- `findValidInvitation()` : filtre invitations valides, case-insensitive, trim, retourne la plus recente
+- `buildProfileCandidate()` : construit le profil avec org de l'invitation ou null + role par defaut `member`
+
+**Tests : 14 nouveaux tests (473 total) :**
+- findValidInvitation : 10 tests (match, no match, expired, accepted, case-insensitive, trim, multi-invitation priority, skip expired, boundary expires_at = NOW)
+- buildProfileCandidate : 4 tests (with invitation org+role, null org, default member, viewer role)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`

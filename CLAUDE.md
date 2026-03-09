@@ -27,7 +27,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 | Langage | TypeScript 5.x (target ES5 — pas de `[...new Set()]`) |
 | Styling | Tailwind CSS 3.x |
 | Auth | @supabase/ssr (cookies, PKCE, ES256) |
-| Tests | Vitest (425 tests) |
+| Tests | Vitest (473 tests) |
 | CI/CD | GitHub Actions + Vercel |
 
 **Phase actuelle** : setup/dev. Production intentionnellement inactif.
@@ -37,7 +37,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 ```bash
 npm run dev          # Serveur Next.js local
 npm run build        # Build production
-npm run test         # Tests Vitest (425 tests)
+npm run test         # Tests Vitest (473 tests)
 npm run lint         # ESLint
 npm run typecheck    # TypeScript check (tsc --noEmit)
 npm run verify       # typecheck + lint + test + build (post-modification)
@@ -93,6 +93,7 @@ Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financi
 - IMPORTANT : chaque query DOIT être scopée par `organization_id`
 - RLS = sécurité primaire. Toute nouvelle table DOIT avoir `organization_id`
 - Helpers : `user_organization_id()`, `user_role()`
+- Auto-profile : trigger `on_auth_user_created` sur `auth.users` crée `profiles_` avec `organization_id` depuis `invitations` + safeguard dans `auth/callback`
 
 ### Zero-PII
 - IMPORTANT : ne JAMAIS stocker email, nom, téléphone, adresse, IP, SIRET lié à une personne
