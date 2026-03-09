@@ -171,7 +171,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (raw === 'status' && req.method === 'GET') {
     const { data: integrations } = await supabase
       .from('organization_integrations')
-      .select('provider, provider_account_id, scopes, status')
+      .select('provider, provider_account_id, scopes, status, integration_method')
       .eq('organization_id', orgId)
 
     const stripeInt = integrations?.find((i: { provider: string }) => i.provider === 'stripe') ?? null

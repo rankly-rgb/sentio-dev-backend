@@ -190,6 +190,7 @@ describe('buildIntegrationSummary', () => {
       provider_account_id: null,
       scopes: [],
       status: 'pending',
+      integration_method: 'oauth',
     })
   })
 

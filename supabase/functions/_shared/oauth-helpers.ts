@@ -110,12 +110,15 @@ export function isTokenExpiringSoon(
 
 export type IntegrationStatus = 'active' | 'pending' | 'revoked' | 'expired'
 
+export type IntegrationMethod = 'oauth' | 'api_key'
+
 export interface IntegrationSummary {
   provider: OAuthProvider
   connected: boolean
   provider_account_id: string | null
   scopes: string[]
   status: IntegrationStatus
+  integration_method: IntegrationMethod
 }
 
 export function buildIntegrationSummary(
@@ -124,6 +127,7 @@ export function buildIntegrationSummary(
     provider_account_id: string | null
     scopes: string[] | null
     status: string
+    integration_method?: string | null
   } | null,
   provider: OAuthProvider,
 ): IntegrationSummary {
@@ -134,6 +138,7 @@ export function buildIntegrationSummary(
       provider_account_id: null,
       scopes: [],
       status: 'pending',
+      integration_method: 'oauth',
     }
   }
   return {
@@ -142,5 +147,6 @@ export function buildIntegrationSummary(
     provider_account_id: integration.provider_account_id,
     scopes: integration.scopes ?? [],
     status: integration.status as IntegrationStatus,
+    integration_method: (integration.integration_method as IntegrationMethod) ?? 'oauth',
   }
 }
