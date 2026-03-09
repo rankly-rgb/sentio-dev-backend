@@ -257,14 +257,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // ── POST /stripe/api-key — Connexion par cle API directe ───
   if (segments.length === 2 && segments[0] === 'stripe' && segments[1] === 'api-key' && req.method === 'POST') {
-    let body: { api_key?: string }
+    let body: { api_key?: string; stripe_api_key?: string }
     try {
       body = await req.json()
     } catch {
       return errorResponse('Invalid JSON body', 400)
     }
 
-    const apiKey = body.api_key?.trim()
+    const apiKey = (body.api_key ?? body.stripe_api_key)?.trim()
     if (!apiKey) {
       return errorResponse('api_key requis', 400)
     }
