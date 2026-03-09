@@ -27,7 +27,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 | Langage | TypeScript 5.x (target ES5 — pas de `[...new Set()]`) |
 | Styling | Tailwind CSS 3.x |
 | Auth | @supabase/ssr (cookies, PKCE, ES256) |
-| Tests | Vitest (473 tests) |
+| Tests | Vitest (498 tests) |
 | CI/CD | GitHub Actions + Vercel |
 
 **Phase actuelle** : setup/dev. Production intentionnellement inactif.
@@ -37,7 +37,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 ```bash
 npm run dev          # Serveur Next.js local
 npm run build        # Build production
-npm run test         # Tests Vitest (473 tests)
+npm run test         # Tests Vitest (498 tests)
 npm run lint         # ESLint
 npm run typecheck    # TypeScript check (tsc --noEmit)
 npm run verify       # typecheck + lint + test + build (post-modification)

@@ -491,6 +491,43 @@ Correction du bug ou les playbooks/workflows etaient invisibles pour les utilisa
 
 ---
 
+## Default Playbooks Seeding v1 (2026-03-09)
+
+Systeme de seeding automatique de 9 playbooks templates pour chaque nouvelle organisation. Bases sur les scores (churn_risk, health, expansion, usage) pour couvrir tous les segments cles.
+
+**Migration `20260309000003_seed_default_playbooks.sql` :**
+- Fonction `seed_default_playbooks(p_org_id)` SECURITY DEFINER : insere 9 playbooks templates
+- Trigger `seed_playbooks_on_org_created` sur `organizations` AFTER INSERT
+- Backfill : boucle DO sur les orgs sans playbooks
+
+**9 playbooks templates (source=system, is_template=true, status=draft) :**
+
+| # | Titre | Categorie | Criteres scoring | Priorite |
+|---|-------|-----------|-----------------|----------|
+| 1 | Prevention churn — Comptes enterprise | churn_prevention | churn_risk >= 70, plan in [growth, enterprise], MRR >= 500€ | critical |
+| 2 | Relance comptes inactifs | reactivation | usage <= 20, health <= 40 | high |
+| 3 | Detection opportunite d'expansion | expansion | expansion >= 70, health >= 60 | medium |
+| 4 | Onboarding nouveaux comptes | onboarding | health <= 50 | high |
+| 5 | Suivi renouvellement contrat | renewal | MRR >= 300€ | high |
+| 6 | Recuperation comptes perdus | winback | churn_risk >= 90 | medium |
+| 7 | Alerte churn risque eleve | churn_prevention | churn_risk >= 70 | critical |
+| 8 | Suivi sante comptes growth | churn_prevention | health <= 50, plan = growth | high |
+| 9 | Upsell sieges — comptes satures | expansion | expansion >= 65, health >= 55 | medium |
+
+**Shared helpers `_shared/playbook-seed-helpers.ts` (NOUVEAU) :**
+- `getDefaultPlaybookTemplates()` : retourne les 9 templates (fonctions pures, pas de DB)
+- `getTemplatesByCategory()` : filtre par categorie
+- `getTemplateCategories()` : 6 categories uniques
+- `validateTemplates()` : validation structure (titre, actions sequentielles, eligibility)
+
+**Tests : 25 nouveaux tests (498 total) :**
+- Templates : count 9, source=system, is_template=true, status=draft, actions non vides, orders sequentiels, titres uniques
+- Scoring coverage : churn_risk, health, expansion, usage, mrr_cents tous couverts
+- Categories : 3 churn_prevention, 2 expansion, 1 onboarding, 1 renewal, 1 winback, 1 reactivation
+- Validation : valid, missing title, empty actions, non-sequential orders, no conditions
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`
