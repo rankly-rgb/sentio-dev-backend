@@ -75,8 +75,8 @@ Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financi
 | `export-playbook-accounts` | POST (JWT) | Export CSV/JSON comptes playbook |
 | `export-segment-csv` | GET (JWT) | Export CSV comptes par segment (filtrage in-memory, BOM UTF-8) |
 | `webhook-config` | REST (JWT) | Config webhook sortant (GET/POST, /test, /regenerate-secret, /disable) |
-| `integration-oauth` | REST (JWT/CSRF) | OAuth Stripe Connect + HubSpot (authorize, callback, status, revoke) + API key Stripe (POST /stripe/api-key) |
-| `sync-hubspot` | POST (cron) | Sync HubSpot companies (OAuth Vault, Zero-PII) |
+| `integration-oauth` | REST (JWT/CSRF) | OAuth Stripe Connect + HubSpot (authorize, callback, status, revoke) + API key Stripe (POST /stripe/api-key) + API key HubSpot (POST /hubspot/api-key) |
+| `sync-hubspot` | POST (cron) | Sync HubSpot companies (OAuth/API key Vault, Zero-PII) |
 | `refresh-hubspot-tokens` | POST (cron 5h) | Refresh tokens HubSpot avant expiration 6h |
 
 ### Pattern Edge Function (obligatoire)
