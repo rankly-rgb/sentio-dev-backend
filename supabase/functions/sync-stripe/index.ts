@@ -595,6 +595,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     await logger.complete({ sync_type: syncType, created_after: createdAfter })
 
+    // Declencher le scoring automatiquement apres un sync reussi (fire-and-forget)
+    triggerScoring(organizationId)
+
     return jsonResponse({
       success: true,
       organization_id: organizationId,
@@ -622,3 +625,35 @@ Deno.serve(async (req: Request): Promise<Response> => {
     await releaseCronLock(supabase, 'sync-stripe')
   }
 })
+
+// ── Trigger scoring after sync ──────────────────────────────
+function triggerScoring(orgId: string): void {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  if (!supabaseUrl || !serviceRoleKey) return
+
+  fetch(`${supabaseUrl}/functions/v1/calculate-scores`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${serviceRoleKey}`,
+    },
+    body: JSON.stringify({ organization_id: orgId }),
+  })
+    .then((resp) => {
+      console.log(JSON.stringify({
+        level: resp.ok ? 'info' : 'warn',
+        function_name: 'sync-stripe',
+        message: `calculate-scores trigger ${resp.ok ? 'succeeded' : 'failed'} (${resp.status})`,
+        organization_id: orgId,
+      }))
+    })
+    .catch((err) => {
+      console.warn(JSON.stringify({
+        level: 'warn',
+        function_name: 'sync-stripe',
+        message: `calculate-scores trigger error: ${err.message}`,
+        organization_id: orgId,
+      }))
+    })
+}
