@@ -419,6 +419,51 @@ Audit du prompt "OAuth Multi-tenant + Webhook Universel Sortant" : 3 ecarts corr
 
 ---
 
+## Stripe API Key Integration v1 (2026-03-09)
+
+Alternative a OAuth Connect pour connecter un compte Stripe. Permet aux entreprises de coller leur cle secrete (sk_live_/sk_test_) sans passer par le flux OAuth Connect (qui necessite ca_xxx et onboarding Stripe).
+
+**Migration `20260309000001_add_integration_method.sql` :**
+- Colonne `integration_method` TEXT NOT NULL DEFAULT 'oauth' sur `organization_integrations`
+- CHECK constraint : `('oauth', 'api_key')`
+- Retro-compatible : toutes les integrations existantes sont 'oauth' par defaut
+
+**Shared helpers `_shared/credential-helpers.ts` (NOUVEAU) :**
+- `resolveCredentialSource()` : fonction pure determinant la source de credentials (oauth, api_key, global_fallback)
+- Regles : integration active → Vault DOIT contenir le token (pas de fallback silencieux sur cle globale)
+- `api_key` : pas de Stripe-Account header (cle directe du compte)
+- `oauth` : Stripe-Account header avec provider_account_id (Connect)
+- `validateStripeApiKey()` : validation format (sk_live_, sk_test_, rk_live_, rk_test_), rejet pk_, longueur min 30
+- `IntegrationRow` : interface unifiee avec `integration_method` optionnel
+
+**Edge Function `integration-oauth` — route POST /stripe/api-key :**
+- Pipeline : CORS → Auth (ES256) → Parse body (stripe_api_key) → validateStripeApiKey → Check pas deja connecte → Stripe GET /v1/account (valide la cle) → Vault store → Upsert organization_integrations (integration_method: 'api_key') → Update organizations.stripe_account_id → Trigger sync initial → Response
+- Pas de provider_account_id ni Stripe-Account header (cle directe)
+- Retourne account_id et account_name du compte Stripe valide
+
+**sync-stripe : support api_key :**
+- `getStripeCredentials()` selectionne `integration_method` depuis la DB
+- `api_key` → `stripeAccount: null` (pas de header Stripe-Account)
+- `oauth` → `stripeAccount: source.providerAccountId` (header Connect)
+
+**sync-hubspot : fix fallback silencieux :**
+- Utilise `resolveCredentialSource()` au lieu de fallback silencieux sur cle globale
+
+**vault.ts : logging structure :**
+- Erreurs RPC loguees en JSON structure (level, module, message, secret_id, error)
+- Warnings quand secret non trouve (ID potentiellement stale)
+
+**Tests : 34 tests credential-helpers (459 total) :**
+- OAuth happy path : 3 tests (Stripe, HubSpot, null provider_account_id)
+- Global fallback : 2 tests (Stripe, HubSpot)
+- Missing vault_access_token_id : 4 tests (Stripe, HubSpot, message, method in error)
+- Vault secret stale : 4 tests (Stripe, HubSpot, includes ID, no fallback)
+- HubSpot expiration : 4 tests (expired, Stripe skip, not expired, null)
+- API key : 6 tests (happy path, null provider, default oauth, undefined, vault missing, no expiry check)
+- validateStripeApiKey : 11 tests (sk_live, sk_test, rk_live, rk_test, pk reject, unknown prefix, too short, empty, trim, boundary 30/29)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`
