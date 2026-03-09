@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   resolveCredentialSource,
   validateStripeApiKey,
+  validateHubSpotApiKey,
   type IntegrationRow,
   type OAuthIntegrationRow,
 } from '../functions/_shared/credential-helpers'
@@ -282,5 +283,105 @@ describe('validateStripeApiKey', () => {
     expect(key.length).toBe(29)
     const result = validateStripeApiKey(key)
     expect(result.valid).toBe(false)
+  })
+})
+
+// ── 8. validateHubSpotApiKey ──────────────────────────────
+
+describe('validateHubSpotApiKey', () => {
+  it('accepts pat- key with sufficient length', () => {
+    const result = validateHubSpotApiKey('pat-na1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx')
+    expect(result.valid).toBe(true)
+    expect(result.error).toBeUndefined()
+  })
+
+  it('accepts pat- key with various regions', () => {
+    expect(validateHubSpotApiKey('pat-eu1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx').valid).toBe(true)
+  })
+
+  it('rejects key without pat- prefix', () => {
+    const result = validateHubSpotApiKey('sk_live_51T65tbGaqS0J01nLAIWLMDMKx2l2iI8gH0O')
+    expect(result.valid).toBe(false)
+    expect(result.error).toContain('pat-')
+  })
+
+  it('rejects random string', () => {
+    const result = validateHubSpotApiKey('some-random-long-key-that-is-not-a-hubspot-token')
+    expect(result.valid).toBe(false)
+    expect(result.error).toContain('pat-')
+  })
+
+  it('rejects key shorter than 30 chars', () => {
+    const result = validateHubSpotApiKey('pat-short')
+    expect(result.valid).toBe(false)
+    expect(result.error).toContain('trop courte')
+  })
+
+  it('rejects empty string', () => {
+    const result = validateHubSpotApiKey('')
+    expect(result.valid).toBe(false)
+    expect(result.error).toContain('requise')
+  })
+
+  it('trims whitespace before validation', () => {
+    const key = '  pat-na1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx  '
+    const result = validateHubSpotApiKey(key)
+    expect(result.valid).toBe(true)
+  })
+
+  it('boundary: exactly 30 chars pat- is valid', () => {
+    const key = 'pat-' + 'a'.repeat(26)
+    expect(key.length).toBe(30)
+    expect(validateHubSpotApiKey(key).valid).toBe(true)
+  })
+
+  it('boundary: 29 chars pat- is too short', () => {
+    const key = 'pat-' + 'a'.repeat(25)
+    expect(key.length).toBe(29)
+    expect(validateHubSpotApiKey(key).valid).toBe(false)
+  })
+})
+
+// ── 9. resolveCredentialSource — HubSpot API key ──────────
+
+describe('resolveCredentialSource — HubSpot API key', () => {
+  it('returns api_key source for HubSpot with integration_method api_key', () => {
+    const integration = makeIntegration({
+      integration_method: 'api_key',
+      provider_account_id: 'portal_12345',
+    })
+    const result = resolveCredentialSource(integration, VALID_TOKEN, 'hubspot')
+    expect(result).toEqual({
+      type: 'api_key',
+      vaultSecretId: VAULT_SECRET_ID,
+      providerAccountId: 'portal_12345',
+    })
+  })
+
+  it('does not check token expiration for HubSpot api_key', () => {
+    const integration = makeIntegration({
+      integration_method: 'api_key',
+      token_expires_at: new Date(Date.now() - 1000).toISOString(), // expired
+    })
+    const result = resolveCredentialSource(integration, VALID_TOKEN, 'hubspot')
+    expect(result.type).toBe('api_key')
+  })
+
+  it('throws when HubSpot api_key integration has no vault secret', () => {
+    const integration = makeIntegration({ integration_method: 'api_key' })
+    expect(() => resolveCredentialSource(integration, null, 'hubspot'))
+      .toThrow('token not found in Vault')
+  })
+
+  it('returns api_key with null portalId', () => {
+    const integration = makeIntegration({
+      integration_method: 'api_key',
+      provider_account_id: null,
+    })
+    const result = resolveCredentialSource(integration, VALID_TOKEN, 'hubspot')
+    expect(result.type).toBe('api_key')
+    if (result.type === 'api_key') {
+      expect(result.providerAccountId).toBeNull()
+    }
   })
 })

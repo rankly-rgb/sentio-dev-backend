@@ -19,7 +19,7 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { storeVaultSecret, deleteVaultSecret, getVaultSecret } from '../_shared/vault.ts'
-import { validateStripeApiKey } from '../_shared/credential-helpers.ts'
+import { validateStripeApiKey, validateHubSpotApiKey } from '../_shared/credential-helpers.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import {
@@ -346,6 +346,113 @@ Deno.serve(async (req: Request): Promise<Response> => {
       method: 'api_key',
       account_id: stripeAccount.id,
       account_name: stripeAccount.business_profile?.name ?? null,
+      status: 'connected',
+    })
+  }
+
+  // ── POST /hubspot/api-key — Connexion par cle API Private App ──
+  if (segments.length === 2 && segments[0] === 'hubspot' && segments[1] === 'api-key' && req.method === 'POST') {
+    let body: { api_key?: string; hubspot_api_key?: string }
+    try {
+      body = await req.json()
+    } catch {
+      return errorResponse('Invalid JSON body', 400)
+    }
+
+    const apiKey = (body.api_key ?? body.hubspot_api_key)?.trim()
+    if (!apiKey) {
+      return errorResponse('api_key requis', 400)
+    }
+
+    // Valider le format de la cle
+    const validation = validateHubSpotApiKey(apiKey)
+    if (!validation.valid) {
+      return errorResponse(validation.error!, 400)
+    }
+
+    // Verifier si deja connecte
+    const { data: existingHubspot } = await supabase
+      .from('organization_integrations')
+      .select('status')
+      .eq('organization_id', orgId)
+      .eq('provider', 'hubspot')
+      .eq('status', 'active')
+      .maybeSingle()
+
+    if (existingHubspot) {
+      return errorResponse('HubSpot est deja connecte. Revoquez d\'abord l\'integration existante.', 409)
+    }
+
+    // Valider la cle en appelant HubSpot API
+    let portalId: string | null = null
+    try {
+      const resp = await fetchWithTimeout(
+        'https://api.hubapi.com/oauth/v1/access-tokens/' + apiKey,
+        { headers: { Authorization: `Bearer ${apiKey}` } },
+        8_000,
+      )
+      if (!resp.ok) {
+        // Fallback: essayer un appel simple pour valider le token
+        const accountResp = await fetchWithTimeout(
+          'https://api.hubapi.com/account-info/v3/details',
+          { headers: { Authorization: `Bearer ${apiKey}` } },
+          8_000,
+        )
+        if (!accountResp.ok) {
+          if (accountResp.status === 401) {
+            return errorResponse('Cle API HubSpot invalide ou revoquee', 401)
+          }
+          return errorResponse(`HubSpot API error: ${accountResp.status}`, 400)
+        }
+        const accountInfo = await accountResp.json()
+        portalId = accountInfo.portalId ? String(accountInfo.portalId) : null
+      } else {
+        const tokenInfo = await resp.json()
+        portalId = tokenInfo.hub_id ? String(tokenInfo.hub_id) : null
+      }
+    } catch {
+      return errorResponse('Impossible de contacter l\'API HubSpot — reessayez', 502)
+    }
+
+    // Stocker la cle dans Vault
+    const vaultAccessId = await storeVaultSecret(
+      supabase,
+      apiKey,
+      `hubspot_apikey_${orgId}`,
+      `HubSpot Private App token for org ${orgId}`,
+    )
+
+    // Upsert organization_integrations
+    await supabase
+      .from('organization_integrations')
+      .upsert({
+        organization_id: orgId,
+        provider: 'hubspot',
+        vault_access_token_id: vaultAccessId,
+        vault_refresh_token_id: null,
+        token_expires_at: null, // Private App tokens don't expire
+        provider_account_id: portalId,
+        scopes: ['crm.objects.companies.read', 'crm.objects.contacts.read'],
+        status: 'active',
+        integration_method: 'api_key',
+      }, { onConflict: 'organization_id,provider' })
+
+    // Mettre a jour organizations.hubspot_portal_id
+    if (portalId) {
+      await supabase
+        .from('organizations')
+        .update({ hubspot_portal_id: portalId })
+        .eq('id', orgId)
+    }
+
+    // Declencher le sync initial en fire-and-forget
+    triggerInitialSync('hubspot', orgId)
+
+    return jsonResponse({
+      success: true,
+      provider: 'hubspot',
+      method: 'api_key',
+      portal_id: portalId,
       status: 'connected',
     })
   }

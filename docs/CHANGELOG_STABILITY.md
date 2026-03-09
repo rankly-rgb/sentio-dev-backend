@@ -528,7 +528,38 @@ Systeme de seeding automatique de 9 playbooks templates pour chaque nouvelle org
 
 ---
 
+## Segment Alignment + HubSpot API Key v1 (2026-03-09)
+
+Alignement des filtres de segment avec scoring.ts + connexion HubSpot par cle API Private App.
+
+**Segment Alignment :**
+- `SEGMENT_FILTERS` dans `segment-export-helpers.ts` realigne avec `determineSegmentTypes()` de `scoring.ts`
+- 6 segments corriges sur 7 (impayes reste un proxy score-based — segment_memberships est la source de verite)
+
+| Segment | Avant (incorrect) | Apres (aligne scoring.ts) |
+|---------|-------------------|--------------------------|
+| champions | `health > 80 AND expansion > 70` | `health >= 80 AND churn < 50` |
+| en_expansion | `expansion > 75` | `expansion >= 70 AND health 60-79 AND churn < 50` |
+| stables | `health 60-80 AND churn < 30` | `mrr > 0 AND churn < 50 AND health < 80 AND NOT en_expansion` |
+| a_risque_leger | `health 40-59 OR churn 30-50` | `churn 50-69 AND mrr > 0` |
+| en_danger_critique | `health < 40 OR churn > 70` | `churn >= 70 AND mrr > 0` |
+| en_churn | `churn > 90` | `mrr = 0` |
+
+**HubSpot API Key Connection :**
+- `validateHubSpotApiKey()` dans `credential-helpers.ts` : prefixe `pat-`, min 30 chars
+- Route `POST /hubspot/api-key` dans `integration-oauth` : valide cle → Vault → upsert integration → trigger sync
+- `sync-hubspot` : support `source.type === 'api_key'` (meme Bearer token, pas de difference API)
+- Pipeline : validate format → HubSpot API check → Vault store → upsert `organization_integrations` (method: api_key) → update portal_id → fire-and-forget sync
+
+**Tests : 24 nouveaux tests (522 total) :**
+- validateHubSpotApiKey : 9 tests (pat- prefix, regions, rejection, boundary 30/29, trim, empty)
+- resolveCredentialSource HubSpot api_key : 4 tests (happy path, no expiry check, vault missing, null portal)
+- Segment filters : 11 tests recrits pour aligner avec scoring.ts (boundaries, null handling, mrr checks)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`
 - NPS : collecte + intégration scoring (V2)
+- HubSpot Static List Push (playbooks actionnables one-click)

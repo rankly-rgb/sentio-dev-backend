@@ -151,7 +151,7 @@ describe('buildSegmentCsv', () => {
   })
 })
 
-// ── Segment Filters ─────────────────────────────────────────
+// ── Segment Filters (aligned with scoring.ts determineSegmentTypes) ──
 
 describe('SEGMENT_FILTERS', () => {
   it('has a filter for each valid segment', () => {
@@ -160,84 +160,114 @@ describe('SEGMENT_FILTERS', () => {
     }
   })
 
-  describe('champions', () => {
-    it('matches health > 80 AND expansion > 70', () => {
-      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: 85, expansion_score: 75 }))).toBe(true)
-    })
-    it('rejects health = 80 (not strictly >)', () => {
-      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: 80, expansion_score: 75 }))).toBe(false)
-    })
-    it('rejects expansion = 70 (not strictly >)', () => {
-      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: 85, expansion_score: 70 }))).toBe(false)
-    })
-  })
-
-  describe('en_expansion', () => {
-    it('matches expansion > 75', () => {
-      expect(SEGMENT_FILTERS.en_expansion(makeRow({ expansion_score: 80 }))).toBe(true)
-    })
-    it('rejects expansion = 75', () => {
-      expect(SEGMENT_FILTERS.en_expansion(makeRow({ expansion_score: 75 }))).toBe(false)
-    })
-  })
-
-  describe('stables', () => {
-    it('matches health 60-80 AND churn_risk < 30', () => {
-      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 70, churn_risk_score: 20 }))).toBe(true)
-    })
-    it('matches health = 60 (boundary inclusive)', () => {
-      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 60, churn_risk_score: 10 }))).toBe(true)
-    })
+  describe('champions — health >= 80 AND churn_risk < 50', () => {
     it('matches health = 80 (boundary inclusive)', () => {
-      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 80, churn_risk_score: 10 }))).toBe(true)
+      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: 80, churn_risk_score: 20 }))).toBe(true)
     })
-    it('rejects churn_risk = 30', () => {
-      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 70, churn_risk_score: 30 }))).toBe(false)
+    it('matches health = 95', () => {
+      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: 95, churn_risk_score: 10 }))).toBe(true)
     })
-  })
-
-  describe('a_risque_leger', () => {
-    it('matches health 40-59', () => {
-      expect(SEGMENT_FILTERS.a_risque_leger(makeRow({ health_score: 50, churn_risk_score: 10 }))).toBe(true)
+    it('rejects health = 79', () => {
+      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: 79, churn_risk_score: 10 }))).toBe(false)
     })
-    it('matches churn_risk 30-50', () => {
-      expect(SEGMENT_FILTERS.a_risque_leger(makeRow({ health_score: 80, churn_risk_score: 40 }))).toBe(true)
-    })
-    it('rejects health >= 60 AND churn_risk < 30', () => {
-      expect(SEGMENT_FILTERS.a_risque_leger(makeRow({ health_score: 70, churn_risk_score: 20 }))).toBe(false)
+    it('rejects churn_risk = 50 (a_risque_leger territory)', () => {
+      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: 90, churn_risk_score: 50 }))).toBe(false)
     })
   })
 
-  describe('en_danger_critique', () => {
-    it('matches health < 40', () => {
-      expect(SEGMENT_FILTERS.en_danger_critique(makeRow({ health_score: 30, churn_risk_score: 50 }))).toBe(true)
+  describe('en_expansion — expansion >= 70 AND health 60-79 AND churn < 50', () => {
+    it('matches expansion = 70, health = 60', () => {
+      expect(SEGMENT_FILTERS.en_expansion(makeRow({ expansion_score: 70, health_score: 60, churn_risk_score: 20 }))).toBe(true)
     })
-    it('matches churn_risk > 70', () => {
-      expect(SEGMENT_FILTERS.en_danger_critique(makeRow({ health_score: 60, churn_risk_score: 75 }))).toBe(true)
+    it('rejects health >= 80 (champions territory)', () => {
+      expect(SEGMENT_FILTERS.en_expansion(makeRow({ expansion_score: 80, health_score: 85, churn_risk_score: 20 }))).toBe(false)
     })
-    it('rejects health = 40 AND churn_risk = 70', () => {
-      expect(SEGMENT_FILTERS.en_danger_critique(makeRow({ health_score: 40, churn_risk_score: 70 }))).toBe(false)
+    it('rejects expansion = 69', () => {
+      expect(SEGMENT_FILTERS.en_expansion(makeRow({ expansion_score: 69, health_score: 65, churn_risk_score: 20 }))).toBe(false)
+    })
+    it('rejects churn_risk >= 50', () => {
+      expect(SEGMENT_FILTERS.en_expansion(makeRow({ expansion_score: 80, health_score: 65, churn_risk_score: 50 }))).toBe(false)
     })
   })
 
-  describe('impayes', () => {
-    it('matches churn_risk > 80 AND health < 50', () => {
-      expect(SEGMENT_FILTERS.impayes(makeRow({ churn_risk_score: 85, health_score: 40 }))).toBe(true)
+  describe('stables — default fallback (mrr > 0, churn < 50, health < 80, not en_expansion)', () => {
+    it('matches typical stable account', () => {
+      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 70, churn_risk_score: 20, expansion_score: 50, mrr_cents: 10000 }))).toBe(true)
+    })
+    it('rejects health >= 80 (champions)', () => {
+      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 80, churn_risk_score: 20, mrr_cents: 10000 }))).toBe(false)
+    })
+    it('rejects churn_risk >= 50 (a_risque_leger)', () => {
+      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 60, churn_risk_score: 50, mrr_cents: 10000 }))).toBe(false)
+    })
+    it('rejects mrr = 0 (en_churn)', () => {
+      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 60, churn_risk_score: 20, mrr_cents: 0 }))).toBe(false)
+    })
+    it('rejects en_expansion conditions (expansion >= 70, health >= 60)', () => {
+      expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 65, churn_risk_score: 20, expansion_score: 75, mrr_cents: 10000 }))).toBe(false)
+    })
+  })
+
+  describe('a_risque_leger — churn_risk 50-69 AND mrr > 0', () => {
+    it('matches churn_risk = 50 (boundary inclusive)', () => {
+      expect(SEGMENT_FILTERS.a_risque_leger(makeRow({ churn_risk_score: 50, mrr_cents: 10000 }))).toBe(true)
+    })
+    it('matches churn_risk = 69', () => {
+      expect(SEGMENT_FILTERS.a_risque_leger(makeRow({ churn_risk_score: 69, mrr_cents: 10000 }))).toBe(true)
+    })
+    it('rejects churn_risk = 70 (en_danger_critique)', () => {
+      expect(SEGMENT_FILTERS.a_risque_leger(makeRow({ churn_risk_score: 70, mrr_cents: 10000 }))).toBe(false)
+    })
+    it('rejects churn_risk = 49', () => {
+      expect(SEGMENT_FILTERS.a_risque_leger(makeRow({ churn_risk_score: 49, mrr_cents: 10000 }))).toBe(false)
+    })
+    it('rejects mrr = 0', () => {
+      expect(SEGMENT_FILTERS.a_risque_leger(makeRow({ churn_risk_score: 55, mrr_cents: 0 }))).toBe(false)
+    })
+  })
+
+  describe('en_danger_critique — churn_risk >= 70 AND mrr > 0', () => {
+    it('matches churn_risk = 70 (boundary inclusive)', () => {
+      expect(SEGMENT_FILTERS.en_danger_critique(makeRow({ churn_risk_score: 70, mrr_cents: 10000 }))).toBe(true)
+    })
+    it('matches churn_risk = 95', () => {
+      expect(SEGMENT_FILTERS.en_danger_critique(makeRow({ churn_risk_score: 95, mrr_cents: 5000 }))).toBe(true)
+    })
+    it('rejects churn_risk = 69', () => {
+      expect(SEGMENT_FILTERS.en_danger_critique(makeRow({ churn_risk_score: 69, mrr_cents: 10000 }))).toBe(false)
+    })
+    it('rejects mrr = 0 (en_churn territory)', () => {
+      expect(SEGMENT_FILTERS.en_danger_critique(makeRow({ churn_risk_score: 85, mrr_cents: 0 }))).toBe(false)
+    })
+  })
+
+  describe('impayes — score proxy (churn > 80 AND health < 50 AND mrr > 0)', () => {
+    it('matches churn_risk > 80 AND health < 50 AND mrr > 0', () => {
+      expect(SEGMENT_FILTERS.impayes(makeRow({ churn_risk_score: 85, health_score: 40, mrr_cents: 10000 }))).toBe(true)
     })
     it('rejects churn_risk = 80', () => {
-      expect(SEGMENT_FILTERS.impayes(makeRow({ churn_risk_score: 80, health_score: 40 }))).toBe(false)
+      expect(SEGMENT_FILTERS.impayes(makeRow({ churn_risk_score: 80, health_score: 40, mrr_cents: 10000 }))).toBe(false)
     })
     it('rejects health = 50', () => {
-      expect(SEGMENT_FILTERS.impayes(makeRow({ churn_risk_score: 85, health_score: 50 }))).toBe(false)
+      expect(SEGMENT_FILTERS.impayes(makeRow({ churn_risk_score: 85, health_score: 50, mrr_cents: 10000 }))).toBe(false)
+    })
+    it('rejects mrr = 0 (en_churn territory)', () => {
+      expect(SEGMENT_FILTERS.impayes(makeRow({ churn_risk_score: 85, health_score: 40, mrr_cents: 0 }))).toBe(false)
     })
   })
 
-  describe('en_churn', () => {
-    it('matches churn_risk > 90', () => {
-      expect(SEGMENT_FILTERS.en_churn(makeRow({ churn_risk_score: 95 }))).toBe(true)
+  describe('en_churn — mrr_cents = 0 (aligned with scoring.ts)', () => {
+    it('matches mrr_cents = 0', () => {
+      expect(SEGMENT_FILTERS.en_churn(makeRow({ mrr_cents: 0 }))).toBe(true)
     })
-    it('rejects churn_risk = 90', () => {
-      expect(SEGMENT_FILTERS.en_churn(makeRow({ churn_risk_score: 90 }))).toBe(false)
+    it('matches mrr_cents = null (treated as 0)', () => {
+      expect(SEGMENT_FILTERS.en_churn(makeRow({ mrr_cents: null }))).toBe(true)
+    })
+    it('rejects mrr_cents = 1 (any positive MRR)', () => {
+      expect(SEGMENT_FILTERS.en_churn(makeRow({ mrr_cents: 1 }))).toBe(false)
+    })
+    it('rejects mrr_cents = 15000', () => {
+      expect(SEGMENT_FILTERS.en_churn(makeRow({ mrr_cents: 15000 }))).toBe(false)
     })
   })
 
@@ -258,11 +288,14 @@ describe('SEGMENT_FILTERS', () => {
   })
 
   describe('null score handling', () => {
-    it('treats null scores as 0 for champions', () => {
-      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: null, expansion_score: null }))).toBe(false)
+    it('treats null health as 0 for champions (rejected)', () => {
+      expect(SEGMENT_FILTERS.champions(makeRow({ health_score: null }))).toBe(false)
     })
-    it('treats null churn_risk as 0 for en_churn', () => {
-      expect(SEGMENT_FILTERS.en_churn(makeRow({ churn_risk_score: null }))).toBe(false)
+    it('treats null mrr as 0 for en_churn (matched)', () => {
+      expect(SEGMENT_FILTERS.en_churn(makeRow({ mrr_cents: null }))).toBe(true)
+    })
+    it('treats null churn_risk as 0 for stables (eligible)', () => {
+      expect(SEGMENT_FILTERS.stables(makeRow({ churn_risk_score: null, health_score: 60, mrr_cents: 10000, expansion_score: 30 }))).toBe(true)
     })
   })
 })

@@ -19,16 +19,41 @@ export interface SegmentAccountRow {
   created_at: string | null
 }
 
-// ── Segment filters (must mirror frontend segment-queries.ts) ──
+// ── Segment filters — aligned with scoring.ts determineSegmentTypes() ──
+// Priority order (mutually exclusive except nouveaux):
+//   1. en_churn (mrr=0) → 2. impayes (overdue invoices*) → 3. en_danger_critique
+//   → 4. a_risque_leger → 5. champions → 6. en_expansion → 7. stables (default)
+// * impayes uses score proxy — segment_memberships is the true source of truth
 
 export const SEGMENT_FILTERS: Record<string, (a: SegmentAccountRow) => boolean> = {
-  champions:          a => (a.health_score ?? 0) > 80 && (a.expansion_score ?? 0) > 70,
-  en_expansion:       a => (a.expansion_score ?? 0) > 75,
-  stables:            a => (a.health_score ?? 0) >= 60 && (a.health_score ?? 0) <= 80 && (a.churn_risk_score ?? 0) < 30,
-  a_risque_leger:     a => ((a.health_score ?? 0) >= 40 && (a.health_score ?? 0) < 60) || ((a.churn_risk_score ?? 0) >= 30 && (a.churn_risk_score ?? 0) <= 50),
-  en_danger_critique: a => (a.health_score ?? 0) < 40 || (a.churn_risk_score ?? 0) > 70,
-  impayes:            a => (a.churn_risk_score ?? 0) > 80 && (a.health_score ?? 0) < 50,
-  en_churn:           a => (a.churn_risk_score ?? 0) > 90,
+  // scoring.ts: health >= 80 (priority after churn_risk checks → churn < 50)
+  champions:          a => (a.health_score ?? 0) >= 80 && (a.churn_risk_score ?? 0) < 50,
+  // scoring.ts: expansion >= 70 AND health >= 60 (not champion → health < 80)
+  en_expansion:       a => {
+    const health = a.health_score ?? 0
+    return (a.expansion_score ?? 0) >= 70 && health >= 60 && health < 80 && (a.churn_risk_score ?? 0) < 50
+  },
+  // scoring.ts: default fallback (none of the above match)
+  stables:            a => {
+    const mrr = a.mrr_cents ?? 0
+    const churn = a.churn_risk_score ?? 0
+    const health = a.health_score ?? 0
+    const expansion = a.expansion_score ?? 0
+    return mrr > 0 && churn < 50 && health < 80 && !(expansion >= 70 && health >= 60)
+  },
+  // scoring.ts: churn_risk >= 50 AND < 70
+  a_risque_leger:     a => {
+    const churn = a.churn_risk_score ?? 0
+    return churn >= 50 && churn < 70 && (a.mrr_cents ?? 0) > 0
+  },
+  // scoring.ts: churn_risk >= 70 (excludes en_churn via mrr > 0)
+  en_danger_critique: a => (a.churn_risk_score ?? 0) >= 70 && (a.mrr_cents ?? 0) > 0,
+  // scoring.ts: hasOverdueInvoices — proxy score (invoice data non disponible in-memory)
+  // NOTE: segment_memberships est la source de verite pour ce segment
+  impayes:            a => (a.churn_risk_score ?? 0) > 80 && (a.health_score ?? 100) < 50 && (a.mrr_cents ?? 0) > 0,
+  // scoring.ts: mrr_cents === 0
+  en_churn:           a => (a.mrr_cents ?? 0) === 0,
+  // scoring.ts: created < 90 days (non-exclusif, cumule avec un segment score-based)
   nouveaux:           a => {
     if (!a.created_at) return false
     const ninetyDaysAgo = new Date()

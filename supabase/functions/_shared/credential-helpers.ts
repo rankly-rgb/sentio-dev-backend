@@ -92,3 +92,21 @@ export function validateStripeApiKey(key: string): { valid: boolean; error?: str
   }
   return { valid: true }
 }
+
+/**
+ * Valide qu'une cle API HubSpot Private App a le bon format.
+ * Les Private Apps HubSpot utilisent le prefixe pat- (Personal Access Token).
+ */
+export function validateHubSpotApiKey(key: string): { valid: boolean; error?: string } {
+  if (!key || typeof key !== 'string') {
+    return { valid: false, error: 'Clé API HubSpot requise' }
+  }
+  const trimmed = key.trim()
+  if (!trimmed.startsWith('pat-')) {
+    return { valid: false, error: 'Format invalide — la clé doit commencer par pat- (Private App Token HubSpot)' }
+  }
+  if (trimmed.length < 30) {
+    return { valid: false, error: 'Clé trop courte' }
+  }
+  return { valid: true }
+}

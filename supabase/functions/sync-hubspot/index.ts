@@ -64,7 +64,7 @@ async function getHubSpotCredentials(
 ): Promise<HubSpotCredentials> {
   const { data: integration } = await supabase
     .from('organization_integrations')
-    .select('vault_access_token_id, provider_account_id, status, token_expires_at')
+    .select('vault_access_token_id, provider_account_id, status, token_expires_at, integration_method')
     .eq('organization_id', organizationId)
     .eq('provider', 'hubspot')
     .eq('status', 'active')
@@ -74,29 +74,29 @@ async function getHubSpotCredentials(
     ? await getVaultSecret(supabase, integration.vault_access_token_id)
     : null
 
-  // resolveCredentialSource throws si OAuth active + Vault echoue (pas de fallback silencieux)
+  // resolveCredentialSource throws si integration active + Vault echoue (pas de fallback silencieux)
   const source = resolveCredentialSource(integration, vaultSecret, 'hubspot')
 
-  if (source.type === 'oauth') {
+  if (source.type === 'oauth' || source.type === 'api_key') {
     return {
       accessToken: vaultSecret!,
       portalId: source.providerAccountId,
     }
   }
 
-  // Fallback global : uniquement si AUCUNE integration OAuth n'existe
+  // Fallback global : uniquement si AUCUNE integration n'existe
   const globalKey = Deno.env.get('HUBSPOT_API_KEY')
   if (globalKey) {
     console.warn(JSON.stringify({
       level: 'warn',
       function_name: 'sync-hubspot',
-      message: 'No OAuth integration found — using global HUBSPOT_API_KEY fallback',
+      message: 'No integration found — using global HUBSPOT_API_KEY fallback',
       organization_id: organizationId,
     }))
     return { accessToken: globalKey, portalId: null }
   }
 
-  throw new Error('No HubSpot credentials available: no OAuth token and no global key')
+  throw new Error('No HubSpot credentials available: no token and no global key')
 }
 
 // ── HubSpot API Helpers ──────────────────────────────────────
