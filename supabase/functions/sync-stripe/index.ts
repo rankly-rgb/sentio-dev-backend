@@ -15,6 +15,7 @@ import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
 import { CircuitBreaker } from '../_shared/circuit-breaker.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { getVaultSecret } from '../_shared/vault.ts'
+import { resolveCredentialSource } from '../_shared/credential-helpers.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
@@ -84,33 +85,42 @@ async function getStripeCredentials(
   supabase: SupabaseClient,
   organizationId: string,
 ): Promise<StripeCredentials> {
-  // Priorite 1 : token OAuth par org depuis Vault
   const { data: integration } = await supabase
     .from('organization_integrations')
-    .select('vault_access_token_id, provider_account_id, status')
+    .select('vault_access_token_id, provider_account_id, status, integration_method')
     .eq('organization_id', organizationId)
     .eq('provider', 'stripe')
     .eq('status', 'active')
     .maybeSingle()
 
-  if (integration?.vault_access_token_id) {
-    const accessToken = await getVaultSecret(supabase, integration.vault_access_token_id)
-    if (accessToken) {
-      return {
-        apiKey: accessToken,
-        stripeAccount: integration.provider_account_id,
-      }
+  const vaultSecret = integration?.vault_access_token_id
+    ? await getVaultSecret(supabase, integration.vault_access_token_id)
+    : null
+
+  // resolveCredentialSource throws si integration active + Vault echoue (pas de fallback silencieux)
+  const source = resolveCredentialSource(integration, vaultSecret, 'stripe')
+
+  if (source.type === 'oauth') {
+    return {
+      apiKey: vaultSecret!,
+      stripeAccount: source.providerAccountId, // Stripe-Account header pour Connect
     }
   }
 
-  // Fallback temporaire : cle globale depuis env var
-  // A supprimer apres migration complete de tous les orgs vers OAuth
+  if (source.type === 'api_key') {
+    return {
+      apiKey: vaultSecret!,
+      stripeAccount: null, // Pas de Stripe-Account header — cle directe du compte
+    }
+  }
+
+  // Fallback global : uniquement si AUCUNE integration OAuth n'existe
   const globalKey = Deno.env.get('STRIPE_SECRET_KEY')
   if (globalKey) {
     console.warn(JSON.stringify({
       level: 'warn',
       function_name: 'sync-stripe',
-      message: 'Using global STRIPE_SECRET_KEY fallback — org needs OAuth migration',
+      message: 'No OAuth integration found — using global STRIPE_SECRET_KEY fallback',
       organization_id: organizationId,
     }))
     return { apiKey: globalKey, stripeAccount: null }

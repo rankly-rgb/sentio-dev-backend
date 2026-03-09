@@ -18,7 +18,8 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
-import { storeVaultSecret, deleteVaultSecret } from '../_shared/vault.ts'
+import { storeVaultSecret, deleteVaultSecret, getVaultSecret } from '../_shared/vault.ts'
+import { validateStripeApiKey } from '../_shared/credential-helpers.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import {
@@ -252,6 +253,101 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
 
     return jsonResponse({ success: true, message: `Integration ${provider} revoquee` })
+  }
+
+  // ── POST /stripe/api-key — Connexion par cle API directe ───
+  if (segments.length === 2 && segments[0] === 'stripe' && segments[1] === 'api-key' && req.method === 'POST') {
+    let body: { api_key?: string }
+    try {
+      body = await req.json()
+    } catch {
+      return errorResponse('Invalid JSON body', 400)
+    }
+
+    const apiKey = body.api_key?.trim()
+    if (!apiKey) {
+      return errorResponse('api_key requis', 400)
+    }
+
+    // Valider le format de la cle
+    const validation = validateStripeApiKey(apiKey)
+    if (!validation.valid) {
+      return errorResponse(validation.error!, 400)
+    }
+
+    // Verifier si deja connecte
+    const { data: existingApiKey } = await supabase
+      .from('organization_integrations')
+      .select('status')
+      .eq('organization_id', orgId)
+      .eq('provider', 'stripe')
+      .eq('status', 'active')
+      .maybeSingle()
+
+    if (existingApiKey) {
+      return errorResponse('Stripe est deja connecte. Revoquez d\'abord l\'integration existante.', 409)
+    }
+
+    // Valider la cle en appelant Stripe
+    let stripeAccount: { id: string; business_profile?: { name?: string } }
+    try {
+      const resp = await fetchWithTimeout(
+        'https://api.stripe.com/v1/account',
+        { headers: { Authorization: `Bearer ${apiKey}` } },
+        8_000,
+      )
+      if (!resp.ok) {
+        const err = await resp.text()
+        if (resp.status === 401) {
+          return errorResponse('Cle API Stripe invalide ou revoquee', 401)
+        }
+        return errorResponse(`Stripe API error: ${resp.status}`, 400)
+      }
+      stripeAccount = await resp.json()
+    } catch {
+      return errorResponse('Impossible de contacter l\'API Stripe — reessayez', 502)
+    }
+
+    // Stocker la cle dans Vault
+    const vaultAccessId = await storeVaultSecret(
+      supabase,
+      apiKey,
+      `stripe_apikey_${orgId}`,
+      `Stripe API key for org ${orgId}`,
+    )
+
+    // Upsert organization_integrations
+    await supabase
+      .from('organization_integrations')
+      .upsert({
+        organization_id: orgId,
+        provider: 'stripe',
+        vault_access_token_id: vaultAccessId,
+        vault_refresh_token_id: null,
+        token_expires_at: null,
+        provider_account_id: stripeAccount.id,
+        scopes: ['read_only'],
+        status: 'active',
+        integration_method: 'api_key',
+      }, { onConflict: 'organization_id,provider' })
+
+    // Mettre a jour organizations.stripe_account_id
+    await supabase
+      .from('organizations')
+      .update({ stripe_account_id: stripeAccount.id })
+      .eq('id', orgId)
+
+    // Declencher le sync initial en fire-and-forget
+    triggerInitialSync('stripe', orgId)
+
+    return jsonResponse({
+      success: true,
+      provider: 'stripe',
+      method: 'api_key',
+      account_id: stripeAccount.id,
+      account_name: stripeAccount.business_profile?.name ?? null,
+      status: 'connected',
+    })
   }
 
   return errorResponse(`Route inconnue : /integration-oauth/${raw}`, 404)

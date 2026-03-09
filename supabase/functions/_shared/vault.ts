@@ -18,7 +18,28 @@ export async function getVaultSecret(
   const { data, error } = await supabase
     .rpc('vault_read_secret', { secret_id: vaultSecretId })
 
-  if (error || !data || data.length === 0) return null
+  if (error) {
+    console.error(JSON.stringify({
+      level: 'error',
+      module: 'vault',
+      message: 'vault_read_secret RPC failed',
+      secret_id: vaultSecretId,
+      error: error.message,
+      error_code: error.code,
+    }))
+    return null
+  }
+
+  if (!data || data.length === 0) {
+    console.warn(JSON.stringify({
+      level: 'warn',
+      module: 'vault',
+      message: 'Vault secret not found — ID may be stale or secret was never persisted',
+      secret_id: vaultSecretId,
+    }))
+    return null
+  }
+
   return data[0].decrypted_secret
 }
 

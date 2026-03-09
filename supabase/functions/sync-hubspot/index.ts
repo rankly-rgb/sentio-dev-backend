@@ -16,6 +16,7 @@ import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
 import { CircuitBreaker } from '../_shared/circuit-breaker.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { getVaultSecret } from '../_shared/vault.ts'
+import { resolveCredentialSource } from '../_shared/credential-helpers.ts'
 
 const HUBSPOT_API_BASE = 'https://api.hubapi.com'
 const PAGE_SIZE = 100
@@ -61,7 +62,6 @@ async function getHubSpotCredentials(
   supabase: SupabaseClient,
   organizationId: string,
 ): Promise<HubSpotCredentials> {
-  // Priorite 1 : token OAuth par org depuis Vault
   const { data: integration } = await supabase
     .from('organization_integrations')
     .select('vault_access_token_id, provider_account_id, status, token_expires_at')
@@ -70,31 +70,27 @@ async function getHubSpotCredentials(
     .eq('status', 'active')
     .maybeSingle()
 
-  if (integration?.vault_access_token_id) {
-    // Verifier si le token est expire
-    if (integration.token_expires_at) {
-      const expiresAt = new Date(integration.token_expires_at).getTime()
-      if (expiresAt <= Date.now()) {
-        throw new Error('HubSpot token expired — run refresh-hubspot-tokens first')
-      }
-    }
+  const vaultSecret = integration?.vault_access_token_id
+    ? await getVaultSecret(supabase, integration.vault_access_token_id)
+    : null
 
-    const accessToken = await getVaultSecret(supabase, integration.vault_access_token_id)
-    if (accessToken) {
-      return {
-        accessToken,
-        portalId: integration.provider_account_id,
-      }
+  // resolveCredentialSource throws si OAuth active + Vault echoue (pas de fallback silencieux)
+  const source = resolveCredentialSource(integration, vaultSecret, 'hubspot')
+
+  if (source.type === 'oauth') {
+    return {
+      accessToken: vaultSecret!,
+      portalId: source.providerAccountId,
     }
   }
 
-  // Fallback temporaire : cle API globale depuis env var
+  // Fallback global : uniquement si AUCUNE integration OAuth n'existe
   const globalKey = Deno.env.get('HUBSPOT_API_KEY')
   if (globalKey) {
     console.warn(JSON.stringify({
       level: 'warn',
       function_name: 'sync-hubspot',
-      message: 'Using global HUBSPOT_API_KEY fallback — org needs OAuth migration',
+      message: 'No OAuth integration found — using global HUBSPOT_API_KEY fallback',
       organization_id: organizationId,
     }))
     return { accessToken: globalKey, portalId: null }
