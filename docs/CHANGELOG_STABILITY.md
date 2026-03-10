@@ -695,6 +695,45 @@ Refonte frontend complete : sidebar navigation, pages manquantes, dashboard acti
 
 ---
 
+## Page Aujourd'hui — Actions groupees par priorite v1 (2026-03-10)
+
+Refonte de la page "Aujourd'hui" : remplacement de la liste plate de 107 cartes identiques par un regroupement par priorite (P0/P1/P2) avec filtres et resume.
+
+**Shared helpers `_shared/today-actions-helpers.ts` (NOUVEAU) :**
+- `computeTodayActions(accounts, playbooks)` : matche comptes contre playbooks actifs, deduplique par account_id, retourne TodayAction[]
+- `buildTodayActionsSummary(actions)` : regroupe par priorite, calcule MRR a risque (P0+P1), compte par categorie
+- `getTopActionsByPriority(actions, limit)` : top N par groupe de priorite (vue collapsed)
+- `sortTodayActions(actions)` : tri P0 > P1 > P2, MRR desc intra-priorite
+- `computeTriggerReasons(account)` : raisons humaines (churn critique, sante faible, renouvellement, expansion, MRR zero)
+- `priorityLabel()` / `categoryLabel()` : labels francais
+- Reutilise `evaluateConditions` de `playbook-engine.ts` et `computePriority`/`computeDaysToRenewal` de `export-helpers.ts`
+
+**Sidebar (`src/components/Sidebar.tsx`) :**
+- Ajout nav item "Aujourd'hui" en premiere position (icone CalendarCheck)
+- Badge rouge avec compteur d'actions (99+ si > 99, masque si 0)
+- Prop `todayActionCount?: number | null` ajoutee a SidebarProps
+
+**Frontend prompt `docs/PROMPT_FRONTEND_TODAY_V1.md` :**
+- Architecture complete de la page `/dashboard/today`
+- 4 KPI cards resume (P0 count, P1 count, P2 count, MRR a risque)
+- 3 sections collapsibles par priorite (P0 ouvert, P1 ouvert, P2 ferme)
+- Top 5 par section avec "Voir les N restants"
+- Vue tableau condensee (pas de cartes) pour scanabilite
+- Filtres rapides : priorite, segment, categorie playbook, MRR minimum
+- Logique complete de matching, priority, trigger_reasons documentee
+- Export CSV/JSON via Edge Function existante
+
+**Tests : 32 nouveaux tests (575 total) :**
+- computeTriggerReasons : churn critique, modere, sante faible, renouvellement, expansion, MRR zero, healthy (0 reasons), null scores (8 tests)
+- computeTodayActions : no match, match, multi-playbook dedup, same playbook dedup, multi-accounts, priority computation, null criteria, trigger_reasons (8 tests)
+- sortTodayActions : priority order, MRR desc intra-priority, immutability (3 tests)
+- buildTodayActionsSummary : by_priority counts, MRR at risk P0+P1, by_category, sorted output, empty (5 tests)
+- getTopActionsByPriority : limit per group, empty, MRR sort within group (3 tests)
+- priorityLabel : P0/P1/P2 labels (3 tests)
+- categoryLabel : known categories, unknown fallback (2 tests)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`

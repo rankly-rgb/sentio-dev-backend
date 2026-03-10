@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
+  CalendarCheck,
   LayoutDashboard,
   Users,
   PieChart,
@@ -15,6 +16,7 @@ import { createSupabaseBrowserClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
 const NAV_ITEMS = [
+  { href: '/dashboard/today', label: 'Aujourd\'hui', icon: CalendarCheck, badge: true },
   { href: '/dashboard', label: 'Vue d\'ensemble', icon: LayoutDashboard },
   { href: '/dashboard/accounts', label: 'Comptes clients', icon: Users },
   { href: '/dashboard/segments', label: 'Segments', icon: PieChart },
@@ -26,9 +28,10 @@ const NAV_ITEMS = [
 interface SidebarProps {
   userName?: string | null
   userRole?: string | null
+  todayActionCount?: number | null
 }
 
-export function Sidebar({ userName, userRole }: SidebarProps) {
+export function Sidebar({ userName, userRole, todayActionCount }: SidebarProps) {
   const pathname = usePathname()
   const router = useRouter()
 
@@ -74,7 +77,12 @@ export function Sidebar({ userName, userRole }: SidebarProps) {
               }`}
             >
               <Icon className="w-5 h-5 flex-shrink-0" />
-              {item.label}
+              <span className="flex-1">{item.label}</span>
+              {'badge' in item && item.badge && todayActionCount != null && todayActionCount > 0 && (
+                <span className="ml-auto bg-red-500 text-white text-[10px] font-bold rounded-full min-w-[20px] h-5 flex items-center justify-center px-1.5">
+                  {todayActionCount > 99 ? '99+' : todayActionCount}
+                </span>
+              )}
             </Link>
           )
         })}
