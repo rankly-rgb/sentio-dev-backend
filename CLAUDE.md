@@ -37,7 +37,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 ```bash
 npm run dev          # Serveur Next.js local
 npm run build        # Build production
-npm run test         # Tests Vitest (529 tests)
+npm run test         # Tests Vitest (543 tests)
 npm run lint         # ESLint
 npm run typecheck    # TypeScript check (tsc --noEmit)
 npm run verify       # typecheck + lint + test + build (post-modification)

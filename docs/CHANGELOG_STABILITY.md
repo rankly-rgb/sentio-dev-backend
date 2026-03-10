@@ -590,6 +590,38 @@ Le score d'usage produit est suspendu pour la V1. Le tracker n'est pas encore in
 
 ---
 
+## Playbook Dynamic Eligible Count v1 (2026-03-10)
+
+L'endpoint `playbook-crud` retourne maintenant un `current_eligible_count` dynamique pour chaque playbook. Avant, les compteurs `accounts_targeted`/`accounts_eligible` etaient des KPIs cumulatifs incrementes uniquement apres execution — toujours a 0 pour les playbooks non executes.
+
+**`_shared/playbook-engine.ts` — 2 nouvelles fonctions pures :**
+- `countEligibleAccounts(criteria, accounts)` : evalue eligibility_criteria contre un tableau de comptes, retourne le count
+- `enrichPlaybooksWithEligibleCount(playbooks, accounts)` : enrichit chaque playbook avec `current_eligible_count`
+
+**`playbook-crud/index.ts` — enrichissement GET list & detail :**
+- `handleList` : charge les comptes de l'org (si au moins 1 playbook a des eligibility_criteria), evalue chaque playbook via `enrichPlaybooksWithEligibleCount()`, retourne `current_eligible_count` dans la reponse
+- `handleGetOne` : idem pour le detail d'un playbook, evalue `evaluateConditions()` sur les comptes de l'org
+- Query comptes : `.select(scoring fields).eq(org_id).limit(10000)` — une seule query partagee pour tous les playbooks
+
+**Champ retourne :**
+```json
+{
+  "id": "pb-uuid",
+  "title": "Prevention churn",
+  "current_eligible_count": 12,
+  "accounts_targeted": 0,
+  ...
+}
+```
+- `current_eligible_count` : nombre de comptes qui matchent ACTUELLEMENT les eligibility_criteria (dynamique)
+- `accounts_targeted` : ancien KPI cumulatif post-execution (inchange)
+
+**Tests : 14 nouveaux tests (543 total) :**
+- countEligibleAccounts : null/undefined/empty criteria, AND/OR, no match, empty accounts, null fields (8 tests)
+- enrichPlaybooksWithEligibleCount : multi-playbook, no criteria, field preservation, empty arrays (6 tests)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`
