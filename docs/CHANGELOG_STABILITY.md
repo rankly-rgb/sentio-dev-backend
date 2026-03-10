@@ -645,8 +645,62 @@ La table `segment_memberships` a une contrainte unique sur `(segment_id, account
 
 ---
 
+## UX Audit Phase 1+2 (2026-03-10)
+
+Refonte frontend complete : sidebar navigation, pages manquantes, dashboard actionnable, empty states guides.
+
+**Composants crees :**
+- `Sidebar.tsx` : navigation persistante avec etat actif, logout, icones Lucide
+- `ScoreBadge.tsx` : badges colores semantiques (Sain/Attention/Critique, Eleve/Modere/Faible)
+- `EmptyState.tsx` : composant reutilisable avec icone, titre, description, CTA optionnel
+- `Breadcrumbs.tsx` : fil d'Ariane pour pages de detail
+
+**Foundation :**
+- `src/lib/types/accounts.ts` : type Account aligne avec la table Supabase
+- `src/lib/segment-queries.ts` : filtres de segment in-memory (source de verite = scoring.ts), metadata couleurs/labels, `formatMrr`, `formatScore`
+
+**Layout :**
+- `src/app/dashboard/layout.tsx` : layout avec sidebar (auth check + profile fetch dans le layout, plus dans chaque page)
+- `loading.tsx` et `error.tsx` adaptes au layout sidebar (suppression header duplique)
+
+**Dashboard enrichi (`/dashboard`) :**
+- KPI cards avec icones (Users, CreditCard, AlertTriangle)
+- 4 segment quick-links colores (Champions, En expansion, Stables, A risque leger)
+- Widget "Comptes a risque" : top 5 comptes par churn_risk desc avec ScoreBadge
+- Widget "Opportunites d'expansion" : top 5 comptes par expansion_score desc
+- Empty state guide vers Parametres quand aucune synchronisation
+
+**Nouvelles pages :**
+
+| Route | Contenu |
+|-------|---------|
+| `/dashboard/segments` | 8 cartes segment avec count, MRR total, sante moyenne, lien detail |
+| `/dashboard/segments/[segment]` | Detail avec filtrage in-memory (meme source que la liste), tableau comptes, stats, export CSV, breadcrumbs |
+| `/dashboard/accounts` | Liste complete des comptes avec tri MRR desc, scores colores |
+| `/dashboard/playbooks` | Cartes playbook avec statut, priorite, eligible count, template badge |
+| `/dashboard/insights` | Liste insights avec icones par type, priorite, statut, impact MRR, action recommandee |
+| `/dashboard/settings` | Statut integrations (Stripe/HubSpot), config webhook, info scoring V1/futur |
+
+**Segment detail — alignement source de donnees :**
+- La page detail utilise desormais le meme filtrage in-memory (`SEGMENT_FILTERS`) que la page liste
+- Plus de dependance a `segment_memberships` ni a la RPC `get_segment_accounts()`
+- Coherence garantie : memes comptes affiches sur la liste et le detail
+
+**Empty states implementes :**
+- Dashboard sans sync → guide vers Parametres
+- Comptes vides → guide vers configuration Stripe
+- Playbooks vides → explication du fonctionnement
+- Insights vides → explication du timing de generation
+- Segment vide → message contextuel avec nom du segment
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`
 - NPS : collecte + intégration scoring (V2)
 - HubSpot Static List Push (playbooks actionnables one-click)
+- Toast notifications (remplacer les messages inline ephemeres)
+- Recherche globale (Cmd+K) par stripe_customer_id / hubspot_company_id
+- Graphiques de tendance (health score, MRR sur 30j)
+- Responsive mobile (menu hamburger, tableaux scrollables)
