@@ -116,14 +116,24 @@ export function calcExpansionScore(account: Account, stats: UsageStats): number 
 }
 
 // ── Health Score composite ────────────────────────────────────
-export function calcHealthScore(
-  usageScore: number,
-  financialScore: number,
-  engagementScore: number,
-  contractScore: number,
-): number {
+export interface HealthScoreParams {
+  financialScore: number
+  engagementScore: number
+  contractScore: number
+  usageScore?: number
+  usageTrackerConnected: boolean
+}
+
+export function calcHealthScore(params: HealthScoreParams): number {
+  if (params.usageTrackerConnected && params.usageScore !== undefined) {
+    // 4 dimensions — quand tracker connecté
+    return Math.round(
+      (params.usageScore * 0.35 + params.financialScore * 0.25 + params.engagementScore * 0.20 + params.contractScore * 0.20) * 100,
+    ) / 100
+  }
+  // 3 dimensions V1 — usage exclu
   return Math.round(
-    (usageScore * 0.35 + financialScore * 0.25 + engagementScore * 0.20 + contractScore * 0.20) * 100,
+    (params.financialScore * 0.34 + params.engagementScore * 0.33 + params.contractScore * 0.33) * 100,
   ) / 100
 }
 
@@ -133,10 +143,12 @@ export function calcChurnRiskScore(
   invoiceStatus: InvoiceStatus,
   daysActive: number,
   account: Account,
+  usageTrackerConnected?: boolean,
 ): number {
   let churnAdditif = 0
   if (invoiceStatus.has_overdue) churnAdditif += 15
-  if (daysActive === 0) churnAdditif += 20
+  // "+20 si 0 jours actifs" ne s'applique que si le tracker est connecté
+  if (daysActive === 0 && usageTrackerConnected === true) churnAdditif += 20
 
   if (account.contract_end_date) {
     const daysUntilRenewal = Math.floor(

@@ -230,19 +230,74 @@ describe('calcExpansionScore', () => {
 
 // ── Health Score composite ────────────────────────────────────
 
-describe('calcHealthScore', () => {
+describe('calcHealthScore — 4 dimensions (usageTrackerConnected: true)', () => {
   it('follows weighted formula: U×35 + F×25 + E×20 + C×20', () => {
-    const health = calcHealthScore(80, 60, 70, 90)
+    const health = calcHealthScore({
+      usageScore: 80, financialScore: 60, engagementScore: 70, contractScore: 90,
+      usageTrackerConnected: true,
+    })
     const expected = Math.round((80 * 0.35 + 60 * 0.25 + 70 * 0.20 + 90 * 0.20) * 100) / 100
     expect(health).toBe(expected)
   })
 
   it('returns 0 for all zero inputs', () => {
-    expect(calcHealthScore(0, 0, 0, 0)).toBe(0)
+    expect(calcHealthScore({
+      usageScore: 0, financialScore: 0, engagementScore: 0, contractScore: 0,
+      usageTrackerConnected: true,
+    })).toBe(0)
   })
 
   it('returns 100 for all 100 inputs', () => {
-    expect(calcHealthScore(100, 100, 100, 100)).toBe(100)
+    expect(calcHealthScore({
+      usageScore: 100, financialScore: 100, engagementScore: 100, contractScore: 100,
+      usageTrackerConnected: true,
+    })).toBe(100)
+  })
+})
+
+describe('calcHealthScore — 3 dimensions (usageTrackerConnected: false)', () => {
+  it('follows redistributed weights: F×34 + E×33 + C×33', () => {
+    const health = calcHealthScore({
+      financialScore: 60, engagementScore: 70, contractScore: 90,
+      usageTrackerConnected: false,
+    })
+    const expected = Math.round((60 * 0.34 + 70 * 0.33 + 90 * 0.33) * 100) / 100
+    expect(health).toBe(expected)
+  })
+
+  it('ignores usageScore even if provided', () => {
+    const withUsage = calcHealthScore({
+      usageScore: 100, financialScore: 60, engagementScore: 70, contractScore: 90,
+      usageTrackerConnected: false,
+    })
+    const withoutUsage = calcHealthScore({
+      financialScore: 60, engagementScore: 70, contractScore: 90,
+      usageTrackerConnected: false,
+    })
+    expect(withUsage).toBe(withoutUsage)
+  })
+
+  it('returns 0 for all zero inputs', () => {
+    expect(calcHealthScore({
+      financialScore: 0, engagementScore: 0, contractScore: 0,
+      usageTrackerConnected: false,
+    })).toBe(0)
+  })
+
+  it('returns 100 for all 100 inputs', () => {
+    expect(calcHealthScore({
+      financialScore: 100, engagementScore: 100, contractScore: 100,
+      usageTrackerConnected: false,
+    })).toBe(100)
+  })
+
+  it('result is between 0 and 100', () => {
+    const health = calcHealthScore({
+      financialScore: 45, engagementScore: 78, contractScore: 33,
+      usageTrackerConnected: false,
+    })
+    expect(health).toBeGreaterThanOrEqual(0)
+    expect(health).toBeLessThanOrEqual(100)
   })
 })
 
@@ -267,9 +322,19 @@ describe('calcChurnRiskScore', () => {
     expect(risk).toBe(35) // 100 - 80 + 15 = 35
   })
 
-  it('adds 20 for zero activity', () => {
-    const risk = calcChurnRiskScore(80, noOverdue, 0, baseAccount)
+  it('adds 20 for zero activity when tracker connected', () => {
+    const risk = calcChurnRiskScore(80, noOverdue, 0, baseAccount, true)
     expect(risk).toBe(40) // 100 - 80 + 20 = 40
+  })
+
+  it('does NOT add 20 for zero activity when tracker not connected', () => {
+    const risk = calcChurnRiskScore(80, noOverdue, 0, baseAccount, false)
+    expect(risk).toBe(20) // 100 - 80 = 20, no +20 penalty
+  })
+
+  it('does NOT add 20 for zero activity when tracker undefined', () => {
+    const risk = calcChurnRiskScore(80, noOverdue, 0, baseAccount)
+    expect(risk).toBe(20) // 100 - 80 = 20, no +20 penalty (backwards compat)
   })
 
   it('adds 25 for expired contract', () => {
@@ -282,7 +347,7 @@ describe('calcChurnRiskScore', () => {
     const overdue: InvoiceStatus = { has_overdue: true, overdue_count: 1 }
     const acct = { ...baseAccount, contract_end_date: '2020-01-01' }
     // 100 - 0 + 15 + 20 + 25 = 160 → capped at 100
-    const risk = calcChurnRiskScore(0, overdue, 0, acct)
+    const risk = calcChurnRiskScore(0, overdue, 0, acct, true)
     expect(risk).toBe(100)
   })
 

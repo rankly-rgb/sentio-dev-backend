@@ -34,6 +34,32 @@ import {
   determineSegmentTypes,
 } from '../_shared/scoring.ts'
 
+// ── Detect usage tracker connectivity for an org ──────────────
+async function detectUsageTrackerConnected(
+  supabase: SupabaseClient,
+  organizationId: string,
+): Promise<boolean> {
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]
+  const { data, error } = await supabase
+    .from('usage_events')
+    .select('id')
+    .eq('organization_id', organizationId)
+    .gte('event_date', thirtyDaysAgo)
+    .limit(1)
+
+  if (error) {
+    console.error(JSON.stringify({
+      level: 'warn',
+      function_name: 'calculate-scores',
+      organization_id: organizationId,
+      message: `usage_events detection failed: ${error.message}`,
+    }))
+    return false
+  }
+
+  return (data?.length ?? 0) > 0
+}
+
 // ── Types internes ──────────────────────────────────────────
 interface AccountWithCreatedAt extends Account {
   created_at: string
@@ -45,7 +71,7 @@ interface ScoreResult {
   health_score: number
   churn_risk_score: number
   expansion_score: number
-  product_usage_score: number
+  product_usage_score: number | null
   financial_score: number
   engagement_score: number
   contract_score: number
@@ -210,21 +236,30 @@ function scoreAccountPure(
   usage: UsageStats,
   hubspot: HubspotData | null,
   invoiceStatus: InvoiceStatus,
+  usageTrackerConnected: boolean,
 ): ScoreResult & { invoiceStatus: InvoiceStatus; daysActive: number } {
-  const usageScore = calcUsageScore(usage)
   const financialScore = calcFinancialScore(account.mrr_cents, invoiceStatus, maxMrrCents)
   const engagementScore = calcEngagementScore(hubspot)
   const contractScore = calcContractScore(account)
 
-  const healthScore = calcHealthScore(usageScore, financialScore, engagementScore, contractScore)
-  const churnRiskScore = calcChurnRiskScore(healthScore, invoiceStatus, usage.days_active, account)
+  const usageScore = usageTrackerConnected ? calcUsageScore(usage) : undefined
+  const healthScore = calcHealthScore({
+    financialScore,
+    engagementScore,
+    contractScore,
+    usageScore,
+    usageTrackerConnected,
+  })
+  const churnRiskScore = calcChurnRiskScore(healthScore, invoiceStatus, usage.days_active, account, usageTrackerConnected)
   const expansionScore = calcExpansionScore(account, usage)
 
   return {
     health_score: Math.max(0, Math.min(100, healthScore)),
     churn_risk_score: Math.max(0, Math.min(100, churnRiskScore)),
     expansion_score: Math.max(0, Math.min(100, expansionScore)),
-    product_usage_score: Math.max(0, Math.min(100, usageScore)),
+    product_usage_score: usageTrackerConnected && usageScore !== undefined
+      ? Math.max(0, Math.min(100, usageScore))
+      : null,
     financial_score: Math.max(0, Math.min(100, financialScore)),
     engagement_score: Math.max(0, Math.min(100, engagementScore)),
     contract_score: Math.max(0, Math.min(100, contractScore)),
@@ -433,6 +468,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         const maxMrrCents = maxMrrRow?.mrr_cents || 1
 
+        // Détecter si le tracker d'usage est connecté pour cette org
+        const usageTrackerConnected = await detectUsageTrackerConnected(supabase, organizationId)
+
         // Scorer les accounts par batch paginé (évite OOM et timeout N+1)
         const accountScores = new Map<string, ScoreResult>()
         const accountInvoiceStatus = new Map<string, InvoiceStatus>()
@@ -480,7 +518,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
               const hubspot = hubspotMap.get(account.id) ?? null
               const invoiceStatus = invoiceStatusMap.get(account.id) ?? DEFAULT_INVOICE
 
-              const result = scoreAccountPure(account, maxMrrCents, usage, hubspot, invoiceStatus)
+              const result = scoreAccountPure(account, maxMrrCents, usage, hubspot, invoiceStatus, usageTrackerConnected)
               const scores: ScoreResult = {
                 health_score: result.health_score,
                 churn_risk_score: result.churn_risk_score,
@@ -519,6 +557,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                   financial_score: scores.financial_score,
                   engagement_score: scores.engagement_score,
                   contract_score: scores.contract_score,
+                  usage_tracker_connected: usageTrackerConnected,
                   scores_calculated_at: new Date().toISOString(),
                 })
                 .eq('id', account.id)
