@@ -622,6 +622,29 @@ L'endpoint `playbook-crud` retourne maintenant un `current_eligible_count` dynam
 
 ---
 
+## Fix Segment Detail Empty (2026-03-10)
+
+Bug critique : la page detail d'un segment affichait 0 comptes alors que la page liste affichait le bon nombre (ex: "A risque leger" = 101 comptes sur la liste, 0 sur le detail).
+
+**Cause racine : mismatch `onConflict` dans `calculate-scores`**
+
+La table `segment_memberships` a une contrainte unique sur `(segment_id, account_id)` (2 colonnes), mais l'upsert dans `assignSegments()` specifiait `onConflict: 'organization_id,segment_id,account_id'` (3 colonnes). Ce mismatch faisait echouer l'upsert silencieusement, laissant `segment_memberships` vide.
+
+**Impact :**
+- Page liste segments : fonctionnait (filtrage in-memory sur scores via `SEGMENT_FILTERS`)
+- Page detail segment : vide (utilise RPC `get_segment_accounts()` qui JOIN sur `segment_memberships`)
+- Export CSV segment : fonctionnait (filtrage in-memory identique a la liste)
+
+**Fix applique :**
+- `calculate-scores/index.ts` ligne 337 : `onConflict: 'segment_id,account_id'` (aligne avec la contrainte DB)
+
+**Apres deploy :**
+- Le prochain run de `calculate-scores` peuplera `segment_memberships` correctement
+- La page detail affichera les memes comptes que la liste
+- Aucune migration necessaire (la contrainte DB etait deja correcte)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`
