@@ -311,6 +311,40 @@ export function executeAction(
   }
 }
 
+// ── Eligible accounts counting ───────────────────────────────
+
+/**
+ * Compte le nombre de comptes éligibles pour un playbook donné.
+ * Évalue eligibility_criteria contre chaque compte.
+ * Retourne le nombre total de comptes si pas de critères définis.
+ */
+export function countEligibleAccounts(
+  eligibilityCriteria: ConditionGroup | null | undefined,
+  accounts: Record<string, unknown>[],
+): number {
+  if (!eligibilityCriteria || !eligibilityCriteria.conditions || eligibilityCriteria.conditions.length === 0) {
+    return accounts.length
+  }
+  return accounts.filter((a) => evaluateConditions(eligibilityCriteria, a)).length
+}
+
+/**
+ * Enrichit une liste de playbooks avec current_eligible_count.
+ * Évalue les eligibility_criteria de chaque playbook contre les comptes de l'org.
+ */
+export function enrichPlaybooksWithEligibleCount(
+  playbooks: Record<string, unknown>[],
+  accounts: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  return playbooks.map((pb) => ({
+    ...pb,
+    current_eligible_count: countEligibleAccounts(
+      pb.eligibility_criteria as ConditionGroup | null | undefined,
+      accounts,
+    ),
+  }))
+}
+
 // ── Scheduling ──────────────────────────────────────────────
 
 /**

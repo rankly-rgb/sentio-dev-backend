@@ -7,6 +7,8 @@ import {
   executeAction,
   calculateNextScheduledAt,
   isRecentExecution,
+  countEligibleAccounts,
+  enrichPlaybooksWithEligibleCount,
   VALID_ACTION_TYPES,
   VALID_COMPARISON_OPERATORS,
   type Condition,
@@ -446,5 +448,157 @@ describe('isRecentExecution', () => {
   it('returns false for exactly at cooldown boundary', () => {
     const exactlyAtCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
     expect(isRecentExecution(exactlyAtCutoff, 24)).toBe(false)
+  })
+})
+
+// ── countEligibleAccounts ───────────────────────────────────
+
+describe('countEligibleAccounts', () => {
+  const accounts = [
+    { ...baseAccount, id: 'a1', churn_risk_score: 80, health_score: 30, mrr_cents: 60000 },
+    { ...baseAccount, id: 'a2', churn_risk_score: 40, health_score: 75, mrr_cents: 120000 },
+    { ...baseAccount, id: 'a3', churn_risk_score: 90, health_score: 20, mrr_cents: 200000 },
+    { ...baseAccount, id: 'a4', churn_risk_score: 55, health_score: 50, mrr_cents: 30000 },
+  ] as unknown as Record<string, unknown>[]
+
+  it('returns all accounts when no criteria', () => {
+    expect(countEligibleAccounts(null, accounts)).toBe(4)
+  })
+
+  it('returns all accounts when criteria is undefined', () => {
+    expect(countEligibleAccounts(undefined, accounts)).toBe(4)
+  })
+
+  it('returns all accounts when conditions array is empty', () => {
+    const criteria: ConditionGroup = { operator: 'AND', conditions: [] }
+    expect(countEligibleAccounts(criteria, accounts)).toBe(4)
+  })
+
+  it('filters accounts by single condition (churn_risk >= 70)', () => {
+    const criteria: ConditionGroup = {
+      operator: 'AND',
+      conditions: [{ field: 'churn_risk_score', operator: 'gte', value: 70 }],
+    }
+    expect(countEligibleAccounts(criteria, accounts)).toBe(2) // a1=80, a3=90
+  })
+
+  it('filters accounts by AND conditions', () => {
+    const criteria: ConditionGroup = {
+      operator: 'AND',
+      conditions: [
+        { field: 'churn_risk_score', operator: 'gte', value: 70 },
+        { field: 'mrr_cents', operator: 'gte', value: 100000 },
+      ],
+    }
+    expect(countEligibleAccounts(criteria, accounts)).toBe(1) // a3 only
+  })
+
+  it('filters accounts by OR conditions', () => {
+    const criteria: ConditionGroup = {
+      operator: 'OR',
+      conditions: [
+        { field: 'churn_risk_score', operator: 'gte', value: 90 },
+        { field: 'health_score', operator: 'gte', value: 75 },
+      ],
+    }
+    expect(countEligibleAccounts(criteria, accounts)).toBe(2) // a2=health75, a3=churn90
+  })
+
+  it('returns 0 when no accounts match', () => {
+    const criteria: ConditionGroup = {
+      operator: 'AND',
+      conditions: [{ field: 'churn_risk_score', operator: 'gte', value: 100 }],
+    }
+    expect(countEligibleAccounts(criteria, accounts)).toBe(0)
+  })
+
+  it('returns 0 for empty accounts array', () => {
+    const criteria: ConditionGroup = {
+      operator: 'AND',
+      conditions: [{ field: 'churn_risk_score', operator: 'gte', value: 50 }],
+    }
+    expect(countEligibleAccounts(criteria, [])).toBe(0)
+  })
+
+  it('handles null field values (condition not met)', () => {
+    const accountsWithNull = [
+      { ...baseAccount, id: 'n1', churn_risk_score: null },
+    ] as unknown as Record<string, unknown>[]
+    const criteria: ConditionGroup = {
+      operator: 'AND',
+      conditions: [{ field: 'churn_risk_score', operator: 'gte', value: 50 }],
+    }
+    expect(countEligibleAccounts(criteria, accountsWithNull)).toBe(0)
+  })
+})
+
+// ── enrichPlaybooksWithEligibleCount ────────────────────────
+
+describe('enrichPlaybooksWithEligibleCount', () => {
+  const accounts = [
+    { ...baseAccount, id: 'a1', churn_risk_score: 80, health_score: 30, expansion_score: 20 },
+    { ...baseAccount, id: 'a2', churn_risk_score: 40, health_score: 75, expansion_score: 80 },
+    { ...baseAccount, id: 'a3', churn_risk_score: 90, health_score: 20, expansion_score: 10 },
+  ] as unknown as Record<string, unknown>[]
+
+  it('adds current_eligible_count to each playbook', () => {
+    const playbooks = [
+      {
+        id: 'pb1',
+        title: 'Churn prevention',
+        eligibility_criteria: {
+          operator: 'AND',
+          conditions: [{ field: 'churn_risk_score', operator: 'gte', value: 70 }],
+        },
+      },
+      {
+        id: 'pb2',
+        title: 'Expansion',
+        eligibility_criteria: {
+          operator: 'AND',
+          conditions: [{ field: 'expansion_score', operator: 'gte', value: 70 }],
+        },
+      },
+    ]
+
+    const result = enrichPlaybooksWithEligibleCount(playbooks, accounts)
+    expect(result).toHaveLength(2)
+    expect(result[0].current_eligible_count).toBe(2) // a1, a3
+    expect(result[1].current_eligible_count).toBe(1) // a2
+  })
+
+  it('returns all accounts count when no eligibility_criteria', () => {
+    const playbooks = [{ id: 'pb1', title: 'No criteria', eligibility_criteria: null }]
+    const result = enrichPlaybooksWithEligibleCount(playbooks, accounts)
+    expect(result[0].current_eligible_count).toBe(3)
+  })
+
+  it('preserves original playbook fields', () => {
+    const playbooks = [
+      { id: 'pb1', title: 'Test', status: 'draft', eligibility_criteria: null },
+    ]
+    const result = enrichPlaybooksWithEligibleCount(playbooks, accounts)
+    expect(result[0].id).toBe('pb1')
+    expect(result[0].title).toBe('Test')
+    expect(result[0].status).toBe('draft')
+  })
+
+  it('handles empty playbooks array', () => {
+    const result = enrichPlaybooksWithEligibleCount([], accounts)
+    expect(result).toHaveLength(0)
+  })
+
+  it('handles empty accounts array', () => {
+    const playbooks = [
+      {
+        id: 'pb1',
+        eligibility_criteria: {
+          operator: 'AND',
+          conditions: [{ field: 'churn_risk_score', operator: 'gte', value: 70 }],
+        },
+      },
+    ]
+    const result = enrichPlaybooksWithEligibleCount(playbooks, [])
+    expect(result[0].current_eligible_count).toBe(0)
   })
 })

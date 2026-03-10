@@ -13,6 +13,8 @@ import {
   validateConditions,
   validateWorkflowSteps,
   calculateNextScheduledAt,
+  evaluateConditions,
+  enrichPlaybooksWithEligibleCount,
   VALID_PLAYBOOK_STATUSES,
   VALID_PLAYBOOK_TYPES,
   VALID_TEMPLATE_CATEGORIES,
@@ -228,7 +230,33 @@ async function handleList(supabase: SupabaseClient, url: URL, authOrgId: string)
     return errorResponse(`Failed to list playbooks: ${error.message}`, 500)
   }
 
-  return jsonResponse({ data, total: count, page, per_page: perPage })
+  // Enrich playbooks with current_eligible_count
+  const playbooks = data ?? []
+  const hasEligibility = playbooks.some(
+    (pb: Record<string, unknown>) =>
+      pb.eligibility_criteria &&
+      typeof pb.eligibility_criteria === 'object' &&
+      (pb.eligibility_criteria as Record<string, unknown>).conditions,
+  )
+
+  let enrichedData = playbooks
+  if (hasEligibility && playbooks.length > 0) {
+    const { data: accounts } = await supabase
+      .from('accounts')
+      .select('id, organization_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
+      .eq('organization_id', orgId)
+      .limit(10000)
+
+    enrichedData = enrichPlaybooksWithEligibleCount(playbooks, accounts ?? [])
+  } else {
+    // No eligibility criteria → all accounts are eligible for each playbook
+    enrichedData = playbooks.map((pb: Record<string, unknown>) => ({
+      ...pb,
+      current_eligible_count: 0,
+    }))
+  }
+
+  return jsonResponse({ data: enrichedData, total: count, page, per_page: perPage })
 }
 
 // ── GET ONE ─────────────────────────────────────────────────
@@ -267,7 +295,21 @@ async function handleGetOne(supabase: SupabaseClient, id: string, authOrgId: str
       : null,
   }
 
-  return jsonResponse({ ...playbook, execution_stats: stats })
+  // Compute current eligible count
+  let currentEligibleCount = 0
+  if (playbook.eligibility_criteria) {
+    const { data: accounts } = await supabase
+      .from('accounts')
+      .select('id, organization_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
+      .eq('organization_id', authOrgId)
+      .limit(10000)
+
+    const eligible = (accounts ?? []).filter((a: Record<string, unknown>) =>
+      evaluateConditions(playbook.eligibility_criteria, a))
+    currentEligibleCount = eligible.length
+  }
+
+  return jsonResponse({ ...playbook, execution_stats: stats, current_eligible_count: currentEligibleCount })
 }
 
 // ── UPDATE ──────────────────────────────────────────────────
