@@ -558,6 +558,38 @@ Alignement des filtres de segment avec scoring.ts + connexion HubSpot par cle AP
 
 ---
 
+## Usage Score Suspension V1 (2026-03-10)
+
+Le score d'usage produit est suspendu pour la V1. Le tracker n'est pas encore integre chez les clients beta. Plutot que d'afficher un score neutre a 50 qui fausse le Health Score global, la dimension est exclue du calcul.
+
+**Migration `20260310000001_add_usage_tracker_connected.sql` :**
+- Colonne `usage_tracker_connected BOOLEAN NOT NULL DEFAULT FALSE` sur `accounts`
+- Mise a jour par `calculate-scores` a chaque run
+
+**`_shared/scoring.ts` — calcHealthScore dual-mode :**
+- Nouvelle signature : `calcHealthScore(params: HealthScoreParams)` (objet)
+- `usageTrackerConnected = false` → 3 dimensions : Financial 34% + Engagement 33% + Contract 33%
+- `usageTrackerConnected = true` → 4 dimensions : Usage 35% + Financial 25% + Engagement 20% + Contract 20%
+- `HealthScoreParams` : interface exportee (`financialScore`, `engagementScore`, `contractScore`, `usageScore?`, `usageTrackerConnected`)
+
+**`_shared/scoring.ts` — calcChurnRiskScore :**
+- 5e parametre optionnel `usageTrackerConnected?: boolean`
+- Le facteur "+20 si 0 jours actifs" ne s'applique que si `usageTrackerConnected === true`
+- Backwards compatible : `undefined` = pas de penalite (V1 par defaut)
+
+**`calculate-scores/index.ts` :**
+- `detectUsageTrackerConnected()` : query `usage_events` des 30 derniers jours par org (SELECT id LIMIT 1)
+- `scoreAccountPure()` : recoit et propage `usageTrackerConnected`
+- Si tracker deconnecte : `product_usage_score = NULL` (pas 0, pas 50)
+- Mise a jour `accounts.usage_tracker_connected` a chaque run de scoring
+
+**Tests : 7 nouveaux tests (529 total) :**
+- calcHealthScore 4D : formule 35/25/20/20, bornes 0 et 100 (3 tests adaptes)
+- calcHealthScore 3D : formule 34/33/33, usage ignore meme si fourni, bornes 0/100, range (5 tests)
+- calcChurnRiskScore : +20 seulement si tracker connecte, pas si false, pas si undefined (3 tests adaptes)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`

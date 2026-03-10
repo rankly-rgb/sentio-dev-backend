@@ -27,7 +27,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 | Langage | TypeScript 5.x (target ES5 — pas de `[...new Set()]`) |
 | Styling | Tailwind CSS 3.x |
 | Auth | @supabase/ssr (cookies, PKCE, ES256) |
-| Tests | Vitest (498 tests) |
+| Tests | Vitest (529 tests) |
 | CI/CD | GitHub Actions + Vercel |
 
 **Phase actuelle** : setup/dev. Production intentionnellement inactif.
@@ -37,7 +37,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 ```bash
 npm run dev          # Serveur Next.js local
 npm run build        # Build production
-npm run test         # Tests Vitest (522 tests)
+npm run test         # Tests Vitest (529 tests)
 npm run lint         # ESLint
 npm run typecheck    # TypeScript check (tsc --noEmit)
 npm run verify       # typecheck + lint + test + build (post-modification)
@@ -46,12 +46,19 @@ npm run verify       # typecheck + lint + test + build (post-modification)
 ## Scoring SaaS
 
 ```
+# V1 — usage tracker non connecté (3 dimensions)
+Health Score = (Financial × 34%) + (Engagement × 33%) + (Contract × 33%)
+
+# Futur — usage tracker connecté (4 dimensions)
 Health Score = (Usage × 35%) + (Financial × 25%) + (Engagement × 20%) + (Contract × 20%)
+
 Churn Risk  = 100 - Health Score + facteurs additifs (capped 100)
 Expansion   = (seat_usage_pct × 60%) + (feature_ceiling × 40%)
 ```
 
-Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financial=0.
+`usage_tracker_connected` : détecté par `calculate-scores` (≥1 usage_event dans les 30 derniers jours). Stocké sur `accounts`.
+
+Valeurs neutres (pas de données) : Engagement=50, Contrat=50, Financial=0. Usage=NULL quand tracker non connecté.
 
 8 segments : Champions, En expansion, Stables, À risque léger, En danger critique, Impayés, En churn, Nouveaux (<90j).
 
