@@ -8,6 +8,20 @@ La page "Aujourd'hui" actuelle affiche 107 cartes d'actions en liste plate, tout
 
 ---
 
+## IMPORTANT — Remplacement de la page existante
+
+**Ce prompt REMPLACE la page "Aujourd'hui" existante. Il ne faut PAS creer une deuxieme page.**
+
+Actions a faire cote frontend :
+1. **Identifier la route existante** de la page "Aujourd'hui" (probablement `/dashboard/today` ou `/dashboard`)
+2. **Remplacer son contenu** par l'implementation decrite ci-dessous
+3. **Ne PAS ajouter un deuxieme nav item** "Aujourd'hui" dans la sidebar — il en existe deja un, le modifier si necessaire
+4. **Supprimer** l'ancien composant/page qui affichait les 107 cartes plates
+
+Si la sidebar a deja un item "Aujourd'hui", garder celui-la et mettre a jour son `href` vers `/dashboard/today` si different. Le backend reference (`sentio-dev-backend/src/components/Sidebar.tsx`) montre la structure cible — un seul item avec badge.
+
+---
+
 ## Donnees sources
 
 La page "Aujourd'hui" est alimentee par :
