@@ -334,7 +334,7 @@ async function assignSegments(
       const { error } = await supabase
         .from('segment_memberships')
         .upsert(memberships.slice(i, i + CHUNK_SIZE), {
-          onConflict: 'organization_id,segment_id,account_id',
+          onConflict: 'segment_id,account_id',
           ignoreDuplicates: false,
         })
 
