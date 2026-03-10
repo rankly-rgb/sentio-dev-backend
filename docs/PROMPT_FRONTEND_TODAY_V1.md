@@ -478,6 +478,6 @@ Si 0 actions :
 
 6. **Zero-PII** : comme partout, uniquement `stripe_customer_id` et `hubspot_company_id`. Pas de nom, email, telephone.
 
-7. **Playbooks filtres** : seuls les playbooks avec `status = 'active'` sont pris en compte. Les playbooks `draft`, `paused`, `archived` sont ignores.
+7. **Playbooks filtres** : inclure les playbooks `draft`, `active` et `paused`. Seuls les `archived` sont exclus (`status !== 'archived'`). Les 9 templates par defaut sont en `draft` — les exclure donnerait 0 actions.
 
 8. **Rafraichissement** : le bouton "Actualiser" existant (RefreshDataButton) doit aussi rafraichir la page Aujourd'hui.

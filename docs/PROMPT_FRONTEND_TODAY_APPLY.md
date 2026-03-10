@@ -68,8 +68,9 @@ const res = await fetch(`${NEXT_PUBLIC_SUPABASE_URL}/functions/v1/playbook-crud`
 })
 const { data: playbooks } = await res.json()
 
-// Filtrer : seuls les playbooks actifs comptent
-const activePlaybooks = playbooks.filter((pb: any) => pb.status === 'active')
+// Filtrer : exclure uniquement les playbooks archivés
+// Les playbooks draft + active + paused sont inclus (les 9 templates par défaut sont en draft)
+const activePlaybooks = playbooks.filter((pb: any) => pb.status !== 'archived')
 ```
 
 ### 2. Comptes de l'organisation
@@ -475,7 +476,7 @@ import {
 
 1. **Zero-PII** : jamais d'email, nom, téléphone. Seuls `stripe_customer_id` et `hubspot_company_id` sont affichés.
 2. **Performance** : 1 fetch accounts + 1 fetch playbooks. Matching in-memory. Avec 10 000 comptes et 9 playbooks, c'est instantané.
-3. **Playbooks actifs uniquement** : filtrer `status === 'active'`. Les playbooks `draft`, `paused`, `archived` sont ignorés.
+3. **Playbooks non-archivés** : filtrer `status !== 'archived'`. Les playbooks `draft`, `active` et `paused` sont inclus (les 9 templates par défaut sont en `draft`). Seuls les `archived` sont exclus.
 4. **Tri fixe** : P0 > P1 > P2, MRR décroissant dans chaque groupe. Non configurable par l'utilisateur.
 5. **Pas de nouvelle dépendance** : utiliser uniquement ce qui est déjà installé (lucide-react, tailwind, supabase).
 
