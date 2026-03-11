@@ -734,6 +734,68 @@ Refonte de la page "Aujourd'hui" : remplacement de la liste plate de 107 cartes 
 
 ---
 
+## Playbook Detail Backend v1 (2026-03-11)
+
+Backend complet pour la page de detail d'un playbook : RPC consolidee, transition de statut validee, helpers pures.
+
+**Migration `20260311000001_alter_playbook_executions_add_mrr_columns.sql` :**
+- Ajout `mrr_recovered_cents INTEGER NOT NULL DEFAULT 0` sur `playbook_executions`
+- Ajout `mrr_expansion_cents INTEGER NOT NULL DEFAULT 0` sur `playbook_executions`
+- Permet le suivi MRR par execution (au lieu du cumul sur `playbooks` uniquement)
+
+**RPC `get_playbook_full_detail(p_playbook_id)` (20260311000002) :**
+- SECURITY DEFINER + SET search_path = public
+- Verification explicite `user_organization_id()` en premiere instruction
+- Retourne NULL si playbook inexistant ou cross-tenant
+- JSON consolide : playbook (15 champs) + stats (10 metriques) + affected_accounts_summary (total, mrr_at_risk, by_urgency) + conditions + actions
+- Stats : targeted/reached/converted counts, mrr_recovered/expansion, executions total/completed/failed/in_progress
+- eligible_count : calcule dynamiquement via filtrage SQL des conditions eligibility_criteria
+- affected_accounts_summary.by_urgency : urgent (churn >= 70), watch (40-69), stable (< 40)
+- Filtres SQL dynamiques : churn_risk_score, health_score, expansion_score, mrr_cents, product_usage_score, plan_tier
+- Zero-PII : aucun stripe_customer_id/email dans le retour, uniquement des agregats
+
+**RPC `transition_playbook_status(p_playbook_id, p_target_status)` (20260311000003) :**
+- SECURITY DEFINER + SET search_path = public
+- Machine a etats validee :
+  - draft → active, archived ✅
+  - active → draft, archived ✅
+  - paused → active, archived ✅
+  - completed → archived ✅
+  - archived → * ❌ (interdit)
+- Retourne `{success: true, new_status}` ou `{success: false, error}`
+- Met a jour `activated_at` (premiere activation) et `deactivated_at` (archivage)
+- Validation statut cible (rejet des valeurs inconnues)
+
+**Adaptations schema reel :**
+- `conditions` → `eligibility_criteria` (JSONB `{operator, conditions:[]}`)
+- `automation_type` → `playbook_type` (manual, automated, semi_automated, template)
+- `category` → `template_category`
+- `pe.status` → `pe.execution_status` (pending, running, completed, failed, cancelled)
+- `pe.converted` → `pe.account_converted`
+
+**Shared helpers `_shared/playbook-detail-helpers.ts` (NOUVEAU) :**
+- `classifyUrgency(churnRiskScore)` : urgent/watch/stable (boundaries 70/40)
+- `buildAffectedAccountsSummary(accounts)` : total, mrr_at_risk_cents, by_urgency
+- `buildConditionLabel(condition)` : label francais lisible (ex: "Score de risque churn ≥ 70", "MRR ≥ 500 €")
+- `buildConditionsDisplay(eligibilityCriteria)` : conditions avec labels pour l'UI
+- `buildActionsDisplay(actions)` : actions avec step/type/label/detail pour l'UI
+- `isTransitionAllowed(current, target)` : validation pure des transitions
+- `getAllowedTransitions(status)` : liste des cibles autorisees
+- `computeExecutionStats(executions)` : stats agregees avec deduplication par account_id
+- Labels francais : 8 champs, 8 operateurs, 8 types d'action
+
+**Tests : 42 nouveaux tests (617 total) :**
+- classifyUrgency : urgent/watch/stable, null, boundaries 70/69 et 40/39 (6 tests)
+- buildAffectedAccountsSummary : mixed urgency, empty, null mrr, null churn (4 tests)
+- buildConditionLabel : churn gte, mrr euros, plan in, unknown field, health lte (5 tests)
+- buildConditionsDisplay : null, undefined, multi-conditions avec labels (3 tests)
+- buildActionsDisplay : null, undefined, multi-actions, sort by order, empty detail (5 tests)
+- isTransitionAllowed : 10 transitions (draft→active, archived→active interdit, etc.)
+- getAllowedTransitions : draft targets, archived empty, unknown empty (3 tests)
+- computeExecutionStats : mixed, empty, dedup accounts, zero mrr, null mrr, pending as in_progress (6 tests)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`
