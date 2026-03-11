@@ -796,6 +796,41 @@ Backend complet pour la page de detail d'un playbook : RPC consolidee, transitio
 
 ---
 
+## Fix HubSpot Sync 401 + Bouton Sync HubSpot (2026-03-11)
+
+Correction du bug critique empechant la synchronisation HubSpot apres connexion par cle API, et ajout du support sync-hubspot dans admin-proxy pour le bouton de sync manuelle frontend.
+
+**Cause racine du 401 :**
+- `triggerInitialSync()` dans `integration-oauth` appelait `sync-hubspot` sans le header `apikey`
+- Le relay Supabase exige ce header pour router la requete vers la bonne Edge Function AVANT de verifier le JWT
+- Resultat : 401 systematique du relay, `sync-hubspot` jamais execute
+- Meme probleme potentiel dans `admin-proxy` pour tous les appels internes
+
+**Fix `triggerInitialSync` (integration-oauth) :**
+- Ajout header `apikey: serviceRoleKey` dans le fetch fire-and-forget
+- S'applique a tous les syncs initiaux (Stripe et HubSpot)
+
+**Fix validation endpoint HubSpot :**
+- Avant : appel a `/oauth/v1/access-tokens/{key}` (endpoint OAuth token introspection, incompatible avec les Private App tokens `pat-`)
+- Fallback sur `/account-info/v3/details` uniquement si le premier echouait
+- Apres : appel direct a `/account-info/v3/details` (bon endpoint pour `pat-`)
+- Suppression du double appel inutile, latence reduite
+
+**admin-proxy : support sync-hubspot :**
+- `sync-hubspot` ajoute a `ALLOWED_ACTIONS` et `ACTIONS_REQUIRING_ORG`
+- Body : `{ organization_id, sync_type: 'daily' | 'initial' }` (default: `'daily'`)
+- Ajout header `apikey` sur tous les appels cibles (meme fix que triggerInitialSync)
+- Le frontend peut appeler : `POST /functions/v1/admin-proxy { action: 'sync-hubspot', organization_id, sync_type: 'daily' }`
+
+**Tests : 5 nouveaux tests (622 total) :**
+- sync-hubspot accepte comme action valide
+- sync-hubspot requiert org_id
+- Build request defaults (sync_type: 'daily')
+- Build request explicit sync_type
+- Header apikey present sur toutes les actions
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`

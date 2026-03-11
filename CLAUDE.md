@@ -27,7 +27,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 | Langage | TypeScript 5.x (target ES5 — pas de `[...new Set()]`) |
 | Styling | Tailwind CSS 3.x |
 | Auth | @supabase/ssr (cookies, PKCE, ES256) |
-| Tests | Vitest (617 tests) |
+| Tests | Vitest (622 tests) |
 | CI/CD | GitHub Actions + Vercel |
 
 **Phase actuelle** : setup/dev. Production intentionnellement inactif.
