@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
 
-// Allow up to 60 seconds for Stripe sync (Vercel serverless timeout)
+// Allow up to 60 seconds for HubSpot sync (Vercel serverless timeout)
 export const maxDuration = 60
 
 export async function POST() {
@@ -29,7 +29,7 @@ export async function POST() {
     .from('data_syncs')
     .select('created_at')
     .eq('organization_id', profile.organization_id)
-    .eq('sync_source', 'stripe')
+    .eq('sync_source', 'hubspot')
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle()
@@ -41,7 +41,7 @@ export async function POST() {
     )
   }
 
-  // 4. Appeler l'Edge Function sync-stripe via service role
+  // 4. Appeler l'Edge Function sync-hubspot via service role
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!supabaseUrl || !serviceKey) {
@@ -52,7 +52,7 @@ export async function POST() {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 55_000)
 
-    const resp = await fetch(`${supabaseUrl}/functions/v1/sync-stripe`, {
+    const resp = await fetch(`${supabaseUrl}/functions/v1/sync-hubspot`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -61,8 +61,7 @@ export async function POST() {
       },
       body: JSON.stringify({
         organization_id: profile.organization_id,
-        sync_type: 'incremental',
-        is_manual: true,
+        sync_type: 'daily',
       }),
       signal: controller.signal,
     })
@@ -73,7 +72,7 @@ export async function POST() {
 
     if (!resp.ok) {
       return NextResponse.json(
-        { error: data.error ?? 'Échec de la synchronisation' },
+        { error: data.error ?? 'Échec de la synchronisation HubSpot' },
         { status: resp.status },
       )
     }

@@ -9,6 +9,7 @@ import {
   PieChart,
   BookOpen,
   Lightbulb,
+  RefreshCw,
   Settings,
   LogOut,
 } from 'lucide-react'
@@ -22,6 +23,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/segments', label: 'Segments', icon: PieChart },
   { href: '/dashboard/playbooks', label: 'Playbooks', icon: BookOpen },
   { href: '/dashboard/insights', label: 'Insights IA', icon: Lightbulb },
+  { href: '/dashboard/syncs', label: 'Synchronisations', icon: RefreshCw },
   { href: '/dashboard/settings', label: 'Paramètres', icon: Settings },
 ]
 
