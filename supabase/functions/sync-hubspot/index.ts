@@ -51,6 +51,18 @@ interface HubSpotAssociationResponse {
   results: Array<{ id: string; type: string }>
 }
 
+interface HubSpotV4AssociationResponse {
+  results: Array<{ toObjectId: number }>
+  paging?: { next?: { after: string } }
+}
+
+interface HubSpotBatchReadResponse {
+  results: Array<{
+    id: string
+    properties: { hs_meeting_start_time?: string | null }
+  }>
+}
+
 // ── Credentials OAuth par org ────────────────────────────────
 
 interface HubSpotCredentials {
@@ -169,10 +181,12 @@ async function hubspotPost<T>(
 // ── Sync Companies ───────────────────────────────────────────
 
 // Zero-PII whitelist : seules ces proprietes sont lues depuis HubSpot
+// id_stripe = custom property HubSpot contenant le stripe_customer_id (pour auto-mapping)
 const COMPANY_PROPERTIES = [
   'hs_object_id',
   'lifecyclestage',
   'num_associated_deals',
+  'id_stripe',
 ]
 
 async function syncCompanies(
@@ -184,30 +198,39 @@ async function syncCompanies(
   let after: string | undefined
   let page = 0
 
-  // Pre-construire une Map account_id par hubspot_company_id
-  const { data: accounts } = await supabase
+  // Pre-construire les Maps pour le matching bidirectionnel
+  // 1. accountsByHsId : comptes deja lies par hubspot_company_id
+  // 2. accountsByStripeId : comptes lies par stripe_customer_id (pour auto-mapping)
+  const { data: allAccounts } = await supabase
     .from('accounts')
-    .select('id, hubspot_company_id')
+    .select('id, hubspot_company_id, stripe_customer_id')
     .eq('organization_id', organizationId)
-    .not('hubspot_company_id', 'is', null)
     .limit(10000)
 
-  if (!accounts || accounts.length === 0) {
+  if (!allAccounts || allAccounts.length === 0) {
     console.log(JSON.stringify({
       level: 'info',
       function_name: 'sync-hubspot',
-      message: 'No accounts with hubspot_company_id — skipping company sync',
+      message: 'No accounts in org — skipping company sync',
       organization_id: organizationId,
     }))
     return
   }
 
-  const accountMap = new Map<string, string>()
-  for (const a of accounts) {
+  // Map hubspot_company_id → account_id (comptes deja lies)
+  const accountsByHsId = new Map<string, string>()
+  // Map stripe_customer_id → account_id (pour auto-mapping via id_stripe HubSpot)
+  const accountsByStripeId = new Map<string, string>()
+  for (const a of allAccounts) {
     if (a.hubspot_company_id) {
-      accountMap.set(a.hubspot_company_id, a.id)
+      accountsByHsId.set(a.hubspot_company_id, a.id)
+    }
+    if (a.stripe_customer_id) {
+      accountsByStripeId.set(a.stripe_customer_id, a.id)
     }
   }
+
+  let autoLinkedCount = 0
 
   // Paginate companies via search API
   while (page < MAX_PAGES) {
@@ -228,7 +251,37 @@ async function syncCompanies(
 
     for (const company of result.results) {
       const hsCompanyId = company.id
-      const accountId = accountMap.get(hsCompanyId)
+      let accountId = accountsByHsId.get(hsCompanyId)
+
+      // Auto-mapping : si pas encore lie, matcher via id_stripe → stripe_customer_id
+      if (!accountId) {
+        const stripeIdFromHubspot = company.properties.id_stripe?.trim()
+        if (stripeIdFromHubspot) {
+          accountId = accountsByStripeId.get(stripeIdFromHubspot)
+          if (accountId) {
+            // Lier le compte : ecrire hubspot_company_id sur l'account
+            const { error: linkError } = await supabase
+              .from('accounts')
+              .update({ hubspot_company_id: hsCompanyId })
+              .eq('id', accountId)
+              .eq('organization_id', organizationId)
+
+            if (linkError) {
+              console.error(`[sync-hubspot] auto-link error: ${linkError.message}`)
+            } else {
+              autoLinkedCount++
+              accountsByHsId.set(hsCompanyId, accountId)
+              console.log(JSON.stringify({
+                level: 'info',
+                function_name: 'sync-hubspot',
+                message: `Auto-linked HubSpot company ${hsCompanyId} to account via stripe_customer_id ${stripeIdFromHubspot}`,
+                organization_id: organizationId,
+              }))
+            }
+          }
+        }
+      }
+
       if (!accountId) continue // Pas de compte Sentio lie a cette company HubSpot
 
       const lifecycleStage = normalizeLifecycleStage(
@@ -261,6 +314,15 @@ async function syncCompanies(
 
     if (!result.paging?.next?.after) break
     after = result.paging.next.after
+  }
+
+  if (autoLinkedCount > 0) {
+    console.log(JSON.stringify({
+      level: 'info',
+      function_name: 'sync-hubspot',
+      message: `Auto-linked ${autoLinkedCount} accounts via id_stripe property`,
+      organization_id: organizationId,
+    }))
   }
 }
 
@@ -351,6 +413,8 @@ async function syncTicketCounts(
 }
 
 // ── Sync Last Meeting Date ───────────────────────────────────
+// Utilise l'API associations v4 (la seule qui supporte le filtrage par company).
+// L'API search v3 NE supporte PAS le filtrage par associations — elle retournait 0 résultats.
 
 async function syncLastMeetingDates(
   supabase: SupabaseClient,
@@ -366,39 +430,57 @@ async function syncLastMeetingDates(
 
   if (!hsCompanies || hsCompanies.length === 0) return
 
-  // For each company, check most recent meeting engagement
   for (const hc of hsCompanies) {
     try {
+      // Étape 1 : récupérer les IDs des meetings liés à cette company via l'API associations v4
       logger.increment('api_calls_made')
-      const result = await hubspotPost<HubSpotSearchResponse>(
-        '/crm/v3/objects/meetings/search',
+      const assocResp = await hubspotGet<HubSpotV4AssociationResponse>(
+        `/crm/v4/objects/companies/${hc.hubspot_company_id}/associations/meetings`,
+        accessToken,
+      )
+
+      if (!assocResp.results || assocResp.results.length === 0) continue
+
+      const meetingIds = assocResp.results.map((r) => ({ id: String(r.toObjectId) }))
+
+      // Étape 2 : batch-read les propriétés des meetings (hs_meeting_start_time)
+      logger.increment('api_calls_made')
+      const batchResp = await hubspotPost<HubSpotBatchReadResponse>(
+        '/crm/v3/objects/meetings/batch/read',
         accessToken,
         {
-          limit: 1,
+          inputs: meetingIds,
           properties: ['hs_meeting_start_time'],
-          filterGroups: [{
-            filters: [{
-              propertyName: 'associations.company',
-              operator: 'EQ',
-              value: hc.hubspot_company_id,
-            }],
-          }],
-          sorts: [{ propertyName: 'hs_meeting_start_time', direction: 'DESCENDING' }],
         },
       )
 
-      if (result.results.length > 0) {
-        const meetingTime = result.results[0].properties.hs_meeting_start_time
-        if (meetingTime) {
-          const meetingDate = new Date(meetingTime).toISOString().split('T')[0]
-          await supabase
-            .from('hubspot_companies')
-            .update({ last_meeting_date: meetingDate })
-            .eq('id', hc.id)
+      if (!batchResp.results || batchResp.results.length === 0) continue
+
+      // Étape 3 : trouver la date de meeting la plus récente
+      let latestMs = 0
+      for (const meeting of batchResp.results) {
+        const t = meeting.properties?.hs_meeting_start_time
+        if (t) {
+          const ms = new Date(t).getTime()
+          if (!isNaN(ms) && ms > latestMs) latestMs = ms
         }
       }
-    } catch {
-      // Meeting lookup failed — non-bloquant, continue
+
+      if (latestMs > 0) {
+        const meetingDate = new Date(latestMs).toISOString().split('T')[0]
+        await supabase
+          .from('hubspot_companies')
+          .update({ last_meeting_date: meetingDate })
+          .eq('id', hc.id)
+      }
+    } catch (err) {
+      // Non-bloquant — log pour visibilité sans arrêter la sync
+      console.warn(JSON.stringify({
+        level: 'warn',
+        function_name: 'sync-hubspot',
+        message: `Meeting sync failed for company ${hc.hubspot_company_id}: ${err instanceof Error ? err.message : String(err)}`,
+        organization_id: organizationId,
+      }))
     }
   }
 }
@@ -420,6 +502,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (req.method !== 'POST') {
     return errorResponse('Method not allowed', 405)
+  }
+
+  // Auth : service_role uniquement (verify_jwt = false, verification dans le code)
+  const authHeader = req.headers.get('Authorization')
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  if (!authHeader || !serviceRoleKey || authHeader !== `Bearer ${serviceRoleKey}`) {
+    return errorResponse('Unauthorized', 401)
   }
 
   let body: { organization_id?: string; sync_type?: string }

@@ -5,6 +5,7 @@ import type { Account } from '@/lib/types/accounts'
 import { ScoreBadge } from '@/components/ScoreBadge'
 import { EmptyState } from '@/components/EmptyState'
 import { Users } from 'lucide-react'
+import Link from 'next/link'
 
 async function getProfileOrgId(): Promise<string | null> {
   const supabase = createSupabaseServerClient()
@@ -73,9 +74,11 @@ export default async function AccountsPage() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {accounts.map((a) => (
-                  <tr key={a.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3 font-mono text-xs text-slate-700">
-                      {a.stripe_customer_id ?? '—'}
+                  <tr key={a.id} className="hover:bg-slate-50 transition-colors cursor-pointer">
+                    <td className="px-4 py-3 font-mono text-xs">
+                      <Link href={`/dashboard/accounts/${a.id}`} className="text-blue-600 hover:underline">
+                        {a.stripe_customer_id ?? a.id}
+                      </Link>
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">
                       {a.hubspot_company_id ?? '—'}
