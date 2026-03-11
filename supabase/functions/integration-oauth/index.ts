@@ -383,33 +383,23 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return errorResponse('HubSpot est deja connecte. Revoquez d\'abord l\'integration existante.', 409)
     }
 
-    // Valider la cle en appelant HubSpot API
+    // Valider la cle en appelant HubSpot Account Info API
+    // /account-info/v3/details est le bon endpoint pour les Private App tokens (pat-)
     let portalId: string | null = null
     try {
-      const resp = await fetchWithTimeout(
-        'https://api.hubapi.com/oauth/v1/access-tokens/' + apiKey,
+      const accountResp = await fetchWithTimeout(
+        'https://api.hubapi.com/account-info/v3/details',
         { headers: { Authorization: `Bearer ${apiKey}` } },
         8_000,
       )
-      if (!resp.ok) {
-        // Fallback: essayer un appel simple pour valider le token
-        const accountResp = await fetchWithTimeout(
-          'https://api.hubapi.com/account-info/v3/details',
-          { headers: { Authorization: `Bearer ${apiKey}` } },
-          8_000,
-        )
-        if (!accountResp.ok) {
-          if (accountResp.status === 401) {
-            return errorResponse('Cle API HubSpot invalide ou revoquee', 401)
-          }
-          return errorResponse(`HubSpot API error: ${accountResp.status}`, 400)
+      if (!accountResp.ok) {
+        if (accountResp.status === 401) {
+          return errorResponse('Cle API HubSpot invalide ou revoquee', 401)
         }
-        const accountInfo = await accountResp.json()
-        portalId = accountInfo.portalId ? String(accountInfo.portalId) : null
-      } else {
-        const tokenInfo = await resp.json()
-        portalId = tokenInfo.hub_id ? String(tokenInfo.hub_id) : null
+        return errorResponse(`HubSpot API error: ${accountResp.status}`, 400)
       }
+      const accountInfo = await accountResp.json()
+      portalId = accountInfo.portalId ? String(accountInfo.portalId) : null
     } catch {
       return errorResponse('Impossible de contacter l\'API HubSpot — reessayez', 502)
     }
@@ -775,10 +765,12 @@ function triggerInitialSync(provider: OAuthProvider, orgId: string): void {
   const url = `${supabaseUrl}/functions/v1/${functionName}`
 
   // Fire-and-forget : .then()/.catch() chain — jamais de await
+  // apikey header requis par le relay Supabase pour router vers la fonction
   fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'apikey': serviceRoleKey,
       Authorization: `Bearer ${serviceRoleKey}`,
     },
     body: JSON.stringify({

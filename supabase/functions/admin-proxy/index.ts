@@ -11,18 +11,18 @@ import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { createLogger } from '../_shared/structured-logger.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 
-const ALLOWED_ACTIONS = ['sync-stripe', 'calculate-scores', 'health-check', 'self-monitor'] as const
+const ALLOWED_ACTIONS = ['sync-stripe', 'sync-hubspot', 'calculate-scores', 'health-check', 'self-monitor'] as const
 type AllowedAction = typeof ALLOWED_ACTIONS[number]
 
 interface ProxyRequest {
   action: AllowedAction
   organization_id?: string
-  sync_type?: 'incremental' | 'full_sync'
+  sync_type?: 'incremental' | 'full_sync' | 'initial'
   is_manual?: boolean
 }
 
 // Actions qui nécessitent un organization_id
-const ACTIONS_REQUIRING_ORG: AllowedAction[] = ['sync-stripe', 'calculate-scores']
+const ACTIONS_REQUIRING_ORG: AllowedAction[] = ['sync-stripe', 'sync-hubspot', 'calculate-scores']
 
 Deno.serve(async (req: Request): Promise<Response> => {
   // 1. CORS
@@ -129,6 +129,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Construire les options de la requête cible
   const isGet = action === 'health-check'
   const targetHeaders: Record<string, string> = {
+    'apikey': serviceRoleKey,
     'Authorization': `Bearer ${serviceRoleKey}`,
     'Content-Type': 'application/json',
   }
@@ -140,6 +141,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
         organization_id: body.organization_id,
         sync_type: body.sync_type || 'incremental',
         is_manual: body.is_manual ?? true,
+      })
+    } else if (action === 'sync-hubspot') {
+      targetBody = JSON.stringify({
+        organization_id: body.organization_id,
+        sync_type: body.sync_type || 'daily',
       })
     } else if (action === 'calculate-scores') {
       targetBody = JSON.stringify({

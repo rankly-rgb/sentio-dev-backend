@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest'
 
 // ── admin-proxy validation logic tests ──────────────────────
 
-const ALLOWED_ACTIONS = ['sync-stripe', 'calculate-scores', 'health-check', 'self-monitor'] as const
+const ALLOWED_ACTIONS = ['sync-stripe', 'sync-hubspot', 'calculate-scores', 'health-check', 'self-monitor'] as const
 type AllowedAction = typeof ALLOWED_ACTIONS[number]
-const ACTIONS_REQUIRING_ORG: AllowedAction[] = ['sync-stripe', 'calculate-scores']
+const ACTIONS_REQUIRING_ORG: AllowedAction[] = ['sync-stripe', 'sync-hubspot', 'calculate-scores']
 
 function isAllowedAction(action: string): action is AllowedAction {
   return ALLOWED_ACTIONS.includes(action as AllowedAction)
@@ -26,6 +26,7 @@ function buildTargetRequest(
 ): { url: string; method: string; headers: Record<string, string>; body?: string } {
   const url = `${supabaseUrl}/functions/v1/${action}`
   const headers: Record<string, string> = {
+    'apikey': serviceRoleKey,
     'Authorization': `Bearer ${serviceRoleKey}`,
     'Content-Type': 'application/json',
   }
@@ -38,6 +39,11 @@ function buildTargetRequest(
         organization_id: body.organization_id,
         sync_type: body.sync_type || 'incremental',
         is_manual: body.is_manual ?? true,
+      })
+    } else if (action === 'sync-hubspot') {
+      targetBody = JSON.stringify({
+        organization_id: body.organization_id,
+        sync_type: body.sync_type || 'daily',
       })
     } else if (action === 'calculate-scores') {
       targetBody = JSON.stringify({
@@ -75,10 +81,14 @@ describe('admin-proxy: action validation', () => {
     expect(isAllowedAction('self-monitor')).toBe(true)
   })
 
+  it('accepts sync-hubspot', () => {
+    expect(isAllowedAction('sync-hubspot')).toBe(true)
+  })
+
   it('rejects unknown actions', () => {
     expect(isAllowedAction('drop-database')).toBe(false)
     expect(isAllowedAction('')).toBe(false)
-    expect(isAllowedAction('sync-hubspot')).toBe(false)
+    expect(isAllowedAction('sync-unknown')).toBe(false)
   })
 })
 
@@ -91,6 +101,10 @@ describe('admin-proxy: org_id requirement', () => {
 
   it('calculate-scores requires org_id', () => {
     expect(requiresOrgId('calculate-scores')).toBe(true)
+  })
+
+  it('sync-hubspot requires org_id', () => {
+    expect(requiresOrgId('sync-hubspot')).toBe(true)
   })
 
   it('health-check does not require org_id', () => {
@@ -168,6 +182,32 @@ describe('admin-proxy: buildTargetRequest', () => {
     expect(parsed.is_manual).toBe(false)
   })
 
+  it('builds POST request for sync-hubspot with defaults', () => {
+    const result = buildTargetRequest(
+      'sync-hubspot',
+      { organization_id: 'org-123' },
+      baseUrl,
+      serviceKey
+    )
+    expect(result.method).toBe('POST')
+    expect(result.url).toBe(`${baseUrl}/functions/v1/sync-hubspot`)
+
+    const parsed = JSON.parse(result.body!)
+    expect(parsed.organization_id).toBe('org-123')
+    expect(parsed.sync_type).toBe('daily')
+  })
+
+  it('builds POST request for sync-hubspot with explicit sync_type', () => {
+    const result = buildTargetRequest(
+      'sync-hubspot',
+      { organization_id: 'org-456', sync_type: 'initial' },
+      baseUrl,
+      serviceKey
+    )
+    const parsed = JSON.parse(result.body!)
+    expect(parsed.sync_type).toBe('initial')
+  })
+
   it('builds POST request for calculate-scores', () => {
     const result = buildTargetRequest(
       'calculate-scores',
@@ -206,6 +246,13 @@ describe('admin-proxy: buildTargetRequest', () => {
     for (const action of ALLOWED_ACTIONS) {
       const result = buildTargetRequest(action, {}, baseUrl, serviceKey)
       expect(result.headers['Authorization']).toBe(`Bearer ${serviceKey}`)
+    }
+  })
+
+  it('always includes apikey header for Supabase relay routing', () => {
+    for (const action of ALLOWED_ACTIONS) {
+      const result = buildTargetRequest(action, {}, baseUrl, serviceKey)
+      expect(result.headers['apikey']).toBe(serviceKey)
     }
   })
 })
