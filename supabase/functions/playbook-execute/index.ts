@@ -45,6 +45,13 @@ import {
 import { executeWorkflowStep } from '../_shared/workflow-executor.ts'
 import { dispatchWebhook, mapPlaybookToEvent } from '../_shared/webhook-dispatcher.ts'
 import { buildPendingApprovalLog, buildApprovalSlackMessage } from '../_shared/playbook-approval-helpers.ts'
+import {
+  buildSlackNotifyMessage,
+  buildFlagEntry,
+  mergeFlag,
+  buildNoteEntry,
+  type FlagEntry,
+} from '../_shared/playbook-actions-helpers.ts'
 import { createHubSpotTask, associateTaskToCompany } from '../_shared/hubspot-actions.ts'
 import { getVaultSecret } from '../_shared/vault.ts'
 import { writeToDLQ } from '../_shared/dlq.ts'
@@ -579,6 +586,117 @@ Deno.serve(async (req: Request): Promise<Response> => {
             continue
           }
 
+          // ── slack_notify: real Slack message ──
+          if (action.type === 'slack_notify') {
+            try {
+              const msg = buildSlackNotifyMessage(
+                (action.config ?? {}) as { channel?: string; message?: string },
+                acc as unknown as { id: string; stripe_customer_id?: string; health_score?: number | null; churn_risk_score?: number | null; expansion_score?: number | null; mrr_cents?: number | null },
+                playbook.title,
+              )
+              await alertSlack(msg, { level: 'info' })
+              const slackResult: ActionResult = {
+                action_type: 'slack_notify', order: action.order, status: 'completed',
+                message: `Slack notification sent for account ${acc.id}`,
+                executed_at: new Date().toISOString(),
+              }
+              actionResults.push(slackResult)
+              completedSteps++
+            } catch (err) {
+              const slackResult: ActionResult = {
+                action_type: 'slack_notify', order: action.order, status: 'failed',
+                message: `Slack notification failed: ${String(err)}`,
+                executed_at: new Date().toISOString(),
+              }
+              actionResults.push(slackResult)
+              failedSteps++
+            }
+            continue
+          }
+
+          // ── flag_for_review: set flag on account ──
+          if (action.type === 'flag_for_review') {
+            try {
+              const { data: currentAccount } = await supabase
+                .from('accounts')
+                .select('flags')
+                .eq('id', acc.id)
+                .eq('organization_id', body.organization_id)
+                .maybeSingle()
+
+              const existingFlags: FlagEntry[] = (currentAccount?.flags as FlagEntry[]) ?? []
+              const newFlag = buildFlagEntry(
+                (action.config ?? {}) as { flag?: string; reason?: string },
+                body.playbook_id,
+                new Date(),
+              )
+              const updatedFlags = mergeFlag(existingFlags, newFlag)
+
+              const { error: flagError } = await supabase
+                .from('accounts')
+                .update({ flags: updatedFlags })
+                .eq('id', acc.id)
+                .eq('organization_id', body.organization_id)
+
+              const flagResult: ActionResult = {
+                action_type: 'flag_for_review', order: action.order,
+                status: flagError ? 'failed' : 'completed',
+                message: flagError
+                  ? `Flag update failed: ${flagError.message}`
+                  : `Flag "${newFlag.flag}" set on account ${acc.id}`,
+                executed_at: new Date().toISOString(),
+              }
+              actionResults.push(flagResult)
+              if (flagError) failedSteps++
+              else completedSteps++
+            } catch (err) {
+              actionResults.push({
+                action_type: 'flag_for_review', order: action.order, status: 'failed',
+                message: `Flag failed: ${String(err)}`, executed_at: new Date().toISOString(),
+              })
+              failedSteps++
+            }
+            continue
+          }
+
+          // ── log_note: insert into account_notes ──
+          if (action.type === 'log_note') {
+            try {
+              const note = buildNoteEntry(
+                (action.config ?? {}) as { title?: string; body?: string },
+                acc as unknown as { id: string; stripe_customer_id?: string; health_score?: number | null; churn_risk_score?: number | null; expansion_score?: number | null; mrr_cents?: number | null },
+                body.organization_id,
+                body.playbook_id,
+                execution.id,
+                playbook.title,
+              )
+
+              const { error: noteError } = await supabase
+                .from('account_notes')
+                .insert(note)
+
+              const noteResult: ActionResult = {
+                action_type: 'log_note', order: action.order,
+                status: noteError ? 'failed' : 'completed',
+                message: noteError
+                  ? `Note insert failed: ${noteError.message}`
+                  : `Note logged for account ${acc.id}`,
+                executed_at: new Date().toISOString(),
+              }
+              actionResults.push(noteResult)
+              if (noteError) failedSteps++
+              else completedSteps++
+            } catch (err) {
+              actionResults.push({
+                action_type: 'log_note', order: action.order, status: 'failed',
+                message: `Note failed: ${String(err)}`, executed_at: new Date().toISOString(),
+              })
+              failedSteps++
+            }
+            continue
+          }
+
+          // ── Fallback: log-only for unimplemented actions ──
           const result = executeAction(action, acc, {
             playbookId: body.playbook_id,
             executionId: execution.id,
