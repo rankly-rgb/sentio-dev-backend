@@ -907,6 +907,40 @@ Backend production-ready pour l'onboarding clients beta. 7 tâches implémentée
 
 ---
 
+## Actions Playbook P0 — slack_notify, flag_for_review, log_note (2026-03-12)
+
+Les 3 actions playbook les plus courantes passent de log-only a fonctionnelles. Avant, `executeAction()` dans `playbook-engine.ts` etait un stub V1 qui loguait l'action sans rien faire.
+
+**Migration `20260312000003_account_notes_and_flags.sql` :**
+- Table `account_notes` : id, organization_id, account_id, note_type, title, body, source, playbook_id, execution_id
+- RLS `org_isolation` standard, CHECK note_type IN ('playbook_action', 'manual', 'system')
+- Colonne `flags JSONB NOT NULL DEFAULT '[]'` sur `accounts` (array de {flag, set_at, playbook_id, reason})
+- Index GIN sur `accounts.flags`, index composites sur `account_notes`
+
+**Shared helpers `_shared/playbook-actions-helpers.ts` (NOUVEAU) :**
+- `buildSlackNotifyMessage(config, account, playbookTitle)` : message Slack avec template variable substitution ({stripe_customer_id}, {mrr_eur}, {churn_risk}, {health_score}, {playbook})
+- `buildFlagEntry(config, playbookId, now)` : flag entry avec defaults (review_needed, "Signale par playbook")
+- `mergeFlag(existingFlags, newFlag)` : deduplication par flag name (remplace si existe)
+- `hasFlag(flags, flagName)` : verification existence
+- `buildNoteEntry(config, account, orgId, playbookId, executionId, playbookTitle)` : note entry avec defaults
+- Zero-PII : uniquement scores, MRR et stripe_customer_id
+
+**`playbook-execute/index.ts` — 3 handlers reels :**
+- `slack_notify` : `buildSlackNotifyMessage()` → `alertSlack()` fire-and-forget
+- `flag_for_review` : `buildFlagEntry()` → query flags existants → `mergeFlag()` → PATCH accounts.flags
+- `log_note` : `buildNoteEntry()` → INSERT account_notes
+- Les 3 handlers sont AVANT le fallback `executeAction()` (log-only pour les types non implementes)
+- Remaining log-only : `assign_owner`, `update_tag`, `schedule_review` (P1/P2)
+
+**Tests : 21 nouveaux tests (742 total) :**
+- buildSlackNotifyMessage : default message, channel, custom template, null scores, missing stripe_id, no PII (6 tests)
+- buildFlagEntry : defaults, custom, null playbook_id (3 tests)
+- mergeFlag : empty, dedup, preserve others, null input (4 tests)
+- hasFlag : exists, not exists, empty, null (4 tests)
+- buildNoteEntry : defaults, custom, null scores, no PII (4 tests)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`
