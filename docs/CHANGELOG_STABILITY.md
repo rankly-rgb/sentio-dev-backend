@@ -831,6 +831,82 @@ Correction du bug critique empechant la synchronisation HubSpot apres connexion 
 
 ---
 
+## Sprint 1 & 2 Backend — Fiabilité Données + Actionnabilité (2026-03-12)
+
+Backend production-ready pour l'onboarding clients beta. 7 tâches implémentées (4 Sprint 1 P0, 3 Sprint 2 P1) + 3 corrections post-sprint. 721 tests.
+
+### Sprint 1 — Fiabilité Données (P0)
+
+**Tâche 1 — Slack batch digest + anti-flood :**
+- `alertSlackBatch()` dans `_shared/slack-alert.ts` : 0 alert → no-op, 1 → message simple, N>1 → digest unique trié par MRR desc
+- `_shared/slack-batch-helpers.ts` : fonctions pures (buildSingleAlertMessage, buildDigestMessage, sortByMrrDesc)
+- `calculate-scores` : accumule `churnAlerts[]` pendant le run, appel unique `alertSlackBatch()` en fin de run
+- FRONTEND_URL dans `.env.example` : liens cliquables dans les messages Slack vers `/dashboard/accounts/{id}`
+- Tests : 20 nouveaux tests
+
+**Tâche 2 — DLQ retry worker automatique :**
+- Migration `20260312000001_add_dlq_retry_columns.sql` : `retry_count INTEGER`, `last_retry_at TIMESTAMPTZ` sur `webhook_dead_letter`
+- `_shared/dlq-retry-helpers.ts` : `shouldRetryEntry()` (backoff = retry_count × 30 min), `computeBackoffMinutes()`
+- `self-monitor` check #8 : query DLQ → filtre shouldRetryEntry → dispatch outbound_webhook via `dispatchWebhook()` → DELETE on success / increment on failure → alertSlack à retry_count=3
+- Tests : 18 nouveaux tests
+
+**Tâche 3 — HubSpot stale data alert :**
+- `_shared/hubspot-stale-helpers.ts` : `computeHubspotStaleness(lastSyncAt, now)` — stale si > 48h ou jamais synchronisé
+- `health-check` : retourne `hubspot_stale: boolean` + `last_hubspot_sync_hours_ago: number | null`
+- `self-monitor` check #9 : anti-flood via `acquireCronLock('hubspot_stale_alert', 86400s)` — max 1 alerte Slack par 24h
+- Colonnes DB : `sync_source`, `sync_status`, `completed_at` (correcte après correction judge)
+- Tests : 7 nouveaux tests
+
+**Tâche 4 — Vérification product_usage_score = null :**
+- Confirmé correct dans `calculate-scores` : `product_usage_score = null` quand `usage_tracker_connected = false`
+- Fix `generate-insights` : suppression `?? 50` fallback dans `buildInsightInput` (évite faux insights `usage_drop`)
+- `insight-rules.ts` : `usage_score_current: number | null`, `evaluateUsageDrop` retourne null si current=null
+- Tests : 3 nouveaux tests (scoring contract + insight null guard)
+
+### Sprint 2 — Actionnabilité (P1)
+
+**Tâche 5 — Human-in-the-loop (semi_automated) :**
+- Migration `20260312000002_add_pending_approval_status.sql` : `pending_approval` dans CHECK execution_status
+- `_shared/playbook-approval-helpers.ts` : `canApprove()`, `canReject()`, `isPlaybookMatch()`, `buildPendingApprovalLog()`, `buildApprovalLog()`, `buildApprovalSlackMessage()`
+- `playbook-execute` : semi_automated → crée execution `pending_approval`, stocke account_ids + planned_actions dans execution_log, alerte Slack avec lien, retourne `{ status: 'pending_approval', execution_id, accounts_count }`
+- `playbook-crud` : routes `POST /{id}/approve-execution` et `POST /{id}/reject-execution` avec vérification cross-tenant + playbook_id match
+- Approve : pending_approval → running → lance actions → completed/failed
+- Reject : pending_approval → cancelled, logue reason
+- Tests : 27 nouveaux tests
+
+**Tâche 6 — HubSpot Tasks push (create_task) :**
+- `_shared/hubspot-actions.ts` : `createHubSpotTask()` (POST /crm/v3/objects/tasks) + `associateTaskToCompany()` (v4 associations, typeId 204)
+- `_shared/hubspot-actions-helpers.ts` : `buildHubSpotTaskBody()`, `buildAssociationBody()`, `parseHubSpotTaskId()` — fonctions pures
+- `playbook-execute` : create_task → résolution credentials HubSpot → par compte : lookup hubspot_company_id → createHubSpotTask + associateTaskToCompany → log hubspot_task_id
+- Dégradation gracieuse : HubSpot non connecté → skip | hubspot_company_id null → skip | API error → DLQ (provider: 'hubspot') + continue
+- Zero-PII : body contient uniquement scores et MRR
+- Tests : 17 nouveaux tests
+
+**Tâche 7 — Stripe incremental sync :**
+- `_shared/sync-stripe-helpers.ts` : `determineSyncMode(lastSyncCompletedAt, now)` — null → full, ≤1h → incremental, >1h → full
+- `sync-stripe` : auto-détection mode depuis `data_syncs` (sync_source/sync_status/completed_at)
+- Incrémental : customers `created[gt]`, subscriptions `current_period_end[gt]`, invoices `created[gt]`
+- Forçage full via `sync_type: 'full_sync'` ou `'initial'`
+- sync_mode loggé dans les métriques
+- Tests : 7 nouveaux tests
+
+### Corrections post-sprint
+
+- `buildStripeUrl` dead code supprimé de `sync-stripe-helpers.ts` (-6 tests)
+- `handleRejectExecution` : vérification `playbook_id` URL symétrique avec approve (+2 tests)
+- DLQ provider `'hubspot'` pour failures create_task (au lieu de `'outbound_webhook'`), dispatch HubSpot replay dans self-monitor
+
+### Contrats d'API produits
+
+| Endpoint | Méthode | Nouveaux champs frontend |
+|----------|---------|--------------------------|
+| `/functions/v1/health-check` | GET | `hubspot_stale`, `last_hubspot_sync_hours_ago` |
+| `/functions/v1/playbook-execute` | POST | semi_automated retourne `status: "pending_approval"` |
+| `/functions/v1/playbook-crud/{id}/approve-execution` | POST | `execution_id`, `status`, `accounts_count` |
+| `/functions/v1/playbook-crud/{id}/reject-execution` | POST | `execution_id`, `status` |
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`

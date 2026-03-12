@@ -27,7 +27,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 | Langage | TypeScript 5.x (target ES5 — pas de `[...new Set()]`) |
 | Styling | Tailwind CSS 3.x |
 | Auth | @supabase/ssr (cookies, PKCE, ES256) |
-| Tests | Vitest (622 tests) |
+| Tests | Vitest (721 tests) |
 | CI/CD | GitHub Actions + Vercel |
 
 **Phase actuelle** : setup/dev. Production intentionnellement inactif.
@@ -180,3 +180,4 @@ Valeurs neutres (pas de données) : Engagement=50, Contrat=50, Financial=0. Usag
 | `HUBSPOT_CLIENT_ID` | Non | OAuth HubSpot app |
 | `HUBSPOT_CLIENT_SECRET` | Non | OAuth HubSpot app |
 | `HUBSPOT_OAUTH_REDIRECT_URI` | Non | Callback OAuth HubSpot |
+| `FRONTEND_URL` | Non | Liens frontend dans alertes Slack (ex: https://app.sentio.ai) |
