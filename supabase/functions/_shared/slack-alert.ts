@@ -5,6 +5,10 @@ import {
   buildDigestMessage,
 } from './slack-batch-helpers.ts'
 
+/**
+ * Envoie un message Slack via le webhook global (SLACK_WEBHOOK_URL).
+ * Fire-and-forget : ne throw jamais.
+ */
 export async function alertSlack(
   message: string,
   opts?: { level?: 'info' | 'warning' | 'critical' }
@@ -25,6 +29,48 @@ export async function alertSlack(
         body: JSON.stringify({ text: `${prefix} [Sentio] ${message}` }),
       },
       5000
+    )
+  } catch {
+    // Fire-and-forget: alerting failure must never crash the caller
+  }
+}
+
+/**
+ * Envoie un message Slack via l'API chat.postMessage (Bot Token par org).
+ * Utilise le Bot Token stocke dans le Vault pour l'organisation.
+ * Fire-and-forget : ne throw jamais.
+ *
+ * @param botToken - Le Slack Bot Token (xoxb-...) recupere du Vault
+ * @param channel  - Le canal Slack cible (ex: "#cs-team", "C0123456789")
+ * @param message  - Le message texte a envoyer
+ */
+export async function alertSlackWithToken(
+  botToken: string,
+  channel: string,
+  message: string,
+  opts?: { level?: 'info' | 'warning' | 'critical' }
+): Promise<void> {
+  if (!botToken || !channel) return
+
+  const level = opts?.level ?? 'info'
+  const prefix =
+    level === 'critical' ? '[CRITICAL]' : level === 'warning' ? '[WARNING]' : '[INFO]'
+
+  try {
+    await fetchWithTimeout(
+      'https://slack.com/api/chat.postMessage',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${botToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          channel,
+          text: `${prefix} [Sentio] ${message}`,
+        }),
+      },
+      5000,
     )
   } catch {
     // Fire-and-forget: alerting failure must never crash the caller

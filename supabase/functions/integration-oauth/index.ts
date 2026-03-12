@@ -7,7 +7,10 @@
 //   GET  /integration-oauth/stripe/callback    — Echange code Stripe
 //   GET  /integration-oauth/hubspot/authorize  — URL OAuth HubSpot
 //   GET  /integration-oauth/hubspot/callback   — Echange code HubSpot
-//   GET  /integration-oauth/status             — Statut des integrations
+//   POST /integration-oauth/stripe/api-key     — Connexion Stripe par cle API
+//   POST /integration-oauth/hubspot/api-key    — Connexion HubSpot par cle API
+//   POST /integration-oauth/slack/bot-token    — Connexion Slack par Bot Token
+//   GET  /integration-oauth/status             — Statut des integrations (stripe, hubspot, slack)
 //   POST /integration-oauth/revoke             — Revoquer une integration
 //
 // Auth : ES256 JWT (verify_jwt = false, auth dans le code)
@@ -19,7 +22,7 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { storeVaultSecret, deleteVaultSecret, getVaultSecret } from '../_shared/vault.ts'
-import { validateStripeApiKey, validateHubSpotApiKey } from '../_shared/credential-helpers.ts'
+import { validateStripeApiKey, validateHubSpotApiKey, validateSlackBotToken } from '../_shared/credential-helpers.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import {
@@ -176,10 +179,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     const stripeInt = integrations?.find((i: { provider: string }) => i.provider === 'stripe') ?? null
     const hubspotInt = integrations?.find((i: { provider: string }) => i.provider === 'hubspot') ?? null
+    const slackInt = integrations?.find((i: { provider: string }) => i.provider === 'slack') ?? null
 
     return jsonResponse({
       stripe: buildIntegrationSummary(stripeInt, 'stripe'),
       hubspot: buildIntegrationSummary(hubspotInt, 'hubspot'),
+      slack: buildIntegrationSummary(slackInt, 'slack'),
     })
   }
 
@@ -245,10 +250,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .from('organizations')
         .update({ stripe_account_id: null })
         .eq('id', orgId)
-    } else {
+    } else if (provider === 'hubspot') {
       await supabase
         .from('organizations')
         .update({ hubspot_portal_id: null })
+        .eq('id', orgId)
+    } else if (provider === 'slack') {
+      await supabase
+        .from('organizations')
+        .update({ slack_team_id: null })
         .eq('id', orgId)
     }
 
@@ -443,6 +453,105 @@ Deno.serve(async (req: Request): Promise<Response> => {
       provider: 'hubspot',
       method: 'api_key',
       portal_id: portalId,
+      status: 'connected',
+    })
+  }
+
+  // ── POST /slack/bot-token — Connexion par Bot Token Slack ───
+  if (segments.length === 2 && segments[0] === 'slack' && segments[1] === 'bot-token' && req.method === 'POST') {
+    let body: { bot_token?: string; slack_bot_token?: string; default_channel?: string }
+    try {
+      body = await req.json()
+    } catch {
+      return errorResponse('Invalid JSON body', 400)
+    }
+
+    const botToken = (body.bot_token ?? body.slack_bot_token)?.trim()
+    if (!botToken) {
+      return errorResponse('bot_token requis', 400)
+    }
+
+    // Valider le format du token
+    const validation = validateSlackBotToken(botToken)
+    if (!validation.valid) {
+      return errorResponse(validation.error!, 400)
+    }
+
+    // Verifier si deja connecte
+    const { data: existingSlack } = await supabase
+      .from('organization_integrations')
+      .select('status')
+      .eq('organization_id', orgId)
+      .eq('provider', 'slack')
+      .eq('status', 'active')
+      .maybeSingle()
+
+    if (existingSlack) {
+      return errorResponse('Slack est deja connecte. Revoquez d\'abord l\'integration existante.', 409)
+    }
+
+    // Valider le token en appelant Slack auth.test
+    let teamId: string | null = null
+    let teamName: string | null = null
+    try {
+      const resp = await fetchWithTimeout(
+        'https://slack.com/api/auth.test',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${botToken}`,
+            'Content-Type': 'application/json',
+          },
+        },
+        8_000,
+      )
+      const data = await resp.json()
+      if (!data.ok) {
+        return errorResponse(`Token Slack invalide : ${data.error ?? 'unknown'}`, 401)
+      }
+      teamId = data.team_id ?? null
+      teamName = data.team ?? null
+    } catch {
+      return errorResponse('Impossible de contacter l\'API Slack — reessayez', 502)
+    }
+
+    // Stocker le token dans Vault
+    const vaultAccessId = await storeVaultSecret(
+      supabase,
+      botToken,
+      `slack_bot_token_${orgId}`,
+      `Slack Bot Token for org ${orgId}`,
+    )
+
+    // Upsert organization_integrations
+    await supabase
+      .from('organization_integrations')
+      .upsert({
+        organization_id: orgId,
+        provider: 'slack',
+        vault_access_token_id: vaultAccessId,
+        vault_refresh_token_id: null,
+        token_expires_at: null, // Bot tokens don't expire
+        provider_account_id: teamId,
+        scopes: ['chat:write', 'channels:read'],
+        status: 'active',
+        integration_method: 'api_key',
+      }, { onConflict: 'organization_id,provider' })
+
+    // Mettre a jour organizations.slack_team_id
+    if (teamId) {
+      await supabase
+        .from('organizations')
+        .update({ slack_team_id: teamId })
+        .eq('id', orgId)
+    }
+
+    return jsonResponse({
+      success: true,
+      provider: 'slack',
+      method: 'bot_token',
+      team_id: teamId,
+      team_name: teamName,
       status: 'connected',
     })
   }

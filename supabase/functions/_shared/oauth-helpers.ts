@@ -4,7 +4,7 @@
 // et de construction pour les flux OAuth Stripe/HubSpot.
 // ============================================================
 
-export type OAuthProvider = 'stripe' | 'hubspot'
+export type OAuthProvider = 'stripe' | 'hubspot' | 'slack'
 
 export interface OAuthState {
   organization_id: string
@@ -23,7 +23,7 @@ export const HUBSPOT_SCOPES = ['crm.objects.companies.read', 'crm.objects.deals.
 // ── Validation ────────────────────────────────────────────────
 
 export function isValidProvider(provider: string): provider is OAuthProvider {
-  return provider === 'stripe' || provider === 'hubspot'
+  return provider === 'stripe' || provider === 'hubspot' || provider === 'slack'
 }
 
 export function isStateExpired(expiresAt: string): boolean {

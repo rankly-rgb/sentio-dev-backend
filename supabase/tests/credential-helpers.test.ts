@@ -3,6 +3,7 @@ import {
   resolveCredentialSource,
   validateStripeApiKey,
   validateHubSpotApiKey,
+  validateSlackBotToken,
   type IntegrationRow,
   type OAuthIntegrationRow,
 } from '../functions/_shared/credential-helpers'
@@ -383,5 +384,62 @@ describe('resolveCredentialSource — HubSpot API key', () => {
     if (result.type === 'api_key') {
       expect(result.providerAccountId).toBeNull()
     }
+  })
+})
+
+// ── 10. validateSlackBotToken ──────────────────────────────
+
+describe('validateSlackBotToken', () => {
+  it('accepts xoxb- bot token with sufficient length', () => {
+    const result = validateSlackBotToken('xoxb-1234567890-1234567890123-abcdefghijklmnopqrstuvwx')
+    expect(result.valid).toBe(true)
+    expect(result.error).toBeUndefined()
+  })
+
+  it('accepts xoxp- user token', () => {
+    const result = validateSlackBotToken('xoxp-1234567890-1234567890123-abcdefghijklmnopqrstuvwx')
+    expect(result.valid).toBe(true)
+  })
+
+  it('rejects token without xoxb-/xoxp- prefix', () => {
+    const result = validateSlackBotToken('sk_live_51T65tbGaqS0J01nLAIWLMDMKx2l2iI8gH0O')
+    expect(result.valid).toBe(false)
+    expect(result.error).toContain('xoxb-')
+  })
+
+  it('rejects xoxa- prefix (app-level token)', () => {
+    const result = validateSlackBotToken('xoxa-1234567890-1234567890123-abcdefghijklmnop')
+    expect(result.valid).toBe(false)
+    expect(result.error).toContain('xoxb-')
+  })
+
+  it('rejects token shorter than 30 chars', () => {
+    const result = validateSlackBotToken('xoxb-short')
+    expect(result.valid).toBe(false)
+    expect(result.error).toContain('trop court')
+  })
+
+  it('rejects empty string', () => {
+    const result = validateSlackBotToken('')
+    expect(result.valid).toBe(false)
+    expect(result.error).toContain('requis')
+  })
+
+  it('trims whitespace before validation', () => {
+    const key = '  xoxb-1234567890-1234567890123-abcdefghijklmnopqrstuvwx  '
+    const result = validateSlackBotToken(key)
+    expect(result.valid).toBe(true)
+  })
+
+  it('boundary: exactly 30 chars xoxb- is valid', () => {
+    const key = 'xoxb-' + 'a'.repeat(25)
+    expect(key.length).toBe(30)
+    expect(validateSlackBotToken(key).valid).toBe(true)
+  })
+
+  it('boundary: 29 chars xoxb- is too short', () => {
+    const key = 'xoxb-' + 'a'.repeat(24)
+    expect(key.length).toBe(29)
+    expect(validateSlackBotToken(key).valid).toBe(false)
   })
 })

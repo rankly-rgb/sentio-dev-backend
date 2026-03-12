@@ -110,3 +110,22 @@ export function validateHubSpotApiKey(key: string): { valid: boolean; error?: st
   }
   return { valid: true }
 }
+
+/**
+ * Valide qu'un Bot Token Slack a le bon format.
+ * Les Slack Bot Tokens commencent par xoxb- (Bot User OAuth Token).
+ * Les User Tokens (xoxp-) sont aussi acceptes mais moins recommandes.
+ */
+export function validateSlackBotToken(key: string): { valid: boolean; error?: string } {
+  if (!key || typeof key !== 'string') {
+    return { valid: false, error: 'Token Slack requis' }
+  }
+  const trimmed = key.trim()
+  if (!trimmed.startsWith('xoxb-') && !trimmed.startsWith('xoxp-')) {
+    return { valid: false, error: 'Format invalide — le token doit commencer par xoxb- (Bot Token) ou xoxp- (User Token)' }
+  }
+  if (trimmed.length < 30) {
+    return { valid: false, error: 'Token trop court' }
+  }
+  return { valid: true }
+}

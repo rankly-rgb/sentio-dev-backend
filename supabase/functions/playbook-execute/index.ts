@@ -32,7 +32,7 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { createLogger } from '../_shared/structured-logger.ts'
-import { alertSlack } from '../_shared/slack-alert.ts'
+import { alertSlack, alertSlackWithToken } from '../_shared/slack-alert.ts'
 import {
   evaluateConditions,
   executeAction,
@@ -444,6 +444,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
+  // ── Pre-resolve Slack Bot Token if any action needs it ──
+  const hasSlackAction = actions.some((a) => a.type === 'slack_notify')
+  let slackBotToken: string | null = null
+
+  if (hasSlackAction) {
+    const { data: slackIntegration } = await supabase
+      .from('organization_integrations')
+      .select('vault_access_token_id')
+      .eq('organization_id', body.organization_id)
+      .eq('provider', 'slack')
+      .eq('status', 'active')
+      .maybeSingle()
+
+    if (slackIntegration?.vault_access_token_id) {
+      slackBotToken = await getVaultSecret(supabase, slackIntegration.vault_access_token_id)
+    }
+  }
+
   for (const account of finalAccounts) {
     const acc = account as AccountData
     let executionId: string | null = null
@@ -589,12 +607,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
           // ── slack_notify: real Slack message ──
           if (action.type === 'slack_notify') {
             try {
+              const config = (action.config ?? {}) as { channel?: string; message?: string }
               const msg = buildSlackNotifyMessage(
-                (action.config ?? {}) as { channel?: string; message?: string },
+                config,
                 acc as unknown as { id: string; stripe_customer_id?: string; health_score?: number | null; churn_risk_score?: number | null; expansion_score?: number | null; mrr_cents?: number | null },
                 playbook.title,
               )
-              await alertSlack(msg, { level: 'info' })
+              // Use per-org Bot Token if available, otherwise fallback to global webhook
+              if (slackBotToken && config.channel) {
+                await alertSlackWithToken(slackBotToken, config.channel, msg, { level: 'info' })
+              } else {
+                await alertSlack(msg, { level: 'info' })
+              }
               const slackResult: ActionResult = {
                 action_type: 'slack_notify', order: action.order, status: 'completed',
                 message: `Slack notification sent for account ${acc.id}`,
