@@ -67,9 +67,9 @@ verify_jwt = false
 [functions.webhook-config]
 verify_jwt = false
 
-# sync-hubspot : déclenché par cron ou OAuth callback (service_role)
+# sync-hubspot : JWT vérifié dans le code (appelé par cron service_role + triggerInitialSync)
 [functions.sync-hubspot]
-verify_jwt = true
+verify_jwt = false
 
 # refresh-hubspot-tokens : cron (service_role HS256, refresh 6h tokens)
 [functions.refresh-hubspot-tokens]

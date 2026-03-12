@@ -255,6 +255,29 @@ describe('calcHealthScore — 4 dimensions (usageTrackerConnected: true)', () =>
   })
 })
 
+// API contract : product_usage_score = null quand tracker non connecté
+// Ce test documente que calcUsageScore retourne 50 pour zéro events MAIS
+// que cette valeur ne doit JAMAIS être utilisée dans le calcul Health ou
+// stockée en DB quand usageTrackerConnected = false.
+// Le calcul Health doit utiliser la formule 3D dans ce cas.
+describe('product_usage_score null contract (usageTrackerConnected: false)', () => {
+  it('calcUsageScore returns 50 for zero events (neutral fallback)', () => {
+    // NOTE: cette valeur ne doit PAS être stockée en DB quand le tracker est déconnecté
+    const stats: UsageStats = { login_count: 0, feature_count: 0, total_events: 0, distinct_features: 0, days_active: 0 }
+    expect(calcUsageScore(stats)).toBe(50)
+  })
+
+  it('health score with tracker disconnected excludes usage entirely (not 50 neutral)', () => {
+    // Vérifier que la formule 3D produit un résultat différent de la formule 4D avec usage=50
+    const health3d = calcHealthScore({ financialScore: 80, engagementScore: 60, contractScore: 70, usageTrackerConnected: false })
+    const health4d50 = calcHealthScore({ usageScore: 50, financialScore: 80, engagementScore: 60, contractScore: 70, usageTrackerConnected: true })
+    // 3D: 80*0.34 + 60*0.33 + 70*0.33 = 70.7
+    // 4D: 50*0.35 + 80*0.25 + 60*0.20 + 70*0.20 = 63.5
+    // Les deux formules produisent des résultats distincts — preuves que le mode tracker change le calcul
+    expect(health3d).not.toBe(health4d50)
+  })
+})
+
 describe('calcHealthScore — 3 dimensions (usageTrackerConnected: false)', () => {
   it('follows redistributed weights: F×34 + E×33 + C×33', () => {
     const health = calcHealthScore({

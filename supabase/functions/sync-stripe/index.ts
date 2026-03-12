@@ -16,6 +16,7 @@ import { CircuitBreaker } from '../_shared/circuit-breaker.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { getVaultSecret } from '../_shared/vault.ts'
 import { resolveCredentialSource } from '../_shared/credential-helpers.ts'
+import { determineSyncMode } from '../_shared/sync-stripe-helpers.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
@@ -263,15 +264,17 @@ async function syncCustomers(
 }
 
 // ── Sync subscriptions ────────────────────────────────────────
-// Always full-syncs (no createdAfter filter) because Stripe's
-// created[gt] filter misses subscription updates/cancellations.
+// For incremental mode, uses current_period_end[gt] instead of created[gt]
+// because created[gt] misses subscription updates and cancellations.
 async function syncSubscriptions(
   supabase: SupabaseClient,
   organizationId: string,
   creds: StripeCredentials,
   logger: DataSyncLogger,
+  subscriptionCursor?: number,
 ): Promise<void> {
   const extraParams: Record<string, string> = { status: 'all' }
+  if (subscriptionCursor) extraParams['current_period_end[gt]'] = String(subscriptionCursor)
 
   // Pre-build stripe_customer_id → account.id Map (eliminates N+1 queries)
   const { data: subSyncAccounts } = await supabase
@@ -533,36 +536,51 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse(`Stripe credentials error: ${msg}`, 500)
   }
 
-  const syncType = body.sync_type ?? 'incremental'
   const isManual = body.is_manual ?? false
 
-  // Pour le sync incrémental, récupérer la date du dernier sync
-  let createdAfter: number | undefined
-  if (syncType === 'incremental') {
-    const { data: lastSync } = await supabase
-      .from('data_syncs')
-      .select('completed_at')
-      .eq('organization_id', organizationId)
-      .eq('sync_source', 'stripe')
-      .eq('sync_status', 'completed')
-      .order('completed_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-
-    if (lastSync?.completed_at) {
-      const lastSyncMs = new Date(lastSync.completed_at).getTime()
-      // Guard against future timestamps or invalid dates
-      if (lastSyncMs > 0 && lastSyncMs <= Date.now()) {
-        createdAfter = Math.floor(lastSyncMs / 1000) - 3600 // -1h de marge
-      } else {
-        console.warn(JSON.stringify({
-          level: 'warn',
-          function_name: 'sync-stripe',
-          message: `Invalid lastSync timestamp: ${lastSync.completed_at}, falling back to full sync`,
-        }))
-      }
-    }
+  // Acquire cron lock BEFORE mode detection to prevent concurrent sync runs
+  const lockAcquired = await acquireCronLock(supabase, 'sync-stripe', 300)
+  if (!lockAcquired) {
+    return errorResponse('Sync already in progress', 409)
   }
+
+  // Determine sync mode: query last successful sync from data_syncs.
+  // Auto-detect: if last sync completed within 1 hour → incremental, otherwise full.
+  // A manual override via body.sync_type='full_sync' forces a full sync.
+  const { data: lastSyncRow } = await supabase
+    .from('data_syncs')
+    .select('completed_at')
+    .eq('sync_source', 'stripe')
+    .eq('sync_status', 'completed')
+    .order('completed_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  const lastSyncCompletedAt = lastSyncRow?.completed_at
+    ? new Date(lastSyncRow.completed_at)
+    : null
+
+  const forcedFull = body.sync_type === 'full_sync' || body.sync_type === 'initial'
+  const { mode: detectedMode, cursor } = determineSyncMode(lastSyncCompletedAt, new Date())
+  const syncMode: 'incremental' | 'full' = forcedFull ? 'full' : detectedMode
+
+  // cursor used for customers + invoices (created[gt])
+  // For subscriptions we use current_period_end[gt] to capture updates/cancellations
+  const createdAfter = syncMode === 'incremental' ? cursor : undefined
+
+  // Keep syncType for DataSyncLogger compatibility (full_sync vs incremental)
+  const syncType = syncMode === 'full' ? 'full_sync' : 'incremental'
+
+  console.log(JSON.stringify({
+    level: 'info',
+    function_name: 'sync-stripe',
+    organization_id: organizationId,
+    message: `Starting sync`,
+    sync_mode: syncMode,
+    cursor,
+    last_sync_completed_at: lastSyncRow?.completed_at ?? null,
+    is_manual: isManual,
+  }))
 
   const logger = new DataSyncLogger({
     supabase,
@@ -573,18 +591,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     isManual,
   })
 
-  // Acquire cron lock to prevent concurrent sync runs
-  const lockAcquired = await acquireCronLock(supabase, 'sync-stripe', 300)
-  if (!lockAcquired) {
-    return errorResponse('Sync already in progress', 409)
-  }
-
   await logger.start()
 
   try {
-    // Sync dans l'ordre : customers → subscriptions (always full) → invoices
+    // Sync dans l'ordre : customers → subscriptions → invoices
+    // Subscriptions use current_period_end[gt] for incremental (captures updates/cancellations)
     await syncCustomers(supabase, organizationId, creds, logger, createdAfter)
-    await syncSubscriptions(supabase, organizationId, creds, logger)
+    await syncSubscriptions(supabase, organizationId, creds, logger, createdAfter)
     await syncInvoices(supabase, organizationId, creds, logger, createdAfter)
 
     // Mettre à jour le timestamp de sync sur l'organisation
@@ -593,7 +606,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .update({ updated_at: new Date().toISOString() })
       .eq('id', organizationId)
 
-    await logger.complete({ sync_type: syncType, created_after: createdAfter })
+    await logger.complete({ sync_mode: syncMode, sync_type: syncType, cursor })
 
     // Declencher le scoring automatiquement apres un sync reussi (fire-and-forget)
     triggerScoring(organizationId)
@@ -601,6 +614,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return jsonResponse({
       success: true,
       organization_id: organizationId,
+      sync_mode: syncMode,
       sync_type: syncType,
     })
   } catch (err) {
@@ -609,6 +623,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       level: 'error',
       function_name: 'sync-stripe',
       organization_id: organizationId,
+      sync_mode: syncMode,
       message: msg,
     }))
 
@@ -616,7 +631,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     await logger.fail(msg, errorType)
 
     await alertSlack(
-      `sync-stripe failed (${syncType}) for org ${organizationId}: ${msg}`,
+      `sync-stripe failed (${syncMode}) for org ${organizationId}: ${msg}`,
       { level: 'critical' },
     )
 

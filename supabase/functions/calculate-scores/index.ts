@@ -4,10 +4,24 @@
 // pour chaque account, assigne les segments, et persiste
 // dans score_history + account_segments.
 //
-// Formules (CLAUDE.md) :
-//   Health  = (Usage×35%) + (Financial×25%) + (Engagement×20%) + (Contract×20%)
+// Formules duales selon usage_tracker_connected :
+//
+//   Mode 3D (V1 — tracker non connecté, défaut) :
+//     Health = (Financial×34%) + (Engagement×33%) + (Contract×33%)
+//     product_usage_score = null → affiché "Score à venir" en frontend
+//
+//   Mode 4D (futur — tracker connecté, ≥1 usage_event dans 30j) :
+//     Health = (Usage×35%) + (Financial×25%) + (Engagement×20%) + (Contract×20%)
+//     product_usage_score = number (0-100)
+//
 //   Churn   = 100 - Health + facteurs additifs (capped 100)
+//             Le +20 pour "0 jours actifs" ne s'applique QUE si tracker connecté
 //   Expansion = (seat_usage_pct×60%) + (feature_ceiling×40%)
+//
+// Contrat API :
+//   product_usage_score: number | null
+//   - null  = usage tracker non connecté → frontend affiche "Score à venir"
+//   - number = score calculé (0-100)
 // ============================================================
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
@@ -15,7 +29,7 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
 import { acquireCronLock, releaseCronLock } from '../_shared/cron-lock.ts'
-import { alertSlack } from '../_shared/slack-alert.ts'
+import { alertSlack, alertSlackBatch } from '../_shared/slack-alert.ts'
 import { dispatchWebhook } from '../_shared/webhook-dispatcher.ts'
 import {
   type Account,
@@ -229,7 +243,15 @@ async function prefetchScoringData(
   return { usageMap, hubspotMap, invoiceStatusMap }
 }
 
-// ── Scoring d'un compte (pure — no DB calls) ────────────────────
+/**
+ * Calcule les scores d'un compte (fonction pure — aucun appel DB).
+ *
+ * Comportement dual-mode selon `usageTrackerConnected` :
+ * - false (V1 défaut) : Health = Financial×34% + Engagement×33% + Contract×33%
+ *                       product_usage_score = null (affiché "Score à venir" en frontend)
+ * - true             : Health = Usage×35% + Financial×25% + Engagement×20% + Contract×20%
+ *                       product_usage_score = number (0-100)
+ */
 function scoreAccountPure(
   account: Account,
   maxMrrCents: number,
@@ -475,6 +497,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
         const accountScores = new Map<string, ScoreResult>()
         const accountInvoiceStatus = new Map<string, InvoiceStatus>()
         const allAccounts: AccountWithCreatedAt[] = []
+        // Accumulateur pour le digest Slack churn (envoyé une seule fois après le run)
+        const churnAlerts: Array<{
+          account_id: string
+          stripe_customer_id: string
+          churn_risk: number
+          mrr_cents: number
+          trigger_reason: string
+        }> = []
         let batchOffset = 0
         let batchFailed = false
         let batchCount = 0
@@ -637,14 +667,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
           }))
         }
 
-        // ── Webhook sortant : churn_risk_critical ──────────────
-        // Dispatcher pour les comptes qui viennent de dépasser le seuil 70
+        // ── Webhook sortant + collecte Slack : churn_risk_critical ──────────────
+        // Dispatcher pour les comptes qui viennent de dépasser le seuil 70.
+        // Les alertes individuelles sont accumulées puis envoyées en un seul digest Slack.
         for (const account of allAccounts) {
           const scores = accountScores.get(account.id)
           if (!scores) continue
           const prevChurn = account.churn_risk_score
           if (scores.churn_risk_score >= 70 && (prevChurn == null || prevChurn < 70)) {
             if (!account.stripe_customer_id) continue
+
+            const triggerReason = `churn_risk ${prevChurn ?? 'N/A'} → ${scores.churn_risk_score} (seuil 70)`
+
             await dispatchWebhook(supabase, organizationId, 'churn_risk_critical', {
               account_id: account.id,
               stripe_customer_id: account.stripe_customer_id!,
@@ -654,10 +688,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
               churn_risk_score: scores.churn_risk_score,
               expansion_score: scores.expansion_score,
               mrr_cents: account.mrr_cents ?? 0,
-              trigger_reason: `churn_risk ${prevChurn ?? 'N/A'} → ${scores.churn_risk_score} (seuil 70)`,
+              trigger_reason: triggerReason,
+            })
+
+            // Collecter pour le digest Slack groupé (envoyé une fois après le run)
+            churnAlerts.push({
+              account_id: account.id,
+              stripe_customer_id: account.stripe_customer_id!,
+              churn_risk: scores.churn_risk_score,
+              mrr_cents: account.mrr_cents ?? 0,
+              trigger_reason: triggerReason,
             })
           }
         }
+
+        // ── Digest Slack churn (1 message groupé par org, fire-and-forget) ──────
+        await alertSlackBatch(churnAlerts)
 
         await logger.complete({ accounts_scored: accountsScored, segments_assigned: segmentsAssigned, errors })
       } catch (err) {

@@ -171,6 +171,11 @@ describe('evaluatePaymentRisk', () => {
 // ── Usage Drop ───────────────────────────────────────────────
 
 describe('evaluateUsageDrop', () => {
+  it('returns null when usage tracker is disconnected (current = null)', () => {
+    // product_usage_score = null means tracker non connecté → règle ignorée
+    expect(evaluateUsageDrop({ ...baseInput, usage_score_current: null, usage_score_previous: 100 })).toBeNull()
+  })
+
   it('returns null when no previous data', () => {
     expect(evaluateUsageDrop({ ...baseInput, usage_score_previous: null })).toBeNull()
   })

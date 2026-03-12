@@ -9,6 +9,11 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse, errorResponse } from '../_shared/supabase-client.ts'
 import { acquireCronLock, releaseCronLock } from '../_shared/cron-lock.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
+import { shouldRetryEntry } from '../_shared/dlq-retry-helpers.ts'
+import { dispatchWebhook } from '../_shared/webhook-dispatcher.ts'
+import { computeHubspotStaleness } from '../_shared/hubspot-stale-helpers.ts'
+import { createHubSpotTask, associateTaskToCompany } from '../_shared/hubspot-actions.ts'
+import { getVaultSecret } from '../_shared/vault.ts'
 
 Deno.serve(async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
@@ -261,6 +266,195 @@ Deno.serve(async (req: Request): Promise<Response> => {
       level: 'error',
       function_name: 'self-monitor',
       message: 'Failed to check sync failures',
+      error: err instanceof Error ? err.message : String(err),
+    }))
+  }
+
+  // 8. DLQ Replay — attempt to re-dispatch failed webhook entries
+  try {
+    const now = new Date()
+    const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString()
+
+    // Fetch candidates: not exhausted and created within the last 24h.
+    // Backoff filtering is applied in-memory via shouldRetryEntry() so that the
+    // pure function remains testable without SQL-level filtering.
+    const { data: dlqCandidates } = await supabase
+      .from('webhook_dead_letter')
+      .select('id, provider, payload, event_type, error_message, retry_count, last_retry_at, organization_id, created_at')
+      .lt('retry_count', 3)
+      .gte('created_at', twentyFourHoursAgo)
+      .is('resolved_at', null)
+      .limit(20)
+
+    let dlqReplayed = 0
+    let dlqFailed = 0
+
+    for (const entry of (dlqCandidates ?? [])) {
+      // Apply backoff filter in-memory using the pure helper
+      if (!shouldRetryEntry(entry, now)) continue
+
+      try {
+        if (entry.provider === 'outbound_webhook') {
+          // Re-dispatch outbound webhook using the full dispatcher which
+          // fetches the org's active config, signs the payload, and sends it.
+          const raw = typeof entry.payload === 'string' ? JSON.parse(entry.payload) : entry.payload
+          const account = raw?.account ?? {}
+          const signals = raw?.signals ?? {}
+          const event = entry.event_type ?? 'health_score_drop'
+
+          await dispatchWebhook(
+            supabase,
+            entry.organization_id,
+            event,
+            account,
+            signals,
+          )
+
+          // Remove successfully replayed entry from DLQ
+          await supabase.from('webhook_dead_letter').delete().eq('id', entry.id)
+          dlqReplayed++
+        } else if (entry.provider === 'hubspot') {
+          // Re-attempt HubSpot task creation from DLQ payload
+          const raw = typeof entry.payload === 'string' ? JSON.parse(entry.payload) : entry.payload
+          const orgId = entry.organization_id
+          const hubspotCompanyId = raw?.hubspot_company_id as string | undefined
+          const taskTitle = (raw?.task_title as string) ?? 'Tache Sentio'
+          const taskBody = (raw?.task_body as string) ?? 'Tache creee par Sentio AI'
+          const taskDueDays = (raw?.task_due_days as number) ?? 3
+
+          // Resolve HubSpot token from Vault via organization_integrations
+          const { data: hsIntegration } = await supabase
+            .from('organization_integrations')
+            .select('vault_access_token_id')
+            .eq('organization_id', orgId)
+            .eq('provider', 'hubspot')
+            .eq('is_active', true)
+            .maybeSingle()
+
+          if (!hsIntegration?.vault_access_token_id) {
+            throw new Error('HubSpot integration not found or inactive for org')
+          }
+
+          const hsToken = await getVaultSecret(supabase, hsIntegration.vault_access_token_id)
+          if (!hsToken) {
+            throw new Error('HubSpot token not found in Vault')
+          }
+
+          const taskResult = await createHubSpotTask(hsToken, {
+            title: taskTitle,
+            body: taskBody,
+            dueDays: taskDueDays,
+          })
+
+          // Associate task to company if hubspot_company_id is available
+          if (hubspotCompanyId) {
+            try {
+              await associateTaskToCompany(hsToken, taskResult.taskId, hubspotCompanyId)
+            } catch {
+              // Association failure is non-critical — task was created successfully
+              console.error(JSON.stringify({
+                level: 'warn',
+                function_name: 'self-monitor',
+                message: 'HubSpot DLQ replay: task created but association failed',
+                dlq_entry_id: entry.id,
+                task_id: taskResult.taskId,
+                company_id: hubspotCompanyId,
+              }))
+            }
+          }
+
+          // Remove successfully replayed entry from DLQ
+          await supabase.from('webhook_dead_letter').delete().eq('id', entry.id)
+          dlqReplayed++
+        } else {
+          // Non-replayable providers (stripe, usage) cannot be re-dispatched
+          // without their original signed body. Exhaust their retries gracefully
+          // so they do not block the queue indefinitely.
+          const newCount = (entry.retry_count ?? 0) + 1
+          await supabase
+            .from('webhook_dead_letter')
+            .update({ retry_count: newCount, last_retry_at: now.toISOString() })
+            .eq('id', entry.id)
+
+          if (newCount >= 3) {
+            await alertSlack(
+              `self-monitor: DLQ entry max retries reached | id: ${entry.id} | provider: ${entry.provider} | error: ${entry.error_message}`,
+              { level: 'warning' },
+            )
+          }
+
+          dlqFailed++
+        }
+      } catch (replayErr) {
+        // Re-dispatch failed — increment retry_count and record timestamp
+        const newCount = (entry.retry_count ?? 0) + 1
+        await supabase
+          .from('webhook_dead_letter')
+          .update({ retry_count: newCount, last_retry_at: now.toISOString() })
+          .eq('id', entry.id)
+
+        if (newCount >= 3) {
+          await alertSlack(
+            `self-monitor: DLQ entry max retries reached | id: ${entry.id} | provider: ${entry.provider} | error: ${entry.error_message}`,
+            { level: 'warning' },
+          )
+        }
+
+        dlqFailed++
+        console.error(JSON.stringify({
+          level: 'error',
+          function_name: 'self-monitor',
+          message: 'DLQ replay failed',
+          dlq_entry_id: entry.id,
+          provider: entry.provider,
+          retry_count: newCount,
+          error: replayErr instanceof Error ? replayErr.message : String(replayErr),
+        }))
+      }
+    }
+
+    if (dlqReplayed > 0 || dlqFailed > 0) {
+      actions.push(`DLQ replay: ${dlqReplayed} replayed, ${dlqFailed} failed/exhausted`)
+    }
+  } catch (err) {
+    console.error(JSON.stringify({
+      level: 'error',
+      function_name: 'self-monitor',
+      message: 'Failed to run DLQ replay phase',
+      error: err instanceof Error ? err.message : String(err),
+    }))
+  }
+
+  // 9. HubSpot Stale Check with anti-flood Slack alert (max 1 alert per 24h)
+  try {
+    const { data: hubspotSync } = await supabase
+      .from('data_syncs')
+      .select('completed_at')
+      .eq('sync_source', 'hubspot')
+      .eq('sync_status', 'completed')
+      .order('completed_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    const lastHubspotSyncAt = hubspotSync?.completed_at ? new Date(hubspotSync.completed_at) : null
+    const { stale, hoursAgo } = computeHubspotStaleness(lastHubspotSyncAt, new Date())
+
+    if (stale) {
+      // Anti-flood: try to acquire a 24h lock before alerting
+      const lockAcquired = await acquireCronLock(supabase, 'hubspot_stale_alert', 24 * 60 * 60)
+      if (lockAcquired) {
+        const message = hoursAgo === null
+          ? '⚠️ HubSpot jamais synchronisé — vérifier la configuration dans Intégrations'
+          : `⚠️ HubSpot sync stale: dernière sync réussie il y a ${Math.round(hoursAgo)}h — vérifier sync-hubspot`
+        await alertSlack(message)
+        actions.push(`HubSpot stale alert sent (${hoursAgo === null ? 'never synced' : `${Math.round(hoursAgo)}h ago`})`)
+      }
+    }
+  } catch (err) {
+    console.error(JSON.stringify({
+      level: 'error',
+      function_name: 'self-monitor',
+      message: 'Failed to check HubSpot staleness',
       error: err instanceof Error ? err.message : String(err),
     }))
   }

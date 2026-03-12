@@ -28,7 +28,12 @@ export interface InsightInput {
   contract_end_date: string | null
   has_overdue_invoices: boolean
   overdue_days: number
-  usage_score_current: number
+  /**
+   * Score d'usage produit actuel (0-100).
+   * null = tracker non connecté → la règle usage_drop est automatiquement ignorée.
+   * number = score calculé, le tracker est connecté.
+   */
+  usage_score_current: number | null
   usage_score_previous: number | null
   created_at: string
 }
@@ -178,6 +183,8 @@ export function evaluatePaymentRisk(input: InsightInput): InsightCandidate | nul
 // ── Règle 5 : Usage Drop ────────────────────────────────────
 
 export function evaluateUsageDrop(input: InsightInput): InsightCandidate | null {
+  // Règle ignorée si le tracker d'usage n'est pas connecté (null) ou si pas d'historique
+  if (input.usage_score_current === null) return null
   if (input.usage_score_previous === null || input.usage_score_previous === 0) return null
   if (input.usage_score_current >= input.usage_score_previous * 0.7) return null
 

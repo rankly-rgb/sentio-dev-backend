@@ -2,10 +2,28 @@
 // Edge Function : health-check
 // Returns system health status by checking DB connectivity,
 // stale cron locks, and stuck syncs.
+//
+// GET /functions/v1/health-check
+// Authorization: Bearer <supabase_jwt> (optional - see note)
+//
+// Réponse succès (200):
+// {
+//   status: "healthy" | "degraded" | "unhealthy",
+//   hubspot_stale: boolean,
+//   last_hubspot_sync_hours_ago: number | null,
+//   ... existing fields preserved unchanged
+// }
+//
+// hubspot_stale = true si dernière sync HubSpot réussie > 48h ou jamais
+// last_hubspot_sync_hours_ago = null si jamais synchronisé, sinon heures depuis la dernière sync
+//
+// Champs exposés au frontend: status, hubspot_stale, last_hubspot_sync_hours_ago
+// Usage frontend attendu: badge "HubSpot non synchronisé" sur la page Intégrations si hubspot_stale = true
 // ============================================================
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse, errorResponse } from '../_shared/supabase-client.ts'
+import { computeHubspotStaleness } from '../_shared/hubspot-stale-helpers.ts'
 
 interface HealthCheck {
   name: string
@@ -105,6 +123,39 @@ Deno.serve(async (req: Request): Promise<Response> => {
     checks.push({ name: 'dlq', status: 'warning', message: 'Could not check DLQ' })
   }
 
+  // Check HubSpot sync freshness
+  let hubspotStale = true
+  let lastHubspotSyncHoursAgo: number | null = null
+
+  try {
+    const { data: hubspotSync } = await supabase
+      .from('data_syncs')
+      .select('completed_at')
+      .eq('sync_source', 'hubspot')
+      .eq('sync_status', 'completed')
+      .order('completed_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    const lastHubspotSyncAt = hubspotSync?.completed_at ? new Date(hubspotSync.completed_at) : null
+    const staleness = computeHubspotStaleness(lastHubspotSyncAt, new Date())
+
+    hubspotStale = staleness.stale
+    lastHubspotSyncHoursAgo = staleness.hoursAgo !== null
+      ? Math.round(staleness.hoursAgo * 10) / 10
+      : null
+  } catch {
+    // Could not query data_syncs — treat as stale
+    hubspotStale = true
+    lastHubspotSyncHoursAgo = null
+  }
+
   const statusCode = overallStatus === 'unhealthy' ? 503 : 200
-  return jsonResponse({ status: overallStatus, checks, timestamp: new Date().toISOString() }, statusCode)
+  return jsonResponse({
+    status: overallStatus,
+    hubspot_stale: hubspotStale,
+    last_hubspot_sync_hours_ago: lastHubspotSyncHoursAgo,
+    checks,
+    timestamp: new Date().toISOString(),
+  }, statusCode)
 })

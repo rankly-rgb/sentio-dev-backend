@@ -15,14 +15,19 @@ import {
   calculateNextScheduledAt,
   evaluateConditions,
   enrichPlaybooksWithEligibleCount,
+  executeAction,
   VALID_PLAYBOOK_STATUSES,
   VALID_PLAYBOOK_TYPES,
   VALID_TEMPLATE_CATEGORIES,
   VALID_PRIORITIES,
   VALID_EXECUTION_FREQUENCIES,
   type PlaybookStatus,
+  type PlaybookAction,
+  type AccountData,
+  type ActionResult,
   type ExecutionFrequency,
 } from '../_shared/playbook-engine.ts'
+import { canApprove, canReject, isPlaybookMatch, buildApprovalLog } from '../_shared/playbook-approval-helpers.ts'
 
 // ── Entrypoint ──────────────────────────────────────────────
 
@@ -52,6 +57,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const id = url.searchParams.get('id')
 
   const orgId = auth.organizationId
+
+  // Sub-path routing for approval endpoints: /{id}/approve-execution, /{id}/reject-execution
+  const subPathMatch = url.pathname.match(/\/playbook-crud\/([^/]+)\/(approve-execution|reject-execution)/)
+  if (subPathMatch && req.method === 'POST') {
+    const playbookId = subPathMatch[1]
+    const action = subPathMatch[2]
+    if (action === 'approve-execution') {
+      return handleApproveExecution(supabase, playbookId, req, orgId)
+    }
+    return handleRejectExecution(supabase, playbookId, req, orgId)
+  }
 
   switch (req.method) {
     case 'POST':
@@ -501,4 +517,205 @@ async function handleArchive(supabase: SupabaseClient, id: string, authOrgId: st
   }
 
   return jsonResponse({ message: 'Playbook archived', ...data })
+}
+
+// ── APPROVE EXECUTION ───────────────────────────────────────
+// POST /functions/v1/playbook-crud/{id}/approve-execution
+// Authorization: Bearer <supabase_jwt>
+//
+// Body: { execution_id: string }
+//
+// Réponse succès (200):
+// { execution_id: string, status: "running", accounts_count: number }
+//
+// Réponses erreur:
+// 400 { error: "execution_id manquant" }
+// 403 { error: "org mismatch" }
+// 404 { error: "exécution introuvable" }
+// 409 { error: "statut invalide" }  — not in pending_approval state
+
+async function handleApproveExecution(
+  supabase: SupabaseClient,
+  playbookId: string,
+  req: Request,
+  authOrgId: string,
+): Promise<Response> {
+  let body: Record<string, unknown>
+  try {
+    body = await req.json()
+  } catch {
+    return errorResponse('Invalid JSON body', 400)
+  }
+
+  const executionId = body.execution_id as string | undefined
+  if (!executionId) {
+    return errorResponse('execution_id manquant', 400)
+  }
+
+  // Fetch execution scoped by org_id (cross-tenant prevention)
+  const { data: execution, error: fetchError } = await supabase
+    .from('playbook_executions')
+    .select('id, execution_status, execution_log, playbook_id, organization_id, accounts_targeted')
+    .eq('id', executionId)
+    .eq('organization_id', authOrgId)
+    .maybeSingle()
+
+  if (fetchError || !execution) {
+    return errorResponse('exécution introuvable', 404)
+  }
+
+  // Verify playbook_id matches the URL parameter
+  if (execution.playbook_id !== playbookId) {
+    return errorResponse('exécution introuvable', 404)
+  }
+
+  if (!canApprove(execution)) {
+    return errorResponse('statut invalide', 409)
+  }
+
+  // Transition to running
+  await supabase
+    .from('playbook_executions')
+    .update({ execution_status: 'running' })
+    .eq('id', executionId)
+
+  // Read stored context from execution_log
+  const log = (execution.execution_log ?? {}) as Record<string, unknown>
+  const accountIds = (log.account_ids ?? []) as string[]
+  const plannedActions = (log.planned_actions ?? []) as PlaybookAction[]
+
+  // Fetch accounts for action dispatch
+  let accountsCount = 0
+  if (accountIds.length > 0 && plannedActions.length > 0) {
+    const { data: accounts } = await supabase
+      .from('accounts')
+      .select('id, organization_id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
+      .eq('organization_id', authOrgId)
+      .in('id', accountIds)
+
+    const targetAccounts = accounts ?? []
+    accountsCount = targetAccounts.length
+
+    // Execute actions for each account (reuse standard action dispatch)
+    const allResults: ActionResult[] = []
+    let totalCompleted = 0
+    let totalFailed = 0
+
+    for (const account of targetAccounts) {
+      const acc = account as AccountData
+      for (const action of plannedActions) {
+        const result = executeAction(action, acc, {
+          playbookId,
+          executionId,
+        })
+        allResults.push(result)
+        if (result.status === 'completed') totalCompleted++
+        else if (result.status === 'failed') totalFailed++
+      }
+    }
+
+    // Determine final status
+    let finalStatus: string
+    if (totalFailed === 0) finalStatus = 'completed'
+    else if (totalCompleted === 0) finalStatus = 'failed'
+    else finalStatus = 'partially_completed'
+
+    await supabase
+      .from('playbook_executions')
+      .update({
+        execution_status: finalStatus,
+        actions_completed: allResults,
+        completed_at: new Date().toISOString(),
+        accounts_reached: targetAccounts.length,
+      })
+      .eq('id', executionId)
+  } else {
+    // No accounts or actions — mark completed
+    accountsCount = 0
+    await supabase
+      .from('playbook_executions')
+      .update({
+        execution_status: 'completed',
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', executionId)
+  }
+
+  return jsonResponse({
+    execution_id: executionId,
+    status: 'running',
+    accounts_count: accountsCount,
+  })
+}
+
+// ── REJECT EXECUTION ────────────────────────────────────────
+// POST /functions/v1/playbook-crud/{id}/reject-execution
+// Authorization: Bearer <supabase_jwt>
+//
+// Body: { execution_id: string, reason?: string }
+//
+// Réponse succès (200):
+// { execution_id: string, status: "cancelled" }
+//
+// Réponses erreur:
+// 400 { error: "execution_id manquant" }
+// 403 { error: "playbook_id ne correspond pas à cette exécution" }
+// 404 { error: "exécution introuvable" }
+// 409 { error: "statut invalide" }
+
+async function handleRejectExecution(
+  supabase: SupabaseClient,
+  playbookId: string,
+  req: Request,
+  authOrgId: string,
+): Promise<Response> {
+  let body: Record<string, unknown>
+  try {
+    body = await req.json()
+  } catch {
+    return errorResponse('Invalid JSON body', 400)
+  }
+
+  const executionId = body.execution_id as string | undefined
+  if (!executionId) {
+    return errorResponse('execution_id manquant', 400)
+  }
+
+  // Fetch execution scoped by org_id (cross-tenant prevention)
+  const { data: execution, error: fetchError } = await supabase
+    .from('playbook_executions')
+    .select('id, execution_status, execution_log, playbook_id, organization_id')
+    .eq('id', executionId)
+    .eq('organization_id', authOrgId)
+    .maybeSingle()
+
+  if (fetchError || !execution) {
+    return errorResponse('exécution introuvable', 404)
+  }
+
+  // Verify playbook_id matches the URL parameter (symmetric with handleApproveExecution)
+  if (!isPlaybookMatch(execution, playbookId)) {
+    return errorResponse('playbook_id ne correspond pas à cette exécution', 403)
+  }
+
+  if (!canReject(execution)) {
+    return errorResponse('statut invalide', 409)
+  }
+
+  const reason = (body.reason as string) ?? undefined
+  const updatedLog = buildApprovalLog(execution.execution_log, reason)
+
+  await supabase
+    .from('playbook_executions')
+    .update({
+      execution_status: 'cancelled',
+      execution_log: updatedLog,
+      completed_at: new Date().toISOString(),
+    })
+    .eq('id', executionId)
+
+  return jsonResponse({
+    execution_id: executionId,
+    status: 'cancelled',
+  })
 }

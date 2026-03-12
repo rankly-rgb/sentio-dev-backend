@@ -111,7 +111,10 @@ function buildInsightInput(
     contract_end_date: account.contract_end_date,
     has_overdue_invoices: invoiceData?.has_overdue ?? false,
     overdue_days: invoiceData?.overdue_days ?? 0,
-    usage_score_current: account.product_usage_score ?? 50,
+    // product_usage_score: number | null
+    // null = tracker non connecté → la règle usage_drop sera ignorée automatiquement
+    // number = score calculé (0-100) quand le tracker est connecté
+    usage_score_current: account.product_usage_score,
     usage_score_previous: usagePrevious ?? null,
     created_at: account.created_at,
   }

@@ -2,6 +2,29 @@
 // Edge Function : playbook-execute
 // Exécute un playbook sur des comptes spécifiques ou un segment
 // ============================================================
+//
+// POST /functions/v1/playbook-execute
+// Authorization: Bearer <supabase_jwt>
+//
+// Body: {
+//   playbook_id: string,
+//   account_ids?: string[],      // explicit list OR
+//   segment?: string             // target by segment
+// }
+//
+// Réponse succès (200):
+// For automated/manual: { execution_id: string, status: "running" | "completed", accounts_count: number }
+// For semi_automated:  { execution_id: string, status: "pending_approval", accounts_count: number }
+//
+// Réponses erreur:
+// 400 { error: string }  — playbook_id manquant, paramètres invalides
+// 403 { error: string }  — org mismatch
+// 404 { error: string }  — playbook introuvable
+// 500 { error: string }  — erreur serveur
+//
+// Champs exposés au frontend: execution_id, status, accounts_count
+// Champs internes uniquement: execution_log, triggered_at details
+// ============================================================
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
@@ -21,6 +44,10 @@ import {
 } from '../_shared/playbook-engine.ts'
 import { executeWorkflowStep } from '../_shared/workflow-executor.ts'
 import { dispatchWebhook, mapPlaybookToEvent } from '../_shared/webhook-dispatcher.ts'
+import { buildPendingApprovalLog, buildApprovalSlackMessage } from '../_shared/playbook-approval-helpers.ts'
+import { createHubSpotTask, associateTaskToCompany } from '../_shared/hubspot-actions.ts'
+import { getVaultSecret } from '../_shared/vault.ts'
+import { writeToDLQ } from '../_shared/dlq.ts'
 
 const MAX_ACCOUNTS_PER_RUN = 200
 
@@ -31,6 +58,125 @@ interface ExecutePayload {
   segment_id?: string
   execution_source?: string
   cooldown_hours?: number
+}
+
+// ── HubSpot create_task handler ──────────────────────────────
+
+/**
+ * Handles the create_task action by creating a real HubSpot CRM task
+ * and associating it to the company. Gracefully degrades when HubSpot
+ * is not connected or hubspot_company_id is missing.
+ */
+async function handleCreateTaskAction(
+  supabase: SupabaseClient,
+  action: PlaybookAction,
+  account: AccountData,
+  orgId: string,
+  hubspotConnected: boolean,
+  hubspotToken: string | null,
+  logger: ReturnType<typeof createLogger>,
+): Promise<ActionResult> {
+  const now = new Date().toISOString()
+
+  // Skip gracefully if HubSpot not connected
+  if (!hubspotConnected || !hubspotToken) {
+    return {
+      action_type: 'create_task',
+      order: action.order,
+      status: 'skipped',
+      message: 'HubSpot not connected — task creation skipped',
+      executed_at: now,
+    }
+  }
+
+  // Look up the hubspot_company_id for this account
+  const { data: hubspotLink } = await supabase
+    .from('hubspot_companies')
+    .select('hubspot_company_id')
+    .eq('organization_id', orgId)
+    .eq('account_id', account.id)
+    .maybeSingle()
+
+  if (!hubspotLink?.hubspot_company_id) {
+    return {
+      action_type: 'create_task',
+      order: action.order,
+      status: 'skipped',
+      message: `No HubSpot company linked to account ${account.id}`,
+      executed_at: now,
+    }
+  }
+
+  try {
+    const taskTitle = (action.config?.title as string) ?? 'Tache Sentio'
+    const dueDays = (action.config?.due_days as number) ?? 3
+
+    // Build trigger reason from account scores (Zero-PII)
+    const bodyParts: string[] = []
+    if (account.churn_risk_score != null) bodyParts.push(`Churn: ${account.churn_risk_score}%`)
+    if (account.health_score != null) bodyParts.push(`Sante: ${account.health_score}`)
+    if (account.mrr_cents != null) bodyParts.push(`MRR: ${(account.mrr_cents / 100).toFixed(0)} EUR`)
+    const taskBody = bodyParts.length > 0
+      ? `Compte Sentio a risque | ${bodyParts.join(' | ')}`
+      : 'Tache creee par Sentio AI'
+
+    const result = await createHubSpotTask(hubspotToken, {
+      title: taskTitle,
+      body: taskBody,
+      dueDays,
+    })
+
+    // Associate task to company (non-critical — catch separately)
+    try {
+      await associateTaskToCompany(hubspotToken, result.taskId, hubspotLink.hubspot_company_id)
+      result.associationSuccess = true
+    } catch (assocErr) {
+      logger.error('HubSpot task association failed (non-critical)', {
+        task_id: result.taskId,
+        company_id: hubspotLink.hubspot_company_id,
+        error: assocErr instanceof Error ? assocErr.message : String(assocErr),
+      })
+    }
+
+    return {
+      action_type: 'create_task',
+      order: action.order,
+      status: 'completed',
+      message: `HubSpot task created (id: ${result.taskId}, associated: ${result.associationSuccess})`,
+      executed_at: now,
+    }
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err)
+
+    // Write to DLQ for retry — don't fail the entire execution
+    await writeToDLQ(supabase, {
+      organization_id: orgId,
+      provider: 'hubspot',
+      event_type: 'hubspot_task_creation_failed',
+      payload: {
+        account_id: account.id,
+        hubspot_company_id: hubspotLink.hubspot_company_id,
+        task_title: (action.config?.title as string) ?? 'Tache Sentio',
+        task_body: taskBody,
+        task_due_days: dueDays,
+        error: errorMsg,
+      },
+      error_message: errorMsg,
+    })
+
+    logger.error('HubSpot task creation failed', {
+      account_id: account.id,
+      error: errorMsg,
+    })
+
+    return {
+      action_type: 'create_task',
+      order: action.order,
+      status: 'failed',
+      message: `HubSpot task creation failed: ${errorMsg}`,
+      executed_at: now,
+    }
+  }
 }
 
 // ── Entrypoint ──────────────────────────────────────────────
@@ -153,7 +299,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .select('account_id')
     .eq('playbook_id', body.playbook_id)
     .gte('executed_at', cooldownCutoff)
-    .in('execution_status', ['completed', 'running', 'pending'])
+    .in('execution_status', ['completed', 'running', 'pending', 'pending_approval'])
 
   const recentAccountIds = new Set(
     (recentExecutions ?? []).map((e: Record<string, unknown>) => e.account_id as string),
@@ -171,7 +317,64 @@ Deno.serve(async (req: Request): Promise<Response> => {
     })
   }
 
-  // ── Execute ─────────────────────────────────────────────
+  // ── Semi-automated: create pending_approval, do NOT launch actions ──
+
+  const isSemiAutomated = playbook.playbook_type === 'semi_automated'
+
+  if (isSemiAutomated) {
+    const finalAccountIds = finalAccounts.map((a: Record<string, unknown>) => a.id as string)
+    const sortedActions = (playbook.actions as PlaybookAction[]).sort((a, b) => a.order - b.order)
+    const actionTypes = sortedActions.map((a) => a.type)
+
+    const pendingLog = buildPendingApprovalLog(
+      finalAccountIds,
+      sortedActions,
+    )
+
+    const { data: execution, error: execError } = await supabase
+      .from('playbook_executions')
+      .insert({
+        organization_id: body.organization_id,
+        playbook_id: body.playbook_id,
+        execution_status: 'pending_approval',
+        execution_source: body.execution_source ?? 'manual',
+        execution_log: pendingLog,
+        accounts_targeted: finalAccounts.length,
+        started_at: new Date().toISOString(),
+      })
+      .select('id')
+      .single()
+
+    if (execError || !execution) {
+      logger.error('Failed to create pending_approval execution', { error: execError?.message })
+      return errorResponse('Failed to create execution', 500)
+    }
+
+    // Slack notification for pending approval (fire-and-forget)
+    const frontendUrl = Deno.env.get('FRONTEND_URL') ?? ''
+    const slackMsg = buildApprovalSlackMessage(
+      playbook.title,
+      finalAccounts.length,
+      actionTypes,
+      frontendUrl,
+      body.playbook_id,
+      execution.id,
+    )
+    await alertSlack(slackMsg, { level: 'info' })
+
+    logger.info('Semi-automated execution created, pending approval', {
+      execution_id: execution.id,
+      accounts_count: finalAccounts.length,
+    })
+
+    return jsonResponse({
+      execution_id: execution.id,
+      status: 'pending_approval',
+      accounts_count: finalAccounts.length,
+    })
+  }
+
+  // ── Execute (automated / manual) ──────────────────────
 
   const isWorkflow = playbook.is_workflow === true
   const actions = (playbook.actions as PlaybookAction[]).sort((a, b) => a.order - b.order)
@@ -207,6 +410,30 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (profiles && profiles.length > 0) {
       csmEmail = profiles[0].email || ''
       csmName = profiles[0].full_name || ''
+    }
+  }
+
+  // ── Pre-resolve HubSpot credentials if any action needs it ──
+  const hasCreateTaskAction = actions.some((a) => a.type === 'create_task')
+  let hubspotToken: string | null = null
+  let hubspotConnected = false
+
+  if (hasCreateTaskAction) {
+    const { data: hsIntegration } = await supabase
+      .from('organization_integrations')
+      .select('vault_access_token_id, provider_account_id, integration_method')
+      .eq('organization_id', body.organization_id)
+      .eq('provider', 'hubspot')
+      .eq('is_active', true)
+      .maybeSingle()
+
+    if (hsIntegration?.vault_access_token_id) {
+      hubspotToken = await getVaultSecret(supabase, hsIntegration.vault_access_token_id)
+      hubspotConnected = hubspotToken !== null
+    }
+
+    if (!hubspotConnected) {
+      logger.info('HubSpot not connected — create_task actions will be skipped')
     }
   }
 
@@ -340,6 +567,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
         let failedSteps = 0
 
         for (const action of actions) {
+          // ── create_task: real HubSpot CRM task creation ──
+          if (action.type === 'create_task') {
+            const taskResult = await handleCreateTaskAction(
+              supabase, action, acc, body.organization_id,
+              hubspotConnected, hubspotToken, logger,
+            )
+            actionResults.push(taskResult)
+            if (taskResult.status === 'completed') completedSteps++
+            else if (taskResult.status === 'failed') failedSteps++
+            continue
+          }
+
           const result = executeAction(action, acc, {
             playbookId: body.playbook_id,
             executionId: execution.id,
