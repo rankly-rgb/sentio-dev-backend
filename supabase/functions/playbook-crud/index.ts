@@ -363,28 +363,36 @@ async function handleGetOne(supabase: SupabaseClient, id: string, authOrgId: str
 
   const eligibleAccountsSummary = buildEligibleAccountsSummary(eligibleAccountRows)
 
-  // Build unified response — single "eligible_accounts" block, no duplication
+  // Backwards-compatible flat response + new structured fields
   return jsonResponse({
-    playbook: {
-      id: playbook.id,
-      title: playbook.title,
-      description: playbook.description,
-      status: playbook.status,
-      priority: playbook.priority,
-      playbook_type: playbook.playbook_type,
-      template_category: playbook.template_category,
-      is_automated: playbook.is_automated,
-      requires_approval: playbook.requires_approval,
-      is_template: playbook.is_template,
-      execution_frequency: playbook.execution_frequency,
-      last_executed_at: playbook.last_executed_at,
-      created_at: playbook.created_at,
-      updated_at: playbook.updated_at,
+    // Flat playbook fields (legacy — frontend reads data.title, data.status, etc.)
+    ...playbook,
+    // Legacy execution_stats format (frontend reads data.execution_stats.total_executions)
+    execution_stats: {
+      total_executions: executionList.length,
+      completed: completedCount,
+      failed: failedCount,
+      running: executionList.filter(e => e.execution_status === 'running').length,
+      pending: executionList.filter(e => e.execution_status === 'pending').length,
+      in_progress: inProgressCount,
+      targeted_count: uniqueAccounts.size,
+      reached_count: reachedAccounts.size,
+      converted_count: convertedAccounts.size,
+      mrr_recovered_cents: mrrRecovered,
+      mrr_expansion_cents: mrrExpansion,
+      last_executed_at: executionList.length > 0
+        ? executionList
+            .filter(e => e.executed_at)
+            .sort((a, b) => (b.executed_at as string).localeCompare(a.executed_at as string))
+            [0]?.executed_at ?? null
+        : null,
     },
+    // Legacy eligible count (frontend reads data.current_eligible_count)
+    current_eligible_count: eligibleAccountRows.length,
+    // New structured fields for updated frontend
     eligible_accounts: eligibleAccountsSummary,
-    execution_stats: executionStats,
-    conditions: buildConditionsDisplay(playbook.eligibility_criteria),
-    actions: buildActionsDisplay(playbook.actions),
+    conditions_display: buildConditionsDisplay(playbook.eligibility_criteria),
+    actions_display: buildActionsDisplay(playbook.actions),
     eligible_accounts_list: eligibleAccountRows,
   })
 }
