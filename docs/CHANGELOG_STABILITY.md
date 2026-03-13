@@ -941,6 +941,70 @@ Les 3 actions playbook les plus courantes passent de log-only a fonctionnelles. 
 
 ---
 
+## Playbook Detail Backend v2 — Réponse unifiée + RPC comptes éligibles (2026-03-13)
+
+Correction du bug des deux blocs "Comptes concernés" dans la page detail playbook. Le CRUD GET /:id construisait sa propre réponse séparément de la RPC `get_playbook_full_detail`, causant potentiellement deux sections distinctes côté frontend.
+
+**Migration `20260313000001_get_playbook_eligible_accounts_rpc.sql` :**
+- RPC `get_playbook_eligible_accounts(p_playbook_id, p_limit, p_offset)` SECURITY DEFINER
+- Retourne les comptes individuels : account_id, stripe_customer_id, mrr_cents, churn_risk_score, health_score, expansion_score, urgency
+- Urgence FR : `urgent` (churn >= 70), `surveiller` (40-69), `stable` (< 40)
+- Même logique SQL de filtrage eligibility_criteria que `get_playbook_full_detail`
+- Pagination : default 200, max 10000
+- Cross-tenant : vérification explicite `user_organization_id()`
+- Zero-PII : uniquement stripe_customer_id et scores, pas d'email/nom
+
+**CRUD GET /:id — réponse structurée unifiée :**
+- Avant : réponse plate `{...playbook, execution_stats, current_eligible_count}`
+- Après : réponse structurée unique avec 6 blocs :
+  - `playbook` : 14 champs core (id, title, status, priority, playbook_type, etc.)
+  - `eligible_accounts` : summary (total, mrr_at_risk_cents, urgent_count, surveiller_count, stable_count)
+  - `execution_stats` : 9 métriques (total, completed, failed, in_progress, targeted/reached/converted counts, mrr_recovered/expansion)
+  - `conditions` : labels français lisibles (via `buildConditionsDisplay`)
+  - `actions` : labels français avec détails (via `buildActionsDisplay`)
+  - `eligible_accounts_list` : comptes individuels avec urgence pour le tableau frontend
+- Fix : `.single()` → `.maybeSingle()` (prévention crash)
+- Fix : ajout filtre `organization_id` sur query executions (sécurité cross-tenant)
+
+**Shared helpers `_shared/playbook-detail-helpers.ts` (enrichi) :**
+- `classifyUrgencyFr(churnRiskScore)` : mêmes seuils que `classifyUrgency` mais labels FR (urgent/surveiller/stable)
+- `buildEligibleAccountRow(account)` : transforme un compte brut en `EligibleAccountRow` Zero-PII
+- `buildEligibleAccountsSummary(accounts)` : summary avec urgent_count, surveiller_count, stable_count
+- Types : `UrgencyLevelFr`, `EligibleAccountRow`, `EligibleAccountsSummary`
+
+**Contrat API frontend :**
+```json
+GET /functions/v1/playbook-crud?id=<playbook_id>
+
+{
+  "playbook": { "id", "title", "status", "priority", "playbook_type", ... },
+  "eligible_accounts": {
+    "total": 12,
+    "mrr_at_risk_cents": 450000,
+    "urgent_count": 3,
+    "surveiller_count": 5,
+    "stable_count": 4
+  },
+  "execution_stats": {
+    "total": 25, "completed": 20, "failed": 3, "in_progress": 2,
+    "targeted_count": 15, "reached_count": 12, "converted_count": 5,
+    "mrr_recovered_cents": 120000, "mrr_expansion_cents": 80000
+  },
+  "conditions": [{ "field": "churn_risk_score", "operator": "gte", "value": 70, "label": "Score de risque churn ≥ 70" }],
+  "actions": [{ "step": 1, "type": "slack_notify", "label": "Notification Slack", "detail": "#cs-team" }],
+  "eligible_accounts_list": [
+    { "account_id": "uuid", "stripe_customer_id": "cus_xxx", "mrr_cents": 49900, "churn_risk_score": 84, "health_score": 28, "expansion_score": 12, "urgency": "urgent" }
+  ]
+}
+```
+
+**Tests : 16 nouveaux tests (767 total) :**
+- classifyUrgencyFr : urgent/surveiller/stable, null, boundaries 70/69 et 40/39 (6 tests)
+- buildEligibleAccountRow : id field, account_id field, null values, pre-computed urgency, Zero-PII (5 tests)
+- buildEligibleAccountsSummary : mixed urgency, empty, null mrr, same urgency, fallback classifyUrgencyFr (5 tests)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`
