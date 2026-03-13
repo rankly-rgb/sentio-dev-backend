@@ -28,6 +28,13 @@ import {
   type ExecutionFrequency,
 } from '../_shared/playbook-engine.ts'
 import { canApprove, canReject, isPlaybookMatch, buildApprovalLog } from '../_shared/playbook-approval-helpers.ts'
+import {
+  buildConditionsDisplay,
+  buildActionsDisplay,
+  buildEligibleAccountsSummary,
+  buildEligibleAccountRow,
+  type EligibleAccountRow,
+} from '../_shared/playbook-detail-helpers.ts'
 
 // ── Entrypoint ──────────────────────────────────────────────
 
@@ -283,49 +290,103 @@ async function handleGetOne(supabase: SupabaseClient, id: string, authOrgId: str
     .select('*')
     .eq('id', id)
     .eq('organization_id', authOrgId)
-    .single()
+    .maybeSingle()
 
   if (error || !playbook) return errorResponse('Playbook not found', 404)
 
   // Fetch execution stats (limited to last 500 to prevent memory issues)
   const { data: executions } = await supabase
     .from('playbook_executions')
-    .select('execution_status, executed_at')
+    .select('execution_status, account_id, account_converted, mrr_recovered_cents, mrr_expansion_cents, executed_at')
     .eq('playbook_id', id)
+    .eq('organization_id', authOrgId)
     .order('executed_at', { ascending: false })
     .limit(500)
 
-  const executionList = executions ?? []
-  const stats = {
-    total_executions: executionList.length,
-    completed: executionList.filter((e: Record<string, unknown>) => e.execution_status === 'completed').length,
-    failed: executionList.filter((e: Record<string, unknown>) => e.execution_status === 'failed').length,
-    running: executionList.filter((e: Record<string, unknown>) => e.execution_status === 'running').length,
-    pending: executionList.filter((e: Record<string, unknown>) => e.execution_status === 'pending').length,
-    last_executed_at: executionList.length > 0
-      ? executionList
-          .filter((e: Record<string, unknown>) => e.executed_at)
-          .sort((a: Record<string, unknown>, b: Record<string, unknown>) =>
-            (b.executed_at as string).localeCompare(a.executed_at as string))
-          [0]?.executed_at ?? null
-      : null,
+  const executionList = (executions ?? []) as Array<{
+    execution_status: string
+    account_id: string
+    account_converted?: boolean | null
+    mrr_recovered_cents?: number | null
+    mrr_expansion_cents?: number | null
+    executed_at?: string | null
+  }>
+
+  // Compute execution stats
+  const uniqueAccounts = new Set<string>()
+  const reachedAccounts = new Set<string>()
+  const convertedAccounts = new Set<string>()
+  let mrrRecovered = 0
+  let mrrExpansion = 0
+  let completedCount = 0
+  let failedCount = 0
+  let inProgressCount = 0
+
+  for (const exec of executionList) {
+    uniqueAccounts.add(exec.account_id)
+    if (exec.execution_status === 'completed' || exec.execution_status === 'running' || exec.execution_status === 'partially_completed') {
+      reachedAccounts.add(exec.account_id)
+    }
+    if (exec.execution_status === 'completed') completedCount++
+    else if (exec.execution_status === 'failed') failedCount++
+    else if (exec.execution_status === 'running' || exec.execution_status === 'pending') inProgressCount++
+    if (exec.account_converted) convertedAccounts.add(exec.account_id)
+    mrrRecovered += exec.mrr_recovered_cents ?? 0
+    mrrExpansion += exec.mrr_expansion_cents ?? 0
   }
 
-  // Compute current eligible count
-  let currentEligibleCount = 0
+  const executionStats = {
+    total: executionList.length,
+    completed: completedCount,
+    failed: failedCount,
+    in_progress: inProgressCount,
+    targeted_count: uniqueAccounts.size,
+    reached_count: reachedAccounts.size,
+    converted_count: convertedAccounts.size,
+    mrr_recovered_cents: mrrRecovered,
+    mrr_expansion_cents: mrrExpansion,
+  }
+
+  // Compute eligible accounts using in-memory evaluation (same as list endpoint)
+  let eligibleAccountRows: EligibleAccountRow[] = []
   if (playbook.eligibility_criteria) {
     const { data: accounts } = await supabase
       .from('accounts')
-      .select('id, organization_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
+      .select('id, stripe_customer_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
       .eq('organization_id', authOrgId)
       .limit(10000)
 
     const eligible = (accounts ?? []).filter((a: Record<string, unknown>) =>
       evaluateConditions(playbook.eligibility_criteria, a))
-    currentEligibleCount = eligible.length
+    eligibleAccountRows = eligible.map((a: Record<string, unknown>) => buildEligibleAccountRow(a as Record<string, unknown> & { id: string }))
   }
 
-  return jsonResponse({ ...playbook, execution_stats: stats, current_eligible_count: currentEligibleCount })
+  const eligibleAccountsSummary = buildEligibleAccountsSummary(eligibleAccountRows)
+
+  // Build unified response — single "eligible_accounts" block, no duplication
+  return jsonResponse({
+    playbook: {
+      id: playbook.id,
+      title: playbook.title,
+      description: playbook.description,
+      status: playbook.status,
+      priority: playbook.priority,
+      playbook_type: playbook.playbook_type,
+      template_category: playbook.template_category,
+      is_automated: playbook.is_automated,
+      requires_approval: playbook.requires_approval,
+      is_template: playbook.is_template,
+      execution_frequency: playbook.execution_frequency,
+      last_executed_at: playbook.last_executed_at,
+      created_at: playbook.created_at,
+      updated_at: playbook.updated_at,
+    },
+    eligible_accounts: eligibleAccountsSummary,
+    execution_stats: executionStats,
+    conditions: buildConditionsDisplay(playbook.eligibility_criteria),
+    actions: buildActionsDisplay(playbook.actions),
+    eligible_accounts_list: eligibleAccountRows,
+  })
 }
 
 // ── UPDATE ──────────────────────────────────────────────────

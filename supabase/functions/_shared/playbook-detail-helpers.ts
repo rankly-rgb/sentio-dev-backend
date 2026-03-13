@@ -9,6 +9,9 @@ import type { PlaybookAction, ConditionGroup, Condition } from './playbook-engin
 
 export type UrgencyLevel = 'urgent' | 'watch' | 'stable'
 
+/** French urgency labels for the eligible accounts RPC */
+export type UrgencyLevelFr = 'urgent' | 'surveiller' | 'stable'
+
 export type PlaybookStatusValue = 'draft' | 'active' | 'paused' | 'completed' | 'archived'
 
 export interface ConditionDisplay {
@@ -60,6 +63,24 @@ export interface ExecutionStats {
 export interface AccountForSummary {
   churn_risk_score: number | null
   mrr_cents: number | null
+}
+
+export interface EligibleAccountRow {
+  account_id: string
+  stripe_customer_id: string | null
+  mrr_cents: number | null
+  churn_risk_score: number | null
+  health_score: number | null
+  expansion_score: number | null
+  urgency: UrgencyLevelFr
+}
+
+export interface EligibleAccountsSummary {
+  total: number
+  mrr_at_risk_cents: number
+  urgent_count: number
+  surveiller_count: number
+  stable_count: number
 }
 
 // ── Allowed transitions ──────────────────────────────────────
@@ -295,5 +316,68 @@ export function computeExecutionStats(
     executions_completed: completed,
     executions_failed: failed,
     executions_in_progress: inProgress,
+  }
+}
+
+// ── French urgency classification (aligned with RPC) ────────
+
+/**
+ * Classifie un compte par urgence avec labels français.
+ * Mêmes seuils que classifyUrgency (>=70, >=40, <40) mais labels FR.
+ */
+export function classifyUrgencyFr(churnRiskScore: number | null): UrgencyLevelFr {
+  if (churnRiskScore === null || churnRiskScore === undefined) return 'stable'
+  if (churnRiskScore >= 70) return 'urgent'
+  if (churnRiskScore >= 40) return 'surveiller'
+  return 'stable'
+}
+
+/**
+ * Construit le résumé des comptes éligibles pour la réponse unifiée.
+ */
+export function buildEligibleAccountsSummary(
+  accounts: EligibleAccountRow[],
+): EligibleAccountsSummary {
+  const summary: EligibleAccountsSummary = {
+    total: accounts.length,
+    mrr_at_risk_cents: 0,
+    urgent_count: 0,
+    surveiller_count: 0,
+    stable_count: 0,
+  }
+
+  for (const account of accounts) {
+    summary.mrr_at_risk_cents += account.mrr_cents ?? 0
+    const urgency = account.urgency || classifyUrgencyFr(account.churn_risk_score)
+    if (urgency === 'urgent') summary.urgent_count++
+    else if (urgency === 'surveiller') summary.surveiller_count++
+    else summary.stable_count++
+  }
+
+  return summary
+}
+
+/**
+ * Transforme un compte brut en EligibleAccountRow.
+ * Zero-PII : uniquement stripe_customer_id et scores.
+ */
+export function buildEligibleAccountRow(account: {
+  account_id?: string
+  id?: string
+  stripe_customer_id?: string | null
+  mrr_cents?: number | null
+  churn_risk_score?: number | null
+  health_score?: number | null
+  expansion_score?: number | null
+  urgency?: string
+}): EligibleAccountRow {
+  return {
+    account_id: (account.account_id || account.id || '') as string,
+    stripe_customer_id: account.stripe_customer_id ?? null,
+    mrr_cents: account.mrr_cents ?? null,
+    churn_risk_score: account.churn_risk_score ?? null,
+    health_score: account.health_score ?? null,
+    expansion_score: account.expansion_score ?? null,
+    urgency: (account.urgency as UrgencyLevelFr) || classifyUrgencyFr(account.churn_risk_score ?? null),
   }
 }
