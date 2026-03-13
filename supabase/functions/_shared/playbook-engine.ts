@@ -28,6 +28,7 @@ export const VALID_ACTION_TYPES = [
   'schedule_review',
   'flag_for_review',
   'send_email',
+  'send_email_hubspot',
 ] as const
 
 export type PlaybookActionType = typeof VALID_ACTION_TYPES[number]

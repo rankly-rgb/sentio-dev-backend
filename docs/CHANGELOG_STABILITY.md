@@ -1005,6 +1005,42 @@ GET /functions/v1/playbook-crud?id=<playbook_id>
 
 ---
 
+## Action send_email_hubspot v1 (2026-03-13)
+
+Envoi d'emails via HubSpot API pour les playbooks. Zero-PII : Sentio envoie uniquement le `hubspot_company_id` + scores, HubSpot resout le contact et envoie l'email. Sentio ne voit jamais l'adresse email.
+
+**Shared helpers `_shared/hubspot-email-helpers.ts` (NOUVEAU) :**
+- `substituteEmailVars(template, vars)` : substitution de variables ({health_score}, {churn_risk}, {mrr_eur}, {playbook}, etc.)
+- `buildHubSpotEmailBody(input, vars)` : body pour POST /crm/v3/objects/emails
+- `buildEmailAssociationBody(emailId, companyId)` : association type 186 (email_to_company)
+- `parseHubSpotEmailId(response)` : extraction ID depuis reponse HubSpot
+- `buildDefaultEmailSubject(playbookTitle)` : sujet par defaut
+- `buildDefaultEmailBody(vars, playbookTitle)` : body HTML par defaut avec metriques
+
+**`_shared/hubspot-actions.ts` — 2 nouvelles fonctions :**
+- `sendHubSpotEmail(token, input, vars)` : POST /crm/v3/objects/emails + fetchWithTimeout(8s)
+- `associateEmailToCompany(token, emailId, hubspotCompanyId)` : v4 associations batch/create
+
+**`_shared/playbook-engine.ts` :**
+- `send_email_hubspot` ajoute a `VALID_ACTION_TYPES`
+
+**`playbook-execute/index.ts` — handler `handleSendEmailHubspotAction` :**
+- Meme pattern que `handleCreateTaskAction` : pre-resolve credentials → lookup hubspot_company_id → API call → associate → DLQ on failure
+- Config attendue : `{ subject?: string, body_html?: string }`
+- Degradation gracieuse : HubSpot non connecte → skip | hubspot_company_id absent → skip
+- DLQ provider `hubspot`, event_type `hubspot_email_send_failed`
+- Template variable substitution dans subject et body
+
+**Tests : 21 nouveaux tests (788 total) :**
+- substituteEmailVars : all vars, null, empty, undefined, aliases, multiple occurrences (7 tests)
+- buildHubSpotEmailBody : structure, substitution, custom direction (3 tests)
+- buildEmailAssociationBody : structure + type 186 (1 test)
+- parseHubSpotEmailId : valid, missing, non-string, null, undefined (5 tests)
+- buildDefaultEmailSubject : includes playbook title (1 test)
+- buildDefaultEmailBody : all metrics, null scores, no PII, attribution (4 tests)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`

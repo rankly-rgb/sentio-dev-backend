@@ -218,6 +218,7 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   schedule_review: 'Planifier une revue',
   flag_for_review: 'Signaler pour revue',
   send_email: 'Envoyer un email',
+  send_email_hubspot: 'Email via HubSpot',
 }
 
 function buildActionDetail(action: PlaybookAction): string {
@@ -240,6 +241,8 @@ function buildActionDetail(action: PlaybookAction): string {
       return config.delay_days ? `dans ${config.delay_days} jours` : ''
     case 'send_email':
       return String(config.email_subject || '')
+    case 'send_email_hubspot':
+      return String(config.subject || config.email_subject || '')
     default:
       return ''
   }

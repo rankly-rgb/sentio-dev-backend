@@ -52,7 +52,8 @@ import {
   buildNoteEntry,
   type FlagEntry,
 } from '../_shared/playbook-actions-helpers.ts'
-import { createHubSpotTask, associateTaskToCompany } from '../_shared/hubspot-actions.ts'
+import { createHubSpotTask, associateTaskToCompany, sendHubSpotEmail, associateEmailToCompany } from '../_shared/hubspot-actions.ts'
+import { buildDefaultEmailSubject, buildDefaultEmailBody, type EmailTemplateVars } from '../_shared/hubspot-email-helpers.ts'
 import { getVaultSecret } from '../_shared/vault.ts'
 import { writeToDLQ } from '../_shared/dlq.ts'
 
@@ -181,6 +182,123 @@ async function handleCreateTaskAction(
       order: action.order,
       status: 'failed',
       message: `HubSpot task creation failed: ${errorMsg}`,
+      executed_at: now,
+    }
+  }
+}
+
+// ── HubSpot send_email_hubspot handler ──────────────────────
+
+/**
+ * Handles the send_email_hubspot action by creating a HubSpot email engagement
+ * and associating it to the company. HubSpot resolves the contact and sends.
+ * Zero-PII: Sentio sends only hubspot_company_id + scores.
+ */
+async function handleSendEmailHubspotAction(
+  supabase: SupabaseClient,
+  action: PlaybookAction,
+  account: AccountData,
+  orgId: string,
+  playbookTitle: string,
+  hubspotConnected: boolean,
+  hubspotToken: string | null,
+  logger: ReturnType<typeof createLogger>,
+): Promise<ActionResult> {
+  const now = new Date().toISOString()
+
+  if (!hubspotConnected || !hubspotToken) {
+    return {
+      action_type: 'send_email_hubspot',
+      order: action.order,
+      status: 'skipped',
+      message: 'HubSpot not connected — email sending skipped',
+      executed_at: now,
+    }
+  }
+
+  // Look up the hubspot_company_id for this account
+  const { data: hubspotLink } = await supabase
+    .from('hubspot_companies')
+    .select('hubspot_company_id')
+    .eq('organization_id', orgId)
+    .eq('account_id', account.id)
+    .maybeSingle()
+
+  if (!hubspotLink?.hubspot_company_id) {
+    return {
+      action_type: 'send_email_hubspot',
+      order: action.order,
+      status: 'skipped',
+      message: `No HubSpot company linked to account ${account.id}`,
+      executed_at: now,
+    }
+  }
+
+  try {
+    const config = (action.config ?? {}) as { subject?: string; body_html?: string; email_type?: string }
+
+    const vars: EmailTemplateVars = {
+      stripe_customer_id: (account as unknown as Record<string, unknown>).stripe_customer_id as string | null,
+      health_score: account.health_score,
+      churn_risk_score: account.churn_risk_score,
+      expansion_score: account.expansion_score,
+      mrr_cents: account.mrr_cents,
+      playbook_title: playbookTitle,
+    }
+
+    const subject = config.subject || buildDefaultEmailSubject(playbookTitle)
+    const bodyHtml = config.body_html || buildDefaultEmailBody(vars, playbookTitle)
+
+    const result = await sendHubSpotEmail(hubspotToken, {
+      subject,
+      body_html: bodyHtml,
+    }, vars)
+
+    // Associate email to company (non-critical)
+    try {
+      await associateEmailToCompany(hubspotToken, result.emailId, hubspotLink.hubspot_company_id)
+      result.associationSuccess = true
+    } catch (assocErr) {
+      logger.error('HubSpot email association failed (non-critical)', {
+        email_id: result.emailId,
+        company_id: hubspotLink.hubspot_company_id,
+        error: assocErr instanceof Error ? assocErr.message : String(assocErr),
+      })
+    }
+
+    return {
+      action_type: 'send_email_hubspot',
+      order: action.order,
+      status: 'completed',
+      message: `HubSpot email created (id: ${result.emailId}, associated: ${result.associationSuccess})`,
+      executed_at: now,
+    }
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err)
+
+    await writeToDLQ(supabase, {
+      organization_id: orgId,
+      provider: 'hubspot',
+      event_type: 'hubspot_email_send_failed',
+      payload: {
+        account_id: account.id,
+        hubspot_company_id: hubspotLink.hubspot_company_id,
+        subject: (action.config?.subject as string) ?? '(default)',
+        error: errorMsg,
+      },
+      error_message: errorMsg,
+    })
+
+    logger.error('HubSpot email send failed', {
+      account_id: account.id,
+      error: errorMsg,
+    })
+
+    return {
+      action_type: 'send_email_hubspot',
+      order: action.order,
+      status: 'failed',
+      message: `HubSpot email send failed: ${errorMsg}`,
       executed_at: now,
     }
   }
@@ -421,11 +539,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   // ── Pre-resolve HubSpot credentials if any action needs it ──
-  const hasCreateTaskAction = actions.some((a) => a.type === 'create_task')
+  const hasHubspotAction = actions.some((a) => a.type === 'create_task' || a.type === 'send_email_hubspot')
   let hubspotToken: string | null = null
   let hubspotConnected = false
 
-  if (hasCreateTaskAction) {
+  if (hasHubspotAction) {
     const { data: hsIntegration } = await supabase
       .from('organization_integrations')
       .select('vault_access_token_id, provider_account_id, integration_method')
@@ -440,7 +558,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
 
     if (!hubspotConnected) {
-      logger.info('HubSpot not connected — create_task actions will be skipped')
+      logger.info('HubSpot not connected — create_task/send_email_hubspot actions will be skipped')
     }
   }
 
@@ -601,6 +719,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
             actionResults.push(taskResult)
             if (taskResult.status === 'completed') completedSteps++
             else if (taskResult.status === 'failed') failedSteps++
+            continue
+          }
+
+          // ── send_email_hubspot: HubSpot email via company association ──
+          if (action.type === 'send_email_hubspot') {
+            const emailResult = await handleSendEmailHubspotAction(
+              supabase, action, acc, body.organization_id, playbook.title,
+              hubspotConnected, hubspotToken, logger,
+            )
+            actionResults.push(emailResult)
+            if (emailResult.status === 'completed') completedSteps++
+            else if (emailResult.status === 'failed') failedSteps++
             continue
           }
 
