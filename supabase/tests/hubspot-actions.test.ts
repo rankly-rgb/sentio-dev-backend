@@ -94,11 +94,11 @@ describe('buildAssociationBody', () => {
     expect(result.inputs[0].to.id).toBe('company-456')
   })
 
-  it('should use associationTypeId 204 (task_to_company)', () => {
+  it('should use associationTypeId 192 (task_to_company, verified via HubSpot v4 labels API)', () => {
     const result = buildAssociationBody('task-123', 'company-456')
 
     expect(result.inputs[0].types).toHaveLength(1)
-    expect(result.inputs[0].types[0].associationTypeId).toBe(204)
+    expect(result.inputs[0].types[0].associationTypeId).toBe(192)
     expect(result.inputs[0].types[0].associationCategory).toBe('HUBSPOT_DEFINED')
   })
 

@@ -19,8 +19,8 @@ export interface HubSpotTaskResult {
   associationSuccess: boolean
 }
 
-/** Association type ID for task-to-company in HubSpot v4 API */
-const TASK_TO_COMPANY_ASSOCIATION_TYPE_ID = 204
+/** Association type ID for task-to-company in HubSpot v4 API (verified via /crm/v4/associations/tasks/companies/labels) */
+const TASK_TO_COMPANY_ASSOCIATION_TYPE_ID = 192
 
 /**
  * Builds the HubSpot API request body for creating a CRM task.
@@ -50,7 +50,7 @@ export function buildHubSpotTaskBody(
 
 /**
  * Builds the HubSpot v4 associations batch/create request body.
- * Links a task to a company using association type 204 (task_to_company).
+ * Links a task to a company using association type 192 (task_to_company).
  *
  * @param taskId - HubSpot task ID (from task creation response)
  * @param companyId - HubSpot company ID to associate with
