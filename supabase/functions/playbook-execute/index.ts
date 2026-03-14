@@ -411,10 +411,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
     accounts = data
   } else {
+    // Resolve segment: accept UUID or slug (e.g. "en_danger_critique")
+    let resolvedSegmentId = body.segment_id!
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    if (!UUID_REGEX.test(resolvedSegmentId)) {
+      // Slug passed — resolve to UUID from account_segments
+      const { data: segment } = await supabase
+        .from('account_segments')
+        .select('id')
+        .eq('segment_type', resolvedSegmentId)
+        .eq('organization_id', body.organization_id)
+        .maybeSingle()
+
+      if (!segment) {
+        logger.info('Segment not found', { segment_slug: resolvedSegmentId })
+        return jsonResponse({ success: true, message: 'Segment not found', executions_created: 0 })
+      }
+      resolvedSegmentId = segment.id
+    }
+
     const { data: memberships } = await supabase
       .from('segment_memberships')
       .select('account_id')
-      .eq('segment_id', body.segment_id!)
+      .eq('segment_id', resolvedSegmentId)
       .eq('organization_id', body.organization_id)
       .eq('status', 'active')
       .limit(MAX_ACCOUNTS_PER_RUN)
