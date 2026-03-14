@@ -65,7 +65,55 @@ async function ensureProfile(userClient: ReturnType<typeof createServerClient>) 
       .eq('auth_user_id', user.id)
       .maybeSingle()
 
-    if (existing) return // Profile exists, nothing to do
+    // Profile exists with valid org — nothing to do
+    if (existing?.organization_id) return
+
+    // Profile exists but organization_id is NULL — try to repair it
+    if (existing && !existing.organization_id) {
+      // Look for invitation first
+      const { data: inv } = await serviceClient
+        .from('invitations')
+        .select('id, organization_id, role')
+        .eq('email', user.email)
+        .is('accepted_at', null)
+        .gt('expires_at', new Date().toISOString())
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      let orgId = inv?.organization_id ?? null
+
+      // Fallback: first active organization (beta single-org mode)
+      if (!orgId) {
+        const { data: defaultOrg } = await serviceClient
+          .from('organizations')
+          .select('id')
+          .eq('is_active', true)
+          .order('created_at', { ascending: true })
+          .limit(1)
+          .maybeSingle()
+        orgId = defaultOrg?.id ?? null
+      }
+
+      if (orgId) {
+        const updateFields: Record<string, unknown> = { organization_id: orgId }
+        if (inv?.role) updateFields.role = inv.role
+        await serviceClient
+          .from('profiles_')
+          .update(updateFields)
+          .eq('id', existing.id)
+
+        if (inv?.id) {
+          await serviceClient
+            .from('invitations')
+            .update({ accepted_at: new Date().toISOString() })
+            .eq('id', inv.id)
+        }
+
+        console.log(`[auth/callback] Repaired NULL org_id for user ${user.id} → ${orgId}`)
+      }
+      return
+    }
 
     // Look for a valid invitation to resolve organization_id
     const { data: invitation } = await serviceClient
@@ -78,13 +126,26 @@ async function ensureProfile(userClient: ReturnType<typeof createServerClient>) 
       .limit(1)
       .maybeSingle()
 
+    // Resolve org_id: invitation → fallback to first active org (beta)
+    let newOrgId = invitation?.organization_id ?? null
+    if (!newOrgId) {
+      const { data: defaultOrg } = await serviceClient
+        .from('organizations')
+        .select('id')
+        .eq('is_active', true)
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+      newOrgId = defaultOrg?.id ?? null
+    }
+
     // Create profile with service_role (bypasses RLS)
     await serviceClient
       .from('profiles_')
       .insert({
         auth_user_id: user.id,
         email: user.email,
-        organization_id: invitation?.organization_id ?? null,
+        organization_id: newOrgId,
         role: invitation?.role ?? 'member',
       })
 

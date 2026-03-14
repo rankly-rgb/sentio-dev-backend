@@ -13,6 +13,8 @@ export interface HubSpotEmailInput {
   body_html: string
   /** Email direction — always FORWARDED_EMAIL for automated sends */
   email_direction?: 'FORWARDED_EMAIL' | 'INCOMING_EMAIL' | 'EMAIL'
+  /** Email status — DRAFT creates a draft the CSM can review, SEND logs as sent. Default: DRAFT */
+  email_status?: 'DRAFT' | 'SEND'
 }
 
 /** Result of a HubSpot email engagement creation */
@@ -88,7 +90,7 @@ export function buildHubSpotEmailBody(
       hs_email_direction: input.email_direction ?? 'FORWARDED_EMAIL',
       hs_email_subject: subject,
       hs_email_html: bodyHtml,
-      hs_email_status: 'SEND',
+      hs_email_status: input.email_status ?? 'DRAFT',
     },
   }
 }

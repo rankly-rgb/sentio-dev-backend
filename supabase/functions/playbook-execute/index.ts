@@ -64,6 +64,7 @@ interface ExecutePayload {
   organization_id: string
   account_ids?: string[]
   segment_id?: string
+  target_mode?: 'accounts' | 'segment' | 'eligible'
   execution_source?: string
   cooldown_hours?: number
 }
@@ -235,7 +236,7 @@ async function handleSendEmailHubspotAction(
   }
 
   try {
-    const config = (action.config ?? {}) as { subject?: string; body_html?: string; email_type?: string }
+    const config = (action.config ?? {}) as { subject?: string; body_html?: string; email_type?: string; email_status?: 'DRAFT' | 'SEND' }
 
     const vars: EmailTemplateVars = {
       stripe_customer_id: (account as unknown as Record<string, unknown>).stripe_customer_id as string | null,
@@ -252,6 +253,7 @@ async function handleSendEmailHubspotAction(
     const result = await sendHubSpotEmail(hubspotToken, {
       subject,
       body_html: bodyHtml,
+      email_status: config.email_status ?? 'DRAFT',
     }, vars)
 
     // Associate email to company (non-critical)
@@ -352,8 +354,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (!body.playbook_id || !body.organization_id) {
     return errorResponse('playbook_id and organization_id are required', 400)
   }
-  if (!body.account_ids?.length && !body.segment_id) {
-    return errorResponse('account_ids or segment_id is required', 400)
+  if (!body.account_ids?.length && !body.segment_id && body.target_mode !== 'eligible') {
+    return errorResponse('account_ids, segment_id or target_mode=eligible is required', 400)
   }
 
   // ── Fetch playbook ──────────────────────────────────────
@@ -374,10 +376,28 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // ── Resolve target accounts ─────────────────────────────
 
-  let accountIds: string[]
+  const ACCOUNT_SELECT = 'id, organization_id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at'
 
-  if (body.account_ids?.length) {
-    accountIds = body.account_ids.slice(0, MAX_ACCOUNTS_PER_RUN)
+  let accounts: Record<string, unknown>[] | null = null
+
+  if (body.target_mode === 'eligible') {
+    // Fetch all org accounts and filter by eligibility_criteria in-memory
+    const { data } = await supabase
+      .from('accounts')
+      .select(ACCOUNT_SELECT)
+      .eq('organization_id', body.organization_id)
+      .limit(10000)
+
+    accounts = data
+  } else if (body.account_ids?.length) {
+    const accountIds = body.account_ids.slice(0, MAX_ACCOUNTS_PER_RUN)
+    const { data } = await supabase
+      .from('accounts')
+      .select(ACCOUNT_SELECT)
+      .eq('organization_id', body.organization_id)
+      .in('id', accountIds)
+
+    accounts = data
   } else {
     const { data: memberships } = await supabase
       .from('segment_memberships')
@@ -387,21 +407,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq('status', 'active')
       .limit(MAX_ACCOUNTS_PER_RUN)
 
-    accountIds = (memberships ?? []).map((m: Record<string, unknown>) => m.account_id as string)
+    const accountIds = (memberships ?? []).map((m: Record<string, unknown>) => m.account_id as string)
+
+    if (accountIds.length === 0) {
+      logger.info('No target accounts found in segment')
+      return jsonResponse({ success: true, message: 'No eligible accounts', executions_created: 0 })
+    }
+
+    const { data } = await supabase
+      .from('accounts')
+      .select(ACCOUNT_SELECT)
+      .eq('organization_id', body.organization_id)
+      .in('id', accountIds)
+
+    accounts = data
   }
-
-  if (accountIds.length === 0) {
-    logger.info('No target accounts found')
-    return jsonResponse({ success: true, message: 'No eligible accounts', executions_created: 0 })
-  }
-
-  // ── Fetch account data ──────────────────────────────────
-
-  const { data: accounts } = await supabase
-    .from('accounts')
-    .select('id, organization_id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
-    .eq('organization_id', body.organization_id)
-    .in('id', accountIds)
 
   if (!accounts?.length) {
     return jsonResponse({ success: true, message: 'No accounts found', executions_created: 0 })
@@ -413,6 +433,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
     ? accounts.filter((a: Record<string, unknown>) =>
         evaluateConditions(playbook.eligibility_criteria, a))
     : accounts
+
+  if (eligibleAccounts.length === 0) {
+    logger.info('No accounts match eligibility criteria', {
+      total_accounts: accounts.length,
+      criteria: JSON.stringify(playbook.eligibility_criteria),
+    })
+    return jsonResponse({ success: true, message: 'No accounts match eligibility criteria', executions_created: 0 })
+  }
 
   // ── Idempotency check ───────────────────────────────────
 

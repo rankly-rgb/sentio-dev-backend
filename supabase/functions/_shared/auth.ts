@@ -60,8 +60,35 @@ export async function verifyUserAuth(req: Request): Promise<AuthResult> {
     .eq('auth_user_id', user.id)
     .maybeSingle()
 
-  if (profileError || !profile?.organization_id) {
-    throw new AuthError('User has no associated organization', 403)
+  if (profileError) {
+    console.error(JSON.stringify({
+      level: 'error',
+      module: 'auth',
+      message: 'Profile query failed',
+      user_id: user.id,
+      error: profileError.message,
+    }))
+    throw new AuthError('Failed to resolve user profile', 500)
+  }
+
+  if (!profile) {
+    console.error(JSON.stringify({
+      level: 'warn',
+      module: 'auth',
+      message: 'No profile found for authenticated user',
+      user_id: user.id,
+    }))
+    throw new AuthError('User profile not found — contact your administrator', 403)
+  }
+
+  if (!profile.organization_id) {
+    console.error(JSON.stringify({
+      level: 'warn',
+      module: 'auth',
+      message: 'Profile exists but organization_id is NULL',
+      user_id: user.id,
+    }))
+    throw new AuthError('User is not assigned to any organization — contact your administrator', 403)
   }
 
   return {

@@ -1041,6 +1041,74 @@ Envoi d'emails via HubSpot API pour les playbooks. Zero-PII : Sentio envoie uniq
 
 ---
 
+## Fix Playbook Execute 0 comptes + Email HubSpot Draft (2026-03-13)
+
+Correction de deux bugs critiques : exécution playbook retournant 0 comptes et emails HubSpot envoyés au lieu de brouillons.
+
+**Bug #1 — 0 comptes traités lors de l'exécution :**
+- Cause racine : `playbook-execute` exigeait `account_ids` ou `segment_id`. Le frontend n'en envoyait aucun.
+- Fix : ajout `target_mode: 'eligible'` dans `ExecutePayload`
+- Quand `target_mode === 'eligible'` : le backend charge tous les comptes de l'org (limit 10000), filtre par `eligibility_criteria` in-memory, applique le cooldown, puis exécute
+- Message explicite quand 0 éligibles : "No accounts match eligibility criteria" (avec log des critères pour debug)
+- Rétro-compatible : les modes `account_ids` et `segment_id` fonctionnent toujours
+
+**Bug #2 — Email HubSpot envoyé au lieu de brouillon :**
+- Cause racine : `hs_email_status: 'SEND'` hardcodé dans `buildHubSpotEmailBody()`
+- Fix : default changé en `'DRAFT'`
+- Nouveau champ `email_status?: 'DRAFT' | 'SEND'` dans `HubSpotEmailInput`
+- L'action `send_email_hubspot` passe `config.email_status` au builder (default: DRAFT)
+- Le CSM voit le brouillon dans la timeline HubSpot et peut le relire/envoyer manuellement
+
+**Fichiers modifiés :**
+- `supabase/functions/playbook-execute/index.ts` : target_mode eligible, refactoring résolution comptes, log critères
+- `supabase/functions/_shared/hubspot-email-helpers.ts` : email_status field, default DRAFT
+- `supabase/tests/hubspot-email.test.ts` : 2 nouveaux tests (DRAFT default, explicit SEND)
+
+**Tests : 790 total (+2) :**
+- buildHubSpotEmailBody default DRAFT (1 test adapté)
+- buildHubSpotEmailBody explicit SEND (1 nouveau)
+- buildHubSpotEmailBody explicit DRAFT (1 nouveau)
+
+**Prompt frontend :** `docs/PROMPT_FRONTEND_PLAYBOOK_EXECUTE_FIX.md`
+
+---
+
+## Fix Profiles NULL org_id — Non-admin users blocked (2026-03-14)
+
+Bug critique : tous les écrans (Insights IA, Comptes, Playbooks, etc.) étaient inaccessibles pour les utilisateurs non-admin. Cause racine : `organization_id = NULL` dans `profiles_`.
+
+**Cause racine :**
+- Le trigger `handle_new_user()` crée un profil avec `organization_id = NULL` quand l'utilisateur s'inscrit sans invitation valide
+- `ensureProfile()` dans le auth callback ne répare pas les profils existants avec org_id NULL (`if (existing) return` — early return sans vérification)
+- `user_organization_id()` retourne NULL → RLS bloque TOUTES les tables → 0 données
+- `verifyUserAuth()` dans les Edge Functions throw 403 avec message générique
+
+**Impact :** Tous les utilisateurs créés sans invitation (ajoutés via Supabase dashboard, OAuth direct, etc.) étaient bloqués sur toutes les pages du dashboard.
+
+**Migration `20260314000001_fix_profiles_null_org_id.sql` :**
+- Backfill : UPDATE profiles_ SET organization_id = première org active WHERE organization_id IS NULL
+- Trigger `handle_new_user()` reécrit : si pas d'invitation, fallback vers première org active (mode beta single-org)
+
+**`_shared/auth.ts` — Messages d'erreur diagnostiques :**
+- 3 cas distincts au lieu d'un message générique :
+  - Profile query failed → 500 + log structuré (user_id, error)
+  - No profile found → 403 "User profile not found"
+  - org_id NULL → 403 "User is not assigned to any organization"
+- Chaque cas logge le `user_id` en JSON structuré pour debugging
+
+**`src/app/auth/callback/route.ts` — Réparation auto au login :**
+- `ensureProfile()` : si profil existe avec org_id NULL → cherche invitation → sinon fallback première org active → UPDATE
+- Création nouveau profil : même fallback (plus de NULL possible en beta)
+
+**Fichiers modifiés :**
+- `supabase/migrations/20260314000001_fix_profiles_null_org_id.sql` (nouveau)
+- `supabase/functions/_shared/auth.ts`
+- `src/app/auth/callback/route.ts`
+
+**Prompt frontend :** `docs/PROMPT_FRONTEND_INSIGHTS_FIX.md`
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`

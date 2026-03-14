@@ -73,7 +73,7 @@ describe('buildHubSpotEmailBody', () => {
     mrr_cents: 49900,
   }
 
-  it('builds correct properties structure', () => {
+  it('builds correct properties structure with DRAFT default', () => {
     const result = buildHubSpotEmailBody(
       { subject: 'Test subject', body_html: '<p>Test</p>' },
       vars,
@@ -82,8 +82,24 @@ describe('buildHubSpotEmailBody', () => {
     expect(result.properties.hs_email_subject).toBe('Test subject')
     expect(result.properties.hs_email_html).toBe('<p>Test</p>')
     expect(result.properties.hs_email_direction).toBe('FORWARDED_EMAIL')
-    expect(result.properties.hs_email_status).toBe('SEND')
+    expect(result.properties.hs_email_status).toBe('DRAFT')
     expect(result.properties.hs_timestamp).toBe(1700000000000)
+  })
+
+  it('respects explicit email_status SEND', () => {
+    const result = buildHubSpotEmailBody(
+      { subject: 'Test', body_html: '', email_status: 'SEND' },
+      vars,
+    )
+    expect(result.properties.hs_email_status).toBe('SEND')
+  })
+
+  it('respects explicit email_status DRAFT', () => {
+    const result = buildHubSpotEmailBody(
+      { subject: 'Test', body_html: '', email_status: 'DRAFT' },
+      vars,
+    )
+    expect(result.properties.hs_email_status).toBe('DRAFT')
   })
 
   it('substitutes variables in subject and body', () => {
