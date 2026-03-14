@@ -882,7 +882,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 .eq('organization_id', body.organization_id)
                 .maybeSingle()
 
-              const existingFlags: FlagEntry[] = (currentAccount?.flags as FlagEntry[]) ?? []
+              const rawFlags = currentAccount?.flags
+              const existingFlags: FlagEntry[] = Array.isArray(rawFlags) ? rawFlags as FlagEntry[] : []
               const newFlag = buildFlagEntry(
                 (action.config ?? {}) as { flag?: string; reason?: string },
                 body.playbook_id,
