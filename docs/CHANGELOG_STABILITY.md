@@ -1109,6 +1109,27 @@ Bug critique : tous les écrans (Insights IA, Comptes, Playbooks, etc.) étaient
 
 ---
 
+## Cron Pipeline Complet (2026-03-14)
+
+Les crons `generate-insights`, `calculate-scores`, `sync-stripe`, `sync-hubspot`, `playbook-scheduler` et `self-monitor` n'étaient PAS enregistrés dans pg_cron. Seuls `refresh-hubspot-tokens` et `cleanup-expired-oauth-states` étaient programmés.
+
+Résultat : les nouvelles organisations (ex: Test OAuth Corp, 2207 comptes) n'avaient jamais d'insights générés automatiquement malgré un scoring complet.
+
+**Migration `20260314000002_cron_generate_insights.sql` :**
+
+| Cron job | Schedule | Rôle |
+|----------|----------|------|
+| `sync-stripe-daily` | 02h00 UTC | Sync données Stripe (toutes les orgs) |
+| `sync-hubspot-daily` | 02h30 UTC | Sync données HubSpot (toutes les orgs) |
+| `calculate-scores-daily` | 03h00 UTC | Scoring + segmentation (toutes les orgs) |
+| `generate-insights-daily` | 04h00 UTC | Génération insights IA (toutes les orgs) |
+| `playbook-scheduler` | */15 min | Exécution playbooks automatisés |
+| `self-monitor` | */15 min | Health checks + auto-recovery |
+
+Pipeline séquentiel : sync → scores → insights (1h de marge entre chaque étape). Chaque Edge Function boucle sur TOUTES les organisations actives (body vide = pas de filtre org_id). Chaque fonction a son propre `cron_lock` interne pour l'idempotence.
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`

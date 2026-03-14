@@ -2,7 +2,12 @@
 
 ## Contexte
 
-L'écran Insights IA (`/dashboard/insights`) ne fonctionnait pas pour les utilisateurs non-admin. Le backend a été corrigé (migration + auth callback), mais le frontend a un bug indépendant : les noms de colonnes utilisés dans la query Supabase ne correspondent pas au schéma DB.
+L'écran Insights IA (`/dashboard/insights`) affichait "Aucun insight détecté" pour toutes les organisations sauf Sentio Demo. Deux causes backend corrigées :
+
+1. **Crons manquants** : `generate-insights` n'était pas enregistré dans pg_cron — les insights n'étaient jamais générés automatiquement pour les nouvelles organisations. Corrigé : cron quotidien à 04h00 UTC, toutes les orgs actives.
+2. **Profiles NULL org_id** : les utilisateurs créés sans invitation avaient `organization_id = NULL`, bloquant tout accès RLS. Corrigé : migration backfill + trigger amélioré.
+
+Le frontend a un bug indépendant à corriger : les noms de colonnes utilisés dans la query Supabase ne correspondent pas au schéma DB.
 
 ---
 
