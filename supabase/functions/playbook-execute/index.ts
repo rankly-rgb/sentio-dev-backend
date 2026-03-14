@@ -354,8 +354,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (!body.playbook_id || !body.organization_id) {
     return errorResponse('playbook_id and organization_id are required', 400)
   }
+
+  // Default to 'eligible' mode when no targeting is specified
+  // This allows the frontend to simply POST { playbook_id } and let
+  // the backend resolve eligible accounts from eligibility_criteria
   if (!body.account_ids?.length && !body.segment_id && body.target_mode !== 'eligible') {
-    return errorResponse('account_ids, segment_id or target_mode=eligible is required', 400)
+    body.target_mode = 'eligible'
   }
 
   // ── Fetch playbook ──────────────────────────────────────
