@@ -386,21 +386,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (body.target_mode === 'eligible') {
     // Fetch all org accounts and filter by eligibility_criteria in-memory
-    const { data } = await supabase
+    const { data, error: accountsError } = await supabase
       .from('accounts')
       .select(ACCOUNT_SELECT)
       .eq('organization_id', body.organization_id)
       .limit(10000)
 
+    if (accountsError) {
+      logger.error('Failed to fetch accounts', { error: accountsError.message })
+      return errorResponse('Failed to fetch accounts', 500)
+    }
     accounts = data
   } else if (body.account_ids?.length) {
     const accountIds = body.account_ids.slice(0, MAX_ACCOUNTS_PER_RUN)
-    const { data } = await supabase
+    const { data, error: accountsError } = await supabase
       .from('accounts')
       .select(ACCOUNT_SELECT)
       .eq('organization_id', body.organization_id)
       .in('id', accountIds)
 
+    if (accountsError) {
+      logger.error('Failed to fetch accounts by ids', { error: accountsError.message })
+      return errorResponse('Failed to fetch accounts', 500)
+    }
     accounts = data
   } else {
     const { data: memberships } = await supabase
@@ -418,18 +426,25 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return jsonResponse({ success: true, message: 'No eligible accounts', executions_created: 0 })
     }
 
-    const { data } = await supabase
+    const { data, error: accountsError } = await supabase
       .from('accounts')
       .select(ACCOUNT_SELECT)
       .eq('organization_id', body.organization_id)
       .in('id', accountIds)
 
+    if (accountsError) {
+      logger.error('Failed to fetch segment accounts', { error: accountsError.message })
+      return errorResponse('Failed to fetch accounts', 500)
+    }
     accounts = data
   }
 
   if (!accounts?.length) {
+    logger.info('No accounts found for organization', { organization_id: body.organization_id })
     return jsonResponse({ success: true, message: 'No accounts found', executions_created: 0 })
   }
+
+  logger.info('Accounts loaded', { total: accounts.length, target_mode: body.target_mode })
 
   // ── Filter by eligibility criteria ──────────────────────
 
@@ -442,6 +457,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     logger.info('No accounts match eligibility criteria', {
       total_accounts: accounts.length,
       criteria: JSON.stringify(playbook.eligibility_criteria),
+      sample_account: accounts[0] ? {
+        health_score: accounts[0].health_score,
+        churn_risk_score: accounts[0].churn_risk_score,
+        health_type: typeof accounts[0].health_score,
+      } : null,
     })
     return jsonResponse({ success: true, message: 'No accounts match eligibility criteria', executions_created: 0 })
   }
@@ -461,18 +481,33 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const recentAccountIds = new Set(
     (recentExecutions ?? []).map((e: Record<string, unknown>) => e.account_id as string),
   )
-  const finalAccounts = eligibleAccounts.filter(
+  const allEligible = eligibleAccounts.filter(
     (a: Record<string, unknown>) => !recentAccountIds.has(a.id as string),
   )
 
-  if (finalAccounts.length === 0) {
-    logger.info('All eligible accounts have recent executions')
+  if (allEligible.length === 0) {
+    logger.info('All eligible accounts have recent executions', {
+      eligible: eligibleAccounts.length,
+      recent: recentAccountIds.size,
+    })
     return jsonResponse({
       success: true,
       message: 'All eligible accounts have recent executions',
       executions_created: 0,
     })
   }
+
+  // ── Cap accounts to prevent timeout ──────────────────────
+  const finalAccounts = allEligible.slice(0, MAX_ACCOUNTS_PER_RUN)
+  const hasMoreAccounts = allEligible.length > MAX_ACCOUNTS_PER_RUN
+
+  logger.info('Execution pipeline', {
+    total_accounts: accounts.length,
+    eligible: eligibleAccounts.length,
+    after_cooldown: allEligible.length,
+    processing: finalAccounts.length,
+    capped: hasMoreAccounts,
+  })
 
   // ── Semi-automated: create pending_approval, do NOT launch actions ──
 
@@ -488,22 +523,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
       sortedActions,
     )
 
+    // Semi-automated: create one execution per account (pending_approval)
+    // Store planned actions in actions_completed JSONB for later approval
+    const firstAccount = finalAccounts[0] as Record<string, unknown>
     const { data: execution, error: execError } = await supabase
       .from('playbook_executions')
       .insert({
         organization_id: body.organization_id,
         playbook_id: body.playbook_id,
+        account_id: firstAccount.id,
         execution_status: 'pending_approval',
         execution_source: body.execution_source ?? 'manual',
-        execution_log: pendingLog,
-        accounts_targeted: finalAccounts.length,
+        actions_completed: pendingLog,
+        total_steps: sortedActions.length,
         started_at: new Date().toISOString(),
       })
       .select('id')
       .single()
 
     if (execError || !execution) {
-      logger.error('Failed to create pending_approval execution', { error: execError?.message })
+      logger.error('Failed to create pending_approval execution', {
+        error: execError?.message,
+        account_id: firstAccount.id,
+      })
       return errorResponse('Failed to create execution', 500)
     }
 
@@ -604,7 +646,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .select('vault_access_token_id')
       .eq('organization_id', body.organization_id)
       .eq('provider', 'slack')
-      .eq('status', 'active')
+      .eq('is_active', true)
       .maybeSingle()
 
     if (slackIntegration?.vault_access_token_id) {
@@ -612,6 +654,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
+  let insertFailures = 0
   for (const account of finalAccounts) {
     const acc = account as AccountData
     let executionId: string | null = null
@@ -727,10 +770,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
           .single()
 
         if (execError || !execution) {
+          insertFailures++
           logger.error('Failed to create execution record', {
             account_id: acc.id,
             error: execError?.message,
+            code: execError?.code,
+            details: execError?.details,
+            hint: execError?.hint,
+            insert_failures_so_far: insertFailures,
           })
+          // If first INSERT fails, likely a systemic issue — stop early
+          if (insertFailures >= 3) {
+            logger.error('Stopping execution: too many INSERT failures', { failures: insertFailures })
+            break
+          }
           continue
         }
 
@@ -1013,13 +1066,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
     failed: failedCount,
   })
 
-  const hasMore = (body.account_ids?.length ?? 0) > MAX_ACCOUNTS_PER_RUN
-
   return jsonResponse({
     success: true,
     playbook_id: body.playbook_id,
     executions_created: executionResults.length,
-    has_more: hasMore,
+    total_eligible: allEligible.length,
+    has_more: hasMoreAccounts,
     results: executionResults,
   })
 })
