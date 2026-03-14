@@ -328,7 +328,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             .select('vault_access_token_id')
             .eq('organization_id', orgId)
             .eq('provider', 'hubspot')
-            .eq('is_active', true)
+            .eq('status', 'active')
             .maybeSingle()
 
           if (!hsIntegration?.vault_access_token_id) {

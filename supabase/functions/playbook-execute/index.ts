@@ -642,7 +642,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .select('vault_access_token_id, provider_account_id, integration_method')
       .eq('organization_id', body.organization_id)
       .eq('provider', 'hubspot')
-      .eq('is_active', true)
+      .eq('status', 'active')
       .maybeSingle()
 
     if (hsIntegration?.vault_access_token_id) {
@@ -665,7 +665,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .select('vault_access_token_id')
       .eq('organization_id', body.organization_id)
       .eq('provider', 'slack')
-      .eq('is_active', true)
+      .eq('status', 'active')
       .maybeSingle()
 
     if (slackIntegration?.vault_access_token_id) {
