@@ -430,6 +430,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
       resolvedSegmentId = segment.id
     }
 
+    // Update body.segment_id with resolved UUID so INSERTs use the correct type
+    body.segment_id = resolvedSegmentId
+
     const { data: memberships } = await supabase
       .from('segment_memberships')
       .select('account_id')

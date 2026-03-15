@@ -624,7 +624,7 @@ async function handleApproveExecution(
   // Fetch execution scoped by org_id (cross-tenant prevention)
   const { data: execution, error: fetchError } = await supabase
     .from('playbook_executions')
-    .select('id, execution_status, execution_log, playbook_id, organization_id, accounts_targeted')
+    .select('id, execution_status, actions_completed, playbook_id, organization_id')
     .eq('id', executionId)
     .eq('organization_id', authOrgId)
     .maybeSingle()
@@ -648,8 +648,8 @@ async function handleApproveExecution(
     .update({ execution_status: 'running' })
     .eq('id', executionId)
 
-  // Read stored context from execution_log
-  const log = (execution.execution_log ?? {}) as Record<string, unknown>
+  // Read stored context from actions_completed (stores pending approval data)
+  const log = (execution.actions_completed ?? {}) as Record<string, unknown>
   const accountIds = (log.account_ids ?? []) as string[]
   const plannedActions = (log.planned_actions ?? []) as PlaybookAction[]
 
@@ -695,7 +695,8 @@ async function handleApproveExecution(
         execution_status: finalStatus,
         actions_completed: allResults,
         completed_at: new Date().toISOString(),
-        accounts_reached: targetAccounts.length,
+        completed_steps: totalCompleted,
+        failed_steps: totalFailed,
       })
       .eq('id', executionId)
   } else {
@@ -753,7 +754,7 @@ async function handleRejectExecution(
   // Fetch execution scoped by org_id (cross-tenant prevention)
   const { data: execution, error: fetchError } = await supabase
     .from('playbook_executions')
-    .select('id, execution_status, execution_log, playbook_id, organization_id')
+    .select('id, execution_status, actions_completed, playbook_id, organization_id')
     .eq('id', executionId)
     .eq('organization_id', authOrgId)
     .maybeSingle()
@@ -772,13 +773,13 @@ async function handleRejectExecution(
   }
 
   const reason = (body.reason as string) ?? undefined
-  const updatedLog = buildApprovalLog(execution.execution_log, reason)
+  const updatedLog = buildApprovalLog(execution.actions_completed, reason)
 
   await supabase
     .from('playbook_executions')
     .update({
       execution_status: 'cancelled',
-      execution_log: updatedLog,
+      actions_completed: updatedLog,
       completed_at: new Date().toISOString(),
     })
     .eq('id', executionId)

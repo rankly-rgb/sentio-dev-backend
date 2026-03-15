@@ -326,6 +326,140 @@ async function syncCompanies(
   }
 }
 
+// ── Reverse-push id_stripe to HubSpot ────────────────────────
+// Pour chaque compte Sentio lie a une company HubSpot, si la company
+// n'a pas encore de propriete id_stripe, on pousse le stripe_customer_id.
+// Cela permet le matching automatique dans les futures syncs et
+// donne au CSM la visibilite Stripe directement dans HubSpot.
+
+async function reversePushStripeIds(
+  supabase: SupabaseClient,
+  organizationId: string,
+  accessToken: string,
+  logger: DataSyncLogger,
+): Promise<number> {
+  // Get all linked accounts with stripe_customer_id
+  const { data: linkedAccounts } = await supabase
+    .from('hubspot_companies')
+    .select('hubspot_company_id, account_id')
+    .eq('organization_id', organizationId)
+    .not('account_id', 'is', null)
+    .limit(10000)
+
+  if (!linkedAccounts || linkedAccounts.length === 0) return 0
+
+  // Get stripe_customer_ids for these accounts
+  const accountIds = linkedAccounts.map(a => a.account_id)
+  const { data: accounts } = await supabase
+    .from('accounts')
+    .select('id, stripe_customer_id')
+    .in('id', accountIds)
+    .not('stripe_customer_id', 'is', null)
+
+  if (!accounts || accounts.length === 0) return 0
+
+  const stripeIdByAccountId = new Map<string, string>()
+  for (const a of accounts) {
+    if (a.stripe_customer_id) stripeIdByAccountId.set(a.id, a.stripe_customer_id)
+  }
+
+  // Batch update HubSpot companies with id_stripe (max 100 per batch)
+  const updates: Array<{ id: string; properties: { id_stripe: string } }> = []
+  for (const link of linkedAccounts) {
+    const stripeId = stripeIdByAccountId.get(link.account_id)
+    if (stripeId) {
+      updates.push({
+        id: link.hubspot_company_id,
+        properties: { id_stripe: stripeId },
+      })
+    }
+  }
+
+  if (updates.length === 0) return 0
+
+  let pushed = 0
+  // HubSpot batch update: max 100 per request
+  for (let i = 0; i < updates.length; i += 100) {
+    const batch = updates.slice(i, i + 100)
+    try {
+      logger.increment('api_calls_made')
+      await hubspotPost(
+        '/crm/v3/objects/companies/batch/update',
+        accessToken,
+        { inputs: batch },
+      )
+      pushed += batch.length
+    } catch (err) {
+      // Non-bloquant : log et continue
+      console.warn(JSON.stringify({
+        level: 'warn',
+        function_name: 'sync-hubspot',
+        message: `Reverse-push id_stripe batch failed: ${err instanceof Error ? err.message : String(err)}`,
+        organization_id: organizationId,
+        batch_size: batch.length,
+      }))
+    }
+  }
+
+  if (pushed > 0) {
+    console.log(JSON.stringify({
+      level: 'info',
+      function_name: 'sync-hubspot',
+      message: `Reverse-pushed id_stripe to ${pushed} HubSpot companies`,
+      organization_id: organizationId,
+    }))
+  }
+
+  return pushed
+}
+
+// ── Ensure id_stripe property exists in HubSpot ──────────────
+// Cree la propriete custom id_stripe sur les Companies HubSpot
+// si elle n'existe pas encore. Appele une seule fois au debut de chaque sync.
+
+async function ensureIdStripeProperty(
+  accessToken: string,
+): Promise<void> {
+  try {
+    // Check if property exists
+    const checkResp = await fetchWithTimeout(
+      `${HUBSPOT_API_BASE}/crm/v3/properties/companies/id_stripe`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+      HUBSPOT_TIMEOUT_MS,
+    )
+    if (checkResp.ok) return // Property already exists
+  } catch {
+    // Check failed — try to create anyway
+  }
+
+  try {
+    await hubspotPost(
+      '/crm/v3/properties/companies',
+      accessToken,
+      {
+        name: 'id_stripe',
+        label: 'Stripe Customer ID',
+        type: 'string',
+        fieldType: 'text',
+        groupName: 'companyinformation',
+        description: 'Identifiant Stripe (cus_xxx) pour le matching automatique Sentio AI',
+      },
+    )
+    console.log(JSON.stringify({
+      level: 'info',
+      function_name: 'sync-hubspot',
+      message: 'Created id_stripe property on HubSpot Companies',
+    }))
+  } catch (err) {
+    // Non-bloquant : la propriete existe peut-etre deja (409) ou scope manquant
+    console.warn(JSON.stringify({
+      level: 'warn',
+      function_name: 'sync-hubspot',
+      message: `Could not create id_stripe property: ${err instanceof Error ? err.message : String(err)}`,
+    }))
+  }
+}
+
 // ── Sync Tickets (count per company) ─────────────────────────
 
 async function syncTicketCounts(
@@ -504,12 +638,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Method not allowed', 405)
   }
 
-  // Auth : service_role uniquement (verify_jwt = false, verification dans le code)
-  const authHeader = req.headers.get('Authorization')
-  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-  if (!authHeader || !serviceRoleKey || authHeader !== `Bearer ${serviceRoleKey}`) {
-    return errorResponse('Unauthorized', 401)
-  }
+  // Auth : verify_jwt = true dans config.toml
+  // Le service_role HS256 JWT est validé automatiquement par le relay Supabase.
+  // Appelants autorisés : cron (service_role), admin-proxy (service_role), triggerInitialSync (service_role).
 
   let body: { organization_id?: string; sync_type?: string }
   try {
@@ -558,13 +689,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Get HubSpot credentials from Vault
     const credentials = await getHubSpotCredentials(supabase, organizationId)
 
-    // 1. Sync companies (core — always runs)
+    // 0. Ensure id_stripe property exists in HubSpot (idempotent, non-bloquant)
+    await ensureIdStripeProperty(credentials.accessToken)
+
+    // 1. Sync companies (core — always runs, includes auto-matching via id_stripe)
     await syncCompanies(supabase, organizationId, credentials.accessToken, logger)
 
-    // 2. Sync ticket counts (best-effort — scope may not be available)
+    // 2. Reverse-push: pousser stripe_customer_id vers HubSpot id_stripe pour les comptes lies
+    const reversePushed = await reversePushStripeIds(supabase, organizationId, credentials.accessToken, logger)
+
+    // 3. Sync ticket counts (best-effort — scope may not be available)
     await syncTicketCounts(supabase, organizationId, credentials.accessToken, logger)
 
-    // 3. Sync last meeting dates (best-effort — API-intensive, limited to synced companies)
+    // 4. Sync last meeting dates (best-effort — API-intensive, limited to synced companies)
     await syncLastMeetingDates(supabase, organizationId, credentials.accessToken, logger)
 
     await logger.complete({

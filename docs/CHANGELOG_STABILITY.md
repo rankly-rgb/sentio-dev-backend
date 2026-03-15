@@ -1130,6 +1130,55 @@ Pipeline séquentiel : sync → scores → insights (1h de marge entre chaque é
 
 ---
 
+## HubSpot Auto-Matching + Reverse-Push id_stripe (2026-03-15)
+
+Liaison automatique bidirectionnelle entre comptes Sentio (Stripe) et companies HubSpot via la propriete custom `id_stripe`. Resout le probleme structurel ou les actions HubSpot des playbooks etaient systematiquement skippees car aucun lien n'existait entre les deux systemes.
+
+**Probleme :**
+- `sync-stripe` cree des comptes avec `stripe_customer_id`
+- `sync-hubspot` importe des companies avec `hubspot_company_id`
+- Aucun lien automatique entre les deux → `hubspot_companies.account_id = NULL`
+- Playbooks : actions `create_task` et `send_email_hubspot` skippees pour tous les comptes
+
+**Solution en 3 parties dans `sync-hubspot` :**
+
+1. **Auto-creation propriete** (`ensureIdStripeProperty`) : cree la propriete custom `id_stripe` (type texte) sur les Companies HubSpot si elle n'existe pas. Idempotent, non-bloquant.
+
+2. **Auto-matching** (deja existant, lignes 256-283) : lors de la sync companies, si une company HubSpot a la propriete `id_stripe` renseignee, on la matche au compte Sentio ayant le meme `stripe_customer_id`. On met a jour `accounts.hubspot_company_id` et on cree l'entree `hubspot_companies`.
+
+3. **Reverse-push** (`reversePushStripeIds`, NOUVEAU) : apres la sync companies, pour chaque compte Sentio lie a une company HubSpot, on pousse le `stripe_customer_id` vers la propriete `id_stripe` de la company HubSpot. Utilise l'API batch update (max 100 par requete). Non-bloquant.
+
+**Pipeline sync-hubspot mis a jour :**
+1. `ensureIdStripeProperty()` — cree la propriete (idempotent)
+2. `syncCompanies()` — sync companies + auto-matching via `id_stripe`
+3. `reversePushStripeIds()` — pousse `stripe_customer_id` vers HubSpot
+4. `syncTicketCounts()` — tickets (best-effort)
+5. `syncLastMeetingDates()` — meetings (best-effort)
+
+**Shared helpers `_shared/hubspot-sync-helpers.ts` (NOUVEAU) :**
+- `buildStripeIdMap(accounts)` : Map stripe_customer_id → account_id
+- `buildHubspotIdMap(accounts)` : Map hubspot_company_id → account_id
+- `matchCompanyToAccount(company, stripeMap, linkedMap)` : matching prioritaire (existant > id_stripe)
+- `computeReversePushList(linked, accounts)` : liste des comptes a pousser vers HubSpot
+- `batchArray(items, size)` : split en batches
+
+**Configurations client supportees :**
+
+| Config | Comportement |
+|--------|-------------|
+| Stripe seul | Playbooks fonctionnent (actions HubSpot skippees gracieusement) |
+| Stripe + HubSpot non lie | Auto-matching au prochain sync si `id_stripe` renseigne dans HubSpot |
+| Stripe + HubSpot lie | Reverse-push `id_stripe` + actions HubSpot fonctionnelles |
+
+**Tests : 20 nouveaux tests (828 total) :**
+- buildStripeIdMap : mapping, skip null, empty (3 tests)
+- buildHubspotIdMap : mapping, skip null (2 tests)
+- matchCompanyToAccount : existing link priority, id_stripe match, whitespace trim, null/empty/undefined, unknown stripe, priority over id_stripe (8 tests)
+- computeReversePushList : happy path, skip null stripe, skip missing account, empty (4 tests)
+- batchArray : split, exact, single, empty (4 tests)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`
