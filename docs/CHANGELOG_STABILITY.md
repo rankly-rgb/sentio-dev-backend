@@ -1179,6 +1179,59 @@ Liaison automatique bidirectionnelle entre comptes Sentio (Stripe) et companies 
 
 ---
 
+## Benchmark Sectoriel v1 (2026-03-16)
+
+Edge Function `get-benchmark-data` : métriques NRR, Churn Rate et MRR Growth de l'organisation courante, comparées à des benchmarks externes SaaS B2B et à la médiane des organisations actives (peer comparison).
+
+**Edge Function `get-benchmark-data` :**
+- GET, JWT obligatoire (ES256 via `verifyUserAuth`)
+- Pipeline : CORS → Auth → Query org metrics → Peer comparison (service_role bypass RLS) → JSON response
+- Durée max : 10s, pas de cache (fraîcheur prioritaire)
+
+**3 métriques calculées :**
+
+| Métrique | Période | Formule |
+|----------|---------|---------|
+| NRR | 90 jours | (MRR_début + expansion + reactivation - contraction - churn) / MRR_début × 100 |
+| Churn Rate | 30 jours | comptes_churned / comptes_début × 100 |
+| MRR Growth | 30 jours | (MRR_actuel - MRR_30j_ago) / MRR_30j_ago × 100 |
+
+**Benchmarks externes hardcodés (sources : OpenView 2024, Bessemer 2024, Baremetrics 2024) :**
+
+| Métrique | Excellent | Bon | Correct | Médiocre |
+|----------|-----------|-----|---------|----------|
+| NRR (%) | > 110 | 100-110 | 90-100 | < 90 |
+| Churn Rate mensuel (%) | < 0.5 | 0.5-1 | 1-2 | > 2 |
+| MRR Growth mensuel (%) | > 15 | 10-15 | 5-10 | < 5 |
+
+**Peer comparison :**
+- Médiane calculée sur toutes les organisations actives (service_role bypass RLS)
+- Ne jamais exposer de données individuelles d'autres orgs
+- Protection vie privée : `peer_available: false` si < 3 organisations actives
+- Delta = valeur org - médiane peer
+
+**Fichiers créés :**
+- `supabase/functions/get-benchmark-data/index.ts` : Edge Function orchestrateur
+- `supabase/functions/get-benchmark-data/benchmark-constants.ts` : constantes benchmarks externes
+- `supabase/functions/_shared/benchmark-helpers.ts` : fonctions pures (computeNrr, computeChurnRate, computeMrrGrowth, computeRating, computeMedian, buildPeerResult, buildMetricResult, computeNetMovements)
+
+**Division par zéro :** toutes les fonctions retournent `null` (pas de crash) quand le dénominateur <= 0.
+
+**Tests : 64 nouveaux tests (898 total) :**
+- Rating NRR : 8 tests (boundaries 110/100/90, null)
+- Rating churn_rate : 8 tests (logique inversée, boundaries 0.5/1.0/2.0, null)
+- Rating mrr_growth : 7 tests (boundaries 15/10/5)
+- computeNrr : 7 tests (expansion, churn, mixed, new business excluded, division by zero, rounding)
+- computeChurnRate : 5 tests (normal, zero, division by zero, rounding)
+- computeMrrGrowth : 5 tests (positive, zero, negative, division by zero, rounding)
+- computeNetMovements : 4 tests (empty, positive, negative, mixed)
+- computeMedian : 7 tests (empty, single, odd/even, nulls, sort order)
+- buildPeerResult : 5 tests (available/unavailable boundaries, null value, delta)
+- buildMetricResult : 4 tests (values, rating, peer passthrough, null)
+- Constants : 3 tests (metrics count, sources, MIN_PEER_ORG_COUNT)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`

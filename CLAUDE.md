@@ -81,6 +81,7 @@ Valeurs neutres (pas de données) : Engagement=50, Contrat=50, Financial=0. Usag
 | `workflow-step-processor` | POST | Workflow steps |
 | `export-playbook-accounts` | POST (JWT) | Export CSV/JSON comptes playbook |
 | `export-segment-csv` | GET (JWT) | Export CSV comptes par segment (filtrage in-memory, BOM UTF-8) |
+| `get-benchmark-data` | GET (JWT) | Benchmark sectoriel : NRR, Churn Rate, MRR Growth vs externes + peer médiane |
 | `webhook-config` | REST (JWT) | Config webhook sortant (GET/POST, /test, /regenerate-secret, /disable) |
 | `integration-oauth` | REST (JWT/CSRF) | OAuth Stripe Connect + HubSpot (authorize, callback, status, revoke) + API key Stripe (POST /stripe/api-key) + API key HubSpot (POST /hubspot/api-key) |
 | `sync-hubspot` | POST (cron) | Sync HubSpot companies (OAuth/API key Vault, Zero-PII) |
