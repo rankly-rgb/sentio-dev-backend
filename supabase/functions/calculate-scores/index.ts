@@ -259,8 +259,9 @@ function scoreAccountPure(
   hubspot: HubspotData | null,
   invoiceStatus: InvoiceStatus,
   usageTrackerConnected: boolean,
+  stripeConnected: boolean,
 ): ScoreResult & { invoiceStatus: InvoiceStatus; daysActive: number } {
-  const financialScore = calcFinancialScore(account.mrr_cents, invoiceStatus, maxMrrCents)
+  const financialScore = stripeConnected ? calcFinancialScore(account.mrr_cents, invoiceStatus, maxMrrCents) : 0
   const engagementScore = calcEngagementScore(hubspot)
   const contractScore = calcContractScore(account)
 
@@ -271,8 +272,9 @@ function scoreAccountPure(
     contractScore,
     usageScore,
     usageTrackerConnected,
+    stripeConnected,
   })
-  const churnRiskScore = calcChurnRiskScore(healthScore, invoiceStatus, usage.days_active, account, usageTrackerConnected)
+  const churnRiskScore = calcChurnRiskScore(healthScore, invoiceStatus, usage.days_active, account, usageTrackerConnected, stripeConnected)
   const expansionScore = calcExpansionScore(account, usage)
 
   return {
@@ -282,7 +284,7 @@ function scoreAccountPure(
     product_usage_score: usageTrackerConnected && usageScore !== undefined
       ? Math.max(0, Math.min(100, usageScore))
       : null,
-    financial_score: Math.max(0, Math.min(100, financialScore)),
+    financial_score: stripeConnected ? Math.max(0, Math.min(100, financialScore)) : 0,
     engagement_score: Math.max(0, Math.min(100, engagementScore)),
     contract_score: Math.max(0, Math.min(100, contractScore)),
     invoiceStatus,
@@ -320,11 +322,13 @@ async function assignSegments(
     const invoiceStatus = accountInvoiceStatus.get(account.id)
     const hasOverdue = invoiceStatus?.has_overdue ?? false
 
+    const accountStripeConnected = account.stripe_customer_id != null
     const segTypes = determineSegmentTypes(
       scores,
       account.mrr_cents ?? 0,
       hasOverdue,
       account.created_at,
+      accountStripeConnected,
     )
 
     for (const segType of segTypes) {
@@ -548,7 +552,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
               const hubspot = hubspotMap.get(account.id) ?? null
               const invoiceStatus = invoiceStatusMap.get(account.id) ?? DEFAULT_INVOICE
 
-              const result = scoreAccountPure(account, maxMrrCents, usage, hubspot, invoiceStatus, usageTrackerConnected)
+              const accountStripeConnected = account.stripe_customer_id != null
+              const result = scoreAccountPure(account, maxMrrCents, usage, hubspot, invoiceStatus, usageTrackerConnected, accountStripeConnected)
               const scores: ScoreResult = {
                 health_score: result.health_score,
                 churn_risk_score: result.churn_risk_score,

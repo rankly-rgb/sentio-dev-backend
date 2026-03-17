@@ -17,6 +17,7 @@ export interface SegmentAccountRow {
   expansion_score: number | null
   product_usage_score: number | null
   created_at: string | null
+  data_source: string | null
 }
 
 // ── Segment filters — aligned with scoring.ts determineSegmentTypes() ──
@@ -24,6 +25,11 @@ export interface SegmentAccountRow {
 //   1. en_churn (mrr=0) → 2. impayes (overdue invoices*) → 3. en_danger_critique
 //   → 4. a_risque_leger → 5. champions → 6. en_expansion → 7. stables (default)
 // * impayes uses score proxy — segment_memberships is the true source of truth
+
+// Helper : détecte si le compte a des données Stripe
+function hasStripe(a: SegmentAccountRow): boolean {
+  return a.stripe_customer_id != null
+}
 
 export const SEGMENT_FILTERS: Record<string, (a: SegmentAccountRow) => boolean> = {
   // scoring.ts: health >= 80 (priority after churn_risk checks → churn < 50)
@@ -33,26 +39,31 @@ export const SEGMENT_FILTERS: Record<string, (a: SegmentAccountRow) => boolean> 
     const health = a.health_score ?? 0
     return (a.expansion_score ?? 0) >= 70 && health >= 60 && health < 80 && (a.churn_risk_score ?? 0) < 50
   },
-  // scoring.ts: default fallback (none of the above match)
+  // scoring.ts: default fallback — pour HubSpot-only, pas de check MRR
   stables:            a => {
-    const mrr = a.mrr_cents ?? 0
     const churn = a.churn_risk_score ?? 0
     const health = a.health_score ?? 0
     const expansion = a.expansion_score ?? 0
-    return mrr > 0 && churn < 50 && health < 80 && !(expansion >= 70 && health >= 60)
+    const isStableScore = churn < 50 && health < 80 && !(expansion >= 70 && health >= 60)
+    // HubSpot-only : pas de MRR, stable basé sur scores uniquement
+    if (!hasStripe(a)) return isStableScore
+    return (a.mrr_cents ?? 0) > 0 && isStableScore
   },
   // scoring.ts: churn_risk >= 50 AND < 70
   a_risque_leger:     a => {
     const churn = a.churn_risk_score ?? 0
+    if (!hasStripe(a)) return churn >= 50 && churn < 70
     return churn >= 50 && churn < 70 && (a.mrr_cents ?? 0) > 0
   },
-  // scoring.ts: churn_risk >= 70 (excludes en_churn via mrr > 0)
-  en_danger_critique: a => (a.churn_risk_score ?? 0) >= 70 && (a.mrr_cents ?? 0) > 0,
-  // scoring.ts: hasOverdueInvoices — proxy score (invoice data non disponible in-memory)
-  // NOTE: segment_memberships est la source de verite pour ce segment
-  impayes:            a => (a.churn_risk_score ?? 0) > 80 && (a.health_score ?? 100) < 50 && (a.mrr_cents ?? 0) > 0,
-  // scoring.ts: mrr_cents === 0
-  en_churn:           a => (a.mrr_cents ?? 0) === 0,
+  // scoring.ts: churn_risk >= 70 — HubSpot-only : pas de check MRR
+  en_danger_critique: a => {
+    if (!hasStripe(a)) return (a.churn_risk_score ?? 0) >= 70
+    return (a.churn_risk_score ?? 0) >= 70 && (a.mrr_cents ?? 0) > 0
+  },
+  // scoring.ts: hasOverdueInvoices — uniquement comptes Stripe
+  impayes:            a => hasStripe(a) && (a.churn_risk_score ?? 0) > 80 && (a.health_score ?? 100) < 50 && (a.mrr_cents ?? 0) > 0,
+  // scoring.ts: mrr_cents === 0 — uniquement comptes Stripe (HubSpot-only n'a pas de MRR)
+  en_churn:           a => hasStripe(a) && (a.mrr_cents ?? 0) === 0,
   // scoring.ts: created < 90 days (non-exclusif, cumule avec un segment score-based)
   nouveaux:           a => {
     if (!a.created_at) return false

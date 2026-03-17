@@ -139,6 +139,12 @@ describe('calcEngagementScore', () => {
     expect(calcEngagementScore(hubspot)).toBe(35)
   })
 
+  it('subtracts 25 for meeting > 180 days ago', () => {
+    const veryOld = new Date(Date.now() - 200 * 86400000).toISOString().split('T')[0]
+    const hubspot: HubspotData = { nps_score: null, open_ticket_count: null, open_deal_count: null, last_meeting_date: veryOld }
+    expect(calcEngagementScore(hubspot)).toBe(25) // 50 - 25
+  })
+
   it('is clamped between 0 and 100', () => {
     // Worst case: 3+ tickets (-25) + meeting > 180 days (-25) = 50-25-25 = 0
     const hubspot: HubspotData = {
@@ -148,8 +154,7 @@ describe('calcEngagementScore', () => {
       last_meeting_date: '2020-01-01',
     }
     const score = calcEngagementScore(hubspot)
-    expect(score).toBeGreaterThanOrEqual(0)
-    expect(score).toBeLessThanOrEqual(100)
+    expect(score).toBe(0)
   })
 })
 
@@ -466,5 +471,155 @@ describe('determineSegmentTypes', () => {
     expect(segments).toContain('impayes')
     expect(segments).not.toContain('champions')
     expect(segments).not.toContain('en_expansion')
+  })
+})
+
+// ── Health Score 2D — HubSpot-only (stripeConnected: false) ──
+
+describe('calcHealthScore — 2 dimensions (stripeConnected: false)', () => {
+  it('follows weighted formula: E×60 + C×40', () => {
+    const health = calcHealthScore({
+      financialScore: 0, engagementScore: 70, contractScore: 50,
+      usageTrackerConnected: false, stripeConnected: false,
+    })
+    const expected = Math.round((70 * 0.60 + 50 * 0.40) * 100) / 100
+    expect(health).toBe(expected)
+  })
+
+  it('ignores financialScore entirely', () => {
+    const withFinancial = calcHealthScore({
+      financialScore: 100, engagementScore: 70, contractScore: 50,
+      usageTrackerConnected: false, stripeConnected: false,
+    })
+    const withoutFinancial = calcHealthScore({
+      financialScore: 0, engagementScore: 70, contractScore: 50,
+      usageTrackerConnected: false, stripeConnected: false,
+    })
+    expect(withFinancial).toBe(withoutFinancial)
+  })
+
+  it('ignores usageScore even if provided', () => {
+    const withUsage = calcHealthScore({
+      usageScore: 100, financialScore: 0, engagementScore: 70, contractScore: 50,
+      usageTrackerConnected: true, stripeConnected: false,
+    })
+    const withoutUsage = calcHealthScore({
+      financialScore: 0, engagementScore: 70, contractScore: 50,
+      usageTrackerConnected: false, stripeConnected: false,
+    })
+    expect(withUsage).toBe(withoutUsage)
+  })
+
+  it('returns 0 for all zero inputs', () => {
+    expect(calcHealthScore({
+      financialScore: 0, engagementScore: 0, contractScore: 0,
+      usageTrackerConnected: false, stripeConnected: false,
+    })).toBe(0)
+  })
+
+  it('returns 100 for all 100 inputs', () => {
+    expect(calcHealthScore({
+      financialScore: 0, engagementScore: 100, contractScore: 100,
+      usageTrackerConnected: false, stripeConnected: false,
+    })).toBe(100)
+  })
+
+  it('produces higher score than 3D when financial is 0', () => {
+    // 2D: 60*0.60 + 50*0.40 = 56
+    // 3D: 0*0.34 + 60*0.33 + 50*0.33 = 36.3
+    const health2D = calcHealthScore({
+      financialScore: 0, engagementScore: 60, contractScore: 50,
+      usageTrackerConnected: false, stripeConnected: false,
+    })
+    const health3D = calcHealthScore({
+      financialScore: 0, engagementScore: 60, contractScore: 50,
+      usageTrackerConnected: false, stripeConnected: true,
+    })
+    expect(health2D).toBeGreaterThan(health3D)
+  })
+})
+
+// ── Churn Risk — stripeConnected: false ──
+
+describe('calcChurnRiskScore — stripeConnected: false', () => {
+  const baseAccount: Account = {
+    id: 'a1', organization_id: 'o1', mrr_cents: null,
+    seat_count: null, seat_limit: null, contract_end_date: null,
+    health_score: null, churn_risk_score: null,
+  }
+  const overdue: InvoiceStatus = { has_overdue: true, overdue_count: 1 }
+  const noOverdue: InvoiceStatus = { has_overdue: false, overdue_count: 0 }
+
+  it('does NOT add invoice penalty when Stripe not connected', () => {
+    const risk = calcChurnRiskScore(80, overdue, 10, baseAccount, false, false)
+    expect(risk).toBe(20) // 100 - 80 = 20, no +15 invoice penalty
+  })
+
+  it('still adds contract penalty even without Stripe', () => {
+    const acct = { ...baseAccount, contract_end_date: '2020-01-01' }
+    const risk = calcChurnRiskScore(80, noOverdue, 10, acct, false, false)
+    expect(risk).toBe(45) // 100 - 80 + 25 = 45
+  })
+
+  it('adds invoice penalty when stripeConnected is true', () => {
+    const risk = calcChurnRiskScore(80, overdue, 10, baseAccount, false, true)
+    expect(risk).toBe(35) // 100 - 80 + 15 = 35
+  })
+})
+
+// ── Segment Assignment — HubSpot-only (stripeConnected: false) ──
+
+describe('determineSegmentTypes — HubSpot-only (stripeConnected: false)', () => {
+  const baseScores = { health_score: 50, churn_risk_score: 50, expansion_score: 30 }
+  const oldDate = '2020-01-01T00:00:00Z'
+
+  it('does NOT assign "en_churn" even with mrr = 0', () => {
+    const scores = { health_score: 50, churn_risk_score: 40, expansion_score: 20 }
+    const segments = determineSegmentTypes(scores, 0, false, oldDate, false)
+    expect(segments).not.toContain('en_churn')
+    expect(segments).toContain('stables')
+  })
+
+  it('does NOT assign "impayes" even with overdue invoices', () => {
+    const scores = { health_score: 85, churn_risk_score: 15, expansion_score: 80 }
+    const segments = determineSegmentTypes(scores, 0, true, oldDate, false)
+    expect(segments).not.toContain('impayes')
+    expect(segments).toContain('champions')
+  })
+
+  it('assigns "en_danger_critique" based on churn_risk score', () => {
+    const scores = { health_score: 25, churn_risk_score: 75, expansion_score: 10 }
+    const segments = determineSegmentTypes(scores, 0, false, oldDate, false)
+    expect(segments).toContain('en_danger_critique')
+  })
+
+  it('assigns "champions" based on health score', () => {
+    const scores = { health_score: 85, churn_risk_score: 10, expansion_score: 40 }
+    const segments = determineSegmentTypes(scores, 0, false, oldDate, false)
+    expect(segments).toContain('champions')
+  })
+
+  it('assigns "stables" as default for HubSpot-only', () => {
+    const scores = { health_score: 55, churn_risk_score: 40, expansion_score: 30 }
+    const segments = determineSegmentTypes(scores, 0, false, oldDate, false)
+    expect(segments).toEqual(['stables'])
+  })
+
+  it('assigns "a_risque_leger" for churn 50-69', () => {
+    const scores = { health_score: 45, churn_risk_score: 55, expansion_score: 20 }
+    const segments = determineSegmentTypes(scores, 0, false, oldDate, false)
+    expect(segments).toContain('a_risque_leger')
+  })
+
+  it('assigns "en_expansion" for expansion >= 70 and health >= 60', () => {
+    const scores = { health_score: 65, churn_risk_score: 35, expansion_score: 75 }
+    const segments = determineSegmentTypes(scores, 0, false, oldDate, false)
+    expect(segments).toContain('en_expansion')
+  })
+
+  it('retro-compat: stripeConnected undefined behaves as true', () => {
+    const scores = { health_score: 10, churn_risk_score: 90, expansion_score: 5 }
+    const segments = determineSegmentTypes(scores, 0, false, oldDate)
+    expect(segments).toContain('en_churn') // Default (no param) = Stripe connected
   })
 })

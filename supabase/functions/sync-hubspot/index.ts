@@ -207,30 +207,25 @@ async function syncCompanies(
     .eq('organization_id', organizationId)
     .limit(10000)
 
-  if (!allAccounts || allAccounts.length === 0) {
-    console.log(JSON.stringify({
-      level: 'info',
-      function_name: 'sync-hubspot',
-      message: 'No accounts in org — skipping company sync',
-      organization_id: organizationId,
-    }))
-    return
-  }
+  const hasExistingAccounts = allAccounts && allAccounts.length > 0
 
   // Map hubspot_company_id → account_id (comptes deja lies)
   const accountsByHsId = new Map<string, string>()
   // Map stripe_customer_id → account_id (pour auto-mapping via id_stripe HubSpot)
   const accountsByStripeId = new Map<string, string>()
-  for (const a of allAccounts) {
-    if (a.hubspot_company_id) {
-      accountsByHsId.set(a.hubspot_company_id, a.id)
-    }
-    if (a.stripe_customer_id) {
-      accountsByStripeId.set(a.stripe_customer_id, a.id)
+  if (hasExistingAccounts) {
+    for (const a of allAccounts!) {
+      if (a.hubspot_company_id) {
+        accountsByHsId.set(a.hubspot_company_id, a.id)
+      }
+      if (a.stripe_customer_id) {
+        accountsByStripeId.set(a.stripe_customer_id, a.id)
+      }
     }
   }
 
   let autoLinkedCount = 0
+  let hubspotOnlyCreated = 0
 
   // Paginate companies via search API
   while (page < MAX_PAGES) {
@@ -254,15 +249,15 @@ async function syncCompanies(
       let accountId = accountsByHsId.get(hsCompanyId)
 
       // Auto-mapping : si pas encore lie, matcher via id_stripe → stripe_customer_id
-      if (!accountId) {
+      if (!accountId && hasExistingAccounts) {
         const stripeIdFromHubspot = company.properties.id_stripe?.trim()
         if (stripeIdFromHubspot) {
           accountId = accountsByStripeId.get(stripeIdFromHubspot)
           if (accountId) {
-            // Lier le compte : ecrire hubspot_company_id sur l'account
+            // Lier le compte : ecrire hubspot_company_id + data_source sur l'account
             const { error: linkError } = await supabase
               .from('accounts')
-              .update({ hubspot_company_id: hsCompanyId })
+              .update({ hubspot_company_id: hsCompanyId, data_source: 'both' })
               .eq('id', accountId)
               .eq('organization_id', organizationId)
 
@@ -282,7 +277,36 @@ async function syncCompanies(
         }
       }
 
-      if (!accountId) continue // Pas de compte Sentio lie a cette company HubSpot
+      // HubSpot-only : créer un compte si aucun match trouvé
+      // Permet aux clients sans Stripe d'avoir des comptes dans Sentio
+      if (!accountId) {
+        const { data: newAccount, error: createError } = await supabase
+          .from('accounts')
+          .upsert(
+            {
+              organization_id: organizationId,
+              stripe_customer_id: null,
+              hubspot_company_id: hsCompanyId,
+              data_source: 'hubspot',
+              mrr_cents: null,
+              arr_cents: null,
+            },
+            { onConflict: 'organization_id,hubspot_company_id', ignoreDuplicates: false },
+          )
+          .select('id')
+          .maybeSingle()
+
+        if (createError) {
+          console.error(`[sync-hubspot] create hubspot-only account error: ${createError.message}`)
+          logger.increment('records_failed')
+        } else if (newAccount) {
+          accountId = newAccount.id
+          accountsByHsId.set(hsCompanyId, accountId)
+          hubspotOnlyCreated++
+        }
+      }
+
+      if (!accountId) continue
 
       const lifecycleStage = normalizeLifecycleStage(
         company.properties.lifecyclestage,
@@ -321,6 +345,15 @@ async function syncCompanies(
       level: 'info',
       function_name: 'sync-hubspot',
       message: `Auto-linked ${autoLinkedCount} accounts via id_stripe property`,
+      organization_id: organizationId,
+    }))
+  }
+
+  if (hubspotOnlyCreated > 0) {
+    console.log(JSON.stringify({
+      level: 'info',
+      function_name: 'sync-hubspot',
+      message: `Created ${hubspotOnlyCreated} HubSpot-only accounts (no Stripe match)`,
       organization_id: organizationId,
     }))
   }

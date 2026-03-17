@@ -22,6 +22,7 @@ export interface Account {
   engagement_score: number | null
   contract_score: number | null
   usage_tracker_connected: boolean
+  data_source: string
   created_at: string
   updated_at: string
 }

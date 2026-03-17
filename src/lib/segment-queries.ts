@@ -90,8 +90,14 @@ export const SEGMENTS: SegmentMeta[] = [
   },
 ]
 
+/** Helper: does the account have Stripe data? */
+function hasStripe(a: Account): boolean {
+  return a.stripe_customer_id != null
+}
+
 /**
  * In-memory segment filters — aligned with backend scoring.ts determineSegmentTypes()
+ * HubSpot-only accounts (no stripe_customer_id) skip MRR-dependent checks.
  */
 export const SEGMENT_FILTERS: Record<SegmentKey, (a: Account) => boolean> = {
   champions: (a) =>
@@ -103,26 +109,33 @@ export const SEGMENT_FILTERS: Record<SegmentKey, (a: Account) => boolean> = {
     (a.health_score ?? 0) < 80 &&
     (a.churn_risk_score ?? 100) < 50,
 
-  stables: (a) =>
-    (a.mrr_cents ?? 0) > 0 &&
-    (a.churn_risk_score ?? 100) < 50 &&
-    (a.health_score ?? 0) < 80 &&
-    !((a.expansion_score ?? 0) >= 70 && (a.health_score ?? 0) >= 60),
+  stables: (a) => {
+    const churn = a.churn_risk_score ?? 100
+    const health = a.health_score ?? 0
+    const expansion = a.expansion_score ?? 0
+    const isStableScore = churn < 50 && health < 80 && !(expansion >= 70 && health >= 60)
+    if (!hasStripe(a)) return isStableScore
+    return (a.mrr_cents ?? 0) > 0 && isStableScore
+  },
 
-  a_risque_leger: (a) =>
-    (a.churn_risk_score ?? 0) >= 50 &&
-    (a.churn_risk_score ?? 0) < 70 &&
-    (a.mrr_cents ?? 0) > 0,
+  a_risque_leger: (a) => {
+    const churn = a.churn_risk_score ?? 0
+    if (!hasStripe(a)) return churn >= 50 && churn < 70
+    return churn >= 50 && churn < 70 && (a.mrr_cents ?? 0) > 0
+  },
 
-  en_danger_critique: (a) =>
-    (a.churn_risk_score ?? 0) >= 70 && (a.mrr_cents ?? 0) > 0,
+  en_danger_critique: (a) => {
+    if (!hasStripe(a)) return (a.churn_risk_score ?? 0) >= 70
+    return (a.churn_risk_score ?? 0) >= 70 && (a.mrr_cents ?? 0) > 0
+  },
 
   impayes: (a) =>
+    hasStripe(a) &&
     (a.churn_risk_score ?? 0) > 80 &&
     (a.health_score ?? 0) < 50 &&
     (a.mrr_cents ?? 0) > 0,
 
-  en_churn: (a) => (a.mrr_cents ?? 0) === 0,
+  en_churn: (a) => hasStripe(a) && (a.mrr_cents ?? 0) === 0,
 
   nouveaux: (a) => {
     if (!a.created_at) return false

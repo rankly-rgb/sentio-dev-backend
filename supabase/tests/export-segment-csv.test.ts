@@ -30,8 +30,25 @@ function makeRow(overrides: Partial<SegmentAccountRow> = {}): SegmentAccountRow 
     expansion_score: 65,
     product_usage_score: 58,
     created_at: '2025-01-15T00:00:00Z',
+    data_source: 'stripe',
   }
   return Object.assign(base, overrides)
+}
+
+/** HubSpot-only account (no stripe_customer_id) */
+function makeHubspotRow(overrides: Partial<SegmentAccountRow> = {}): SegmentAccountRow {
+  return makeRow({
+    stripe_customer_id: null,
+    hubspot_company_id: 'hub_test456',
+    plan_tier: null,
+    billing_interval: null,
+    mrr_cents: null,
+    seat_count: null,
+    seat_limit: null,
+    contract_end_date: null,
+    data_source: 'hubspot',
+    ...overrides,
+  })
 }
 
 // ── Zero-PII check ──────────────────────────────────────────
@@ -346,5 +363,48 @@ describe('isValidSortOrder', () => {
   it('rejects invalid sort orders', () => {
     expect(isValidSortOrder('ASC')).toBe(false)
     expect(isValidSortOrder('')).toBe(false)
+  })
+})
+
+// ── SEGMENT_FILTERS — HubSpot-only accounts ────────────────
+
+describe('SEGMENT_FILTERS — HubSpot-only (no stripe_customer_id)', () => {
+  it('en_churn rejects HubSpot-only accounts (no MRR data)', () => {
+    expect(SEGMENT_FILTERS.en_churn(makeHubspotRow({ mrr_cents: null }))).toBe(false)
+    expect(SEGMENT_FILTERS.en_churn(makeHubspotRow({ mrr_cents: 0 }))).toBe(false)
+  })
+
+  it('impayes rejects HubSpot-only accounts', () => {
+    expect(SEGMENT_FILTERS.impayes(makeHubspotRow({ churn_risk_score: 85, health_score: 40 }))).toBe(false)
+  })
+
+  it('champions matches HubSpot-only with high health', () => {
+    expect(SEGMENT_FILTERS.champions(makeHubspotRow({ health_score: 85, churn_risk_score: 10 }))).toBe(true)
+  })
+
+  it('en_danger_critique matches HubSpot-only with high churn risk', () => {
+    expect(SEGMENT_FILTERS.en_danger_critique(makeHubspotRow({ churn_risk_score: 75 }))).toBe(true)
+  })
+
+  it('a_risque_leger matches HubSpot-only without MRR check', () => {
+    expect(SEGMENT_FILTERS.a_risque_leger(makeHubspotRow({ churn_risk_score: 55 }))).toBe(true)
+  })
+
+  it('stables matches HubSpot-only without MRR check', () => {
+    expect(SEGMENT_FILTERS.stables(makeHubspotRow({ health_score: 60, churn_risk_score: 20, expansion_score: 30 }))).toBe(true)
+  })
+
+  it('stables still rejects Stripe accounts with mrr = 0', () => {
+    expect(SEGMENT_FILTERS.stables(makeRow({ health_score: 60, churn_risk_score: 20, mrr_cents: 0, expansion_score: 30 }))).toBe(false)
+  })
+
+  it('en_expansion matches HubSpot-only with good scores', () => {
+    expect(SEGMENT_FILTERS.en_expansion(makeHubspotRow({ expansion_score: 75, health_score: 65, churn_risk_score: 20 }))).toBe(true)
+  })
+
+  it('nouveaux matches HubSpot-only with recent created_at', () => {
+    const recent = new Date()
+    recent.setDate(recent.getDate() - 30)
+    expect(SEGMENT_FILTERS.nouveaux(makeHubspotRow({ created_at: recent.toISOString() }))).toBe(true)
   })
 })

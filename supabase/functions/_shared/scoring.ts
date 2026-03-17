@@ -79,8 +79,8 @@ export function calcEngagementScore(hubspot: HubspotData | null): number {
     )
     if (daysSince < 30) score += 25
     else if (daysSince < 60) score += 10
-    else if (daysSince > 90) score -= 15
     else if (daysSince > 180) score -= 25
+    else if (daysSince > 90) score -= 15
   }
 
   return Math.round(Math.max(0, Math.min(100, score)) * 100) / 100
@@ -122,18 +122,27 @@ export interface HealthScoreParams {
   contractScore: number
   usageScore?: number
   usageTrackerConnected: boolean
+  /** true si le compte a des données Stripe (default: true pour rétro-compat) */
+  stripeConnected?: boolean
 }
 
 export function calcHealthScore(params: HealthScoreParams): number {
-  if (params.usageTrackerConnected && params.usageScore !== undefined) {
-    // 4 dimensions — quand tracker connecté
+  const stripeConnected = params.stripeConnected !== false
+  if (params.usageTrackerConnected && stripeConnected && params.usageScore !== undefined) {
+    // 4 dimensions — Stripe + Usage tracker connectés
     return Math.round(
       (params.usageScore * 0.35 + params.financialScore * 0.25 + params.engagementScore * 0.20 + params.contractScore * 0.20) * 100,
     ) / 100
   }
-  // 3 dimensions V1 — usage exclu
+  if (stripeConnected) {
+    // 3 dimensions V1 — Stripe connecté, usage exclu
+    return Math.round(
+      (params.financialScore * 0.34 + params.engagementScore * 0.33 + params.contractScore * 0.33) * 100,
+    ) / 100
+  }
+  // 2 dimensions — HubSpot-only (pas de données financières Stripe)
   return Math.round(
-    (params.financialScore * 0.34 + params.engagementScore * 0.33 + params.contractScore * 0.33) * 100,
+    (params.engagementScore * 0.60 + params.contractScore * 0.40) * 100,
   ) / 100
 }
 
@@ -144,9 +153,11 @@ export function calcChurnRiskScore(
   daysActive: number,
   account: Account,
   usageTrackerConnected?: boolean,
+  stripeConnected?: boolean,
 ): number {
   let churnAdditif = 0
-  if (invoiceStatus.has_overdue) churnAdditif += 15
+  // Pénalité factures impayées uniquement si Stripe connecté
+  if (stripeConnected !== false && invoiceStatus.has_overdue) churnAdditif += 15
   // "+20 si 0 jours actifs" ne s'applique que si le tracker est connecté
   if (daysActive === 0 && usageTrackerConnected === true) churnAdditif += 20
 
@@ -175,14 +186,20 @@ export const SYSTEM_SEGMENT_TYPES: SegmentType[] = [
  * Determine which segment(s) an account belongs to.
  * Returns an array: score-based segment (mutually exclusive, first match)
  * + lifecycle segment ('nouveaux') which can overlap.
+ *
+ * stripeConnected = false (HubSpot-only) :
+ *   - en_churn et impayes sont exclus (pas de données MRR/invoices)
+ *   - Les segments score-based fonctionnent normalement
  */
 export function determineSegmentTypes(
   scores: { health_score: number; churn_risk_score: number; expansion_score: number },
   mrrCents: number,
   hasOverdueInvoices: boolean,
   accountCreatedAt: string,
+  stripeConnected?: boolean,
 ): SegmentType[] {
   const segments: SegmentType[] = []
+  const hasStripe = stripeConnected !== false
 
   // Lifecycle: nouveaux if < 90 days old
   const daysSinceCreation = Math.floor(
@@ -191,9 +208,10 @@ export function determineSegmentTypes(
   if (daysSinceCreation < 90) segments.push('nouveaux')
 
   // Score-based primary segment (mutually exclusive, priority order)
-  if (mrrCents === 0) {
+  // en_churn et impayes nécessitent Stripe (données financières)
+  if (hasStripe && mrrCents === 0) {
     segments.push('en_churn')
-  } else if (hasOverdueInvoices) {
+  } else if (hasStripe && hasOverdueInvoices) {
     segments.push('impayes')
   } else if (scores.churn_risk_score >= 70) {
     segments.push('en_danger_critique')

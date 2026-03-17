@@ -101,7 +101,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .select(
       'stripe_customer_id, hubspot_company_id, plan_tier, billing_interval, ' +
       'mrr_cents, seat_count, seat_limit, contract_end_date, ' +
-      'health_score, churn_risk_score, expansion_score, product_usage_score, created_at'
+      'health_score, churn_risk_score, expansion_score, product_usage_score, created_at, data_source'
     )
     .eq('organization_id', orgId)
     .order('mrr_cents', { ascending: false })
