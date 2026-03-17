@@ -1232,6 +1232,89 @@ Edge Function `get-benchmark-data` : métriques NRR, Churn Rate et MRR Growth de
 
 ---
 
+## Support Comptes HubSpot-Only v1 (2026-03-17)
+
+Permet aux clients de connecter uniquement HubSpot (sans Stripe) tout en gardant la compatibilite totale avec les clients Stripe+HubSpot existants. Les comptes HubSpot-only sont automatiquement crees par `sync-hubspot` et scores avec une formule adaptee.
+
+**Probleme initial :**
+- `accounts.stripe_customer_id` etait NOT NULL → impossible de creer des comptes sans Stripe
+- `sync-hubspot` ne faisait que lier des companies HubSpot a des comptes existants (crees par Stripe)
+- Financial score = 0 systematique sans Stripe → health scores artificiellement bas
+- 6/8 segments dependaient de `mrr_cents` → comptes HubSpot-only tous classes `en_churn`
+
+**Migration `20260317000001_hubspot_only_accounts.sql` :**
+- `stripe_customer_id` rendu nullable (suppression NOT NULL)
+- Colonne `data_source TEXT NOT NULL DEFAULT 'stripe'` avec CHECK `('stripe', 'hubspot', 'both')`
+- DROP ancienne contrainte UNIQUE `accounts_org_stripe_key`
+- Index unique partiel `(org_id, stripe_customer_id) WHERE stripe_customer_id IS NOT NULL`
+- Index unique partiel `(org_id, hubspot_company_id) WHERE hubspot_company_id IS NOT NULL`
+- Backfill : `data_source = 'both'` pour les comptes ayant les deux IDs
+
+**`sync-hubspot` — creation comptes HubSpot-only :**
+- Avant : skip les companies HubSpot sans match Stripe (`if (!accountId) continue`)
+- Apres : cree un compte avec `stripe_customer_id = NULL`, `data_source = 'hubspot'`, `mrr_cents = NULL`
+- Upsert sur `(organization_id, hubspot_company_id)` — idempotent
+- Auto-linking Stripe : quand un compte HubSpot-only est matche via `id_stripe`, `data_source` passe a `'both'`
+- Log structure : `Created N HubSpot-only accounts (no Stripe match)`
+
+**`scoring.ts` — scoring adaptatif 2D/3D/4D :**
+
+| Mode | Condition | Formule Health Score |
+|------|-----------|---------------------|
+| 2D | `stripeConnected = false` (HubSpot-only) | Engagement × 60% + Contract × 40% |
+| 3D | `stripeConnected = true`, usage tracker off | Financial × 34% + Engagement × 33% + Contract × 33% |
+| 4D | `stripeConnected = true`, usage tracker on | Usage × 35% + Financial × 25% + Engagement × 20% + Contract × 20% |
+
+- `HealthScoreParams.stripeConnected` : optionnel, default `true` (retro-compatible)
+- `calcChurnRiskScore` : penalite factures impayees (`+15`) uniquement si `stripeConnected !== false`
+- `determineSegmentTypes` : param optionnel `stripeConnected`
+  - `en_churn` : uniquement si Stripe connecte ET MRR = 0
+  - `impayes` : uniquement si Stripe connecte
+  - Segments score-based (`champions`, `en_expansion`, `stables`, etc.) : fonctionnent sans Stripe
+
+**`calculate-scores` — detection per-account :**
+- `stripeConnected = account.stripe_customer_id != null` (detection automatique)
+- Passe a `scoreAccountPure()` et `determineSegmentTypes()`
+- Quand un compte HubSpot-only est lie a Stripe plus tard, le scoring bascule automatiquement en 3D
+
+**Filtres segment frontend + backend :**
+- `SEGMENT_FILTERS` dans `segment-export-helpers.ts` et `segment-queries.ts` adaptes
+- Helper `hasStripe(a)` : detection via `stripe_customer_id != null`
+- `en_churn`, `impayes` : uniquement comptes Stripe
+- `stables`, `a_risque_leger`, `en_danger_critique` : sans check MRR pour HubSpot-only
+- `champions`, `en_expansion`, `nouveaux` : inchanges (score-based uniquement)
+
+**Type Account frontend :**
+- Ajout `data_source: string` dans `src/lib/types/accounts.ts`
+- `export-segment-csv` : select inclut `data_source`
+
+**Comportement par configuration client :**
+
+| Config | Comptes crees par | Scoring | Segments |
+|--------|-------------------|---------|----------|
+| Stripe seul | `sync-stripe` | 3D (F×34 + E×33 + C×33) | 8/8 |
+| Stripe + HubSpot | `sync-stripe` + link HubSpot | 3D (engagement enrichi) | 8/8 |
+| HubSpot seul | `sync-hubspot` (nouveau) | 2D (E×60 + C×40) | 6/8 (sans en_churn, impayes) |
+| HubSpot → puis Stripe | Auto-link, data_source = both | Bascule auto en 3D | 8/8 |
+
+**Exemple scoring HubSpot-only :**
+```
+Engagement: 65 (tickets + meetings HubSpot)
+Contract:   50 (neutre, pas de donnees Stripe)
+Health 2D:  65 × 0.60 + 50 × 0.40 = 59
+Churn Risk: 100 - 59 = 41 (modere, pas de faux positif)
+Segment:    stables (churn < 50, health < 80)
+```
+
+**Tests : 31 nouveaux tests (924 total) :**
+- calcHealthScore 2D : formule E×60+C×40, ignore financialScore, ignore usageScore, bornes 0/100, comparaison 2D vs 3D (6 tests)
+- calcChurnRiskScore sans Stripe : pas de penalite invoice, penalite contrat preservee, penalite invoice avec Stripe (3 tests)
+- determineSegmentTypes HubSpot-only : pas en_churn avec MRR=0, pas impayes, champions/stables/en_danger_critique/a_risque_leger/en_expansion fonctionnels, retro-compat undefined (8 tests)
+- SEGMENT_FILTERS HubSpot-only : en_churn/impayes rejetes, champions/en_danger_critique/a_risque_leger/stables/en_expansion/nouveaux acceptes, stables Stripe avec MRR=0 rejete (9 tests)
+- Retro-compatibilite : stripeConnected undefined = true dans tous les cas (5 tests adaptes)
+
+---
+
 ## Backlog
 
 - Propager `contract_end_date` dans `stripe-webhook`

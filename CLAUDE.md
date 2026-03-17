@@ -46,21 +46,28 @@ npm run verify       # typecheck + lint + test + build (post-modification)
 ## Scoring SaaS
 
 ```
-# V1 — usage tracker non connecté (3 dimensions)
+# Mode 2D — HubSpot-only (pas de Stripe)
+Health Score = (Engagement × 60%) + (Contract × 40%)
+
+# Mode 3D — Stripe connecté, usage tracker off (V1 défaut)
 Health Score = (Financial × 34%) + (Engagement × 33%) + (Contract × 33%)
 
-# Futur — usage tracker connecté (4 dimensions)
+# Mode 4D — Stripe + usage tracker connecté (futur)
 Health Score = (Usage × 35%) + (Financial × 25%) + (Engagement × 20%) + (Contract × 20%)
 
 Churn Risk  = 100 - Health Score + facteurs additifs (capped 100)
 Expansion   = (seat_usage_pct × 60%) + (feature_ceiling × 40%)
 ```
 
+`stripeConnected` : détecté par `calculate-scores` (`stripe_customer_id IS NOT NULL`). Détermine le mode 2D vs 3D.
 `usage_tracker_connected` : détecté par `calculate-scores` (≥1 usage_event dans les 30 derniers jours). Stocké sur `accounts`.
+`data_source` : `'stripe'` | `'hubspot'` | `'both'` — colonne sur `accounts`, mis à jour par sync-stripe/sync-hubspot.
 
-Valeurs neutres (pas de données) : Engagement=50, Contrat=50, Financial=0. Usage=NULL quand tracker non connecté.
+Valeurs neutres (pas de données) : Engagement=50, Contrat=50, Financial=0 (Stripe) ou exclu (HubSpot-only). Usage=NULL quand tracker non connecté.
 
 8 segments : Champions, En expansion, Stables, À risque léger, En danger critique, Impayés, En churn, Nouveaux (<90j).
+- `en_churn` et `impayes` : uniquement comptes Stripe (dépendent de MRR/invoices)
+- Comptes HubSpot-only : segmentés par scores uniquement (6/8 segments disponibles)
 
 ## Edge Functions
 
