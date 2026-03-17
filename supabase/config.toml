@@ -75,6 +75,10 @@ verify_jwt = true
 [functions.refresh-hubspot-tokens]
 verify_jwt = true
 
+# get-benchmark-data : JWT vérifié dans le code (ES256 incompatible avec verify_jwt)
+[functions.get-benchmark-data]
+verify_jwt = false
+
 # integration-oauth : JWT vérifié dans le code pour authorize/status/revoke
 # Callbacks OAuth (redirect browser) protégés par state CSRF, pas de JWT
 [functions.integration-oauth]
