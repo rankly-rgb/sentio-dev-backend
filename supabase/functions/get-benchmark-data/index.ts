@@ -15,7 +15,7 @@
  * Réponse 200 :
  * {
  *   computed_at: string,        // ISO timestamp
- *   period_days: { nrr: 90, churn_rate: 30, mrr_growth: 30 },
+ *   period_days: 30,
  *   metrics: {
  *     nrr: {
  *       value: number | null,
@@ -36,7 +36,8 @@
  *   }
  * }
  *
- * Erreurs : { error: string } avec status 401/403/500
+ * Erreurs : { error: string } avec status 401/403/404/500
+ * 404 : organisation non trouvée ou pas assez de données pour calculer
  * ────────────────────────────────────────────────────────
  */
 
@@ -159,6 +160,12 @@ Deno.serve(async (req: Request) => {
     const netMov30d = computeNetMovements((movements30d || []) as MrrMovementRow[])
     const orgMrrGrowth = computeMrrGrowth(currentMrrCents, netMov30d)
 
+    // 404 si aucune donnée exploitable
+    if (orgNrr === null && orgChurnRate === null && orgMrrGrowth === null) {
+      logger.info('Insufficient data for benchmark', { organization_id: organizationId })
+      return errorResponse('Pas assez de données pour calculer les benchmarks', 404)
+    }
+
     // ── Peer comparison ──────────────────────────────────
 
     // Compter les orgs actives
@@ -243,7 +250,7 @@ Deno.serve(async (req: Request) => {
 
     const response = {
       computed_at: now.toISOString(),
-      period_days: { nrr: 90, churn_rate: 30, mrr_growth: 30 },
+      period_days: 30,
       metrics: {
         nrr: buildMetricResult('nrr', orgNrr, nrrPeer),
         churn_rate: buildMetricResult('churn_rate', orgChurnRate, churnPeer),

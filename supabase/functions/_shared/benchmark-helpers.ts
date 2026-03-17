@@ -49,7 +49,7 @@ export interface MetricResult {
 
 export interface BenchmarkResponse {
   computed_at: string
-  period_days: { nrr: number; churn_rate: number; mrr_growth: number }
+  period_days: number
   metrics: {
     nrr: MetricResult
     churn_rate: MetricResult
@@ -63,25 +63,27 @@ export interface BenchmarkResponse {
 
 /**
  * Détermine le rating d'une valeur par rapport aux seuils externes.
- * Pour churn_rate, la logique est inversée (plus bas = meilleur).
+ *
+ * NRR & MRR Growth : >= excellent → "excellent", >= bon → "bon", >= correct → "correct", sinon "médiocre"
+ * Churn Rate (inversé) : <= excellent → "excellent", <= bon → "bon", <= correct → "correct", sinon "médiocre"
  */
 export function computeRating(metric: MetricKey, value: number | null): Rating {
   if (value === null || value === undefined) return 'médiocre'
 
-  const { thresholds } = EXTERNAL_BENCHMARKS[metric]
+  const bench = EXTERNAL_BENCHMARKS[metric]
 
   if (metric === 'churn_rate') {
     // Inversé : plus bas est meilleur
-    if (value < thresholds.excellent) return 'excellent'
-    if (value <= thresholds.bon) return 'bon'
-    if (value <= thresholds.correct) return 'correct'
+    if (value <= bench.excellent) return 'excellent'
+    if (value <= bench.bon) return 'bon'
+    if (value <= bench.correct) return 'correct'
     return 'médiocre'
   }
 
   // NRR et MRR Growth : plus haut est meilleur
-  if (value > thresholds.excellent) return 'excellent'
-  if (value >= thresholds.bon) return 'bon'
-  if (value >= thresholds.correct) return 'correct'
+  if (value >= bench.excellent) return 'excellent'
+  if (value >= bench.bon) return 'bon'
+  if (value >= bench.correct) return 'correct'
   return 'médiocre'
 }
 
@@ -243,10 +245,10 @@ export function buildMetricResult(
   return {
     value,
     external_benchmark: {
-      excellent: bench.values.excellent,
-      bon: bench.values.bon,
-      correct: bench.values.correct,
-      mediocre: bench.values.mediocre,
+      excellent: bench.excellent,
+      bon: bench.bon,
+      correct: bench.correct,
+      mediocre: bench.mediocre,
       rating: computeRating(metric, value),
       sources: bench.sources,
     },

@@ -1,42 +1,36 @@
 /**
- * Benchmarks externes SaaS B2B — sources fiables, valeurs hardcodées.
+ * Benchmarks externes SaaS B2B — seuils et sources.
  *
- * Sources :
- * - OpenView SaaS Benchmarks 2024
- * - Bessemer Venture Partners Cloud Index 2024
- * - Baremetrics SaaS Benchmarks 2024
+ * Les champs excellent/bon/correct/mediocre servent à la fois de
+ * valeurs affichées sur la gauge bar ET de seuils pour le rating.
+ *
+ * Rating :
+ *   NRR & MRR Growth : >= excellent → "excellent", >= bon → "bon", etc.
+ *   Churn Rate (inversé) : <= excellent → "excellent", <= bon → "bon", etc.
  */
 
 export const EXTERNAL_BENCHMARKS = {
   nrr: {
-    /** Seuils : > 110 = excellent, 100-110 = bon, 90-100 = correct, < 90 = médiocre */
-    thresholds: { excellent: 110, bon: 100, correct: 90 },
-    values: { excellent: 120, bon: 110, correct: 100, mediocre: 90 },
-    sources: [
-      'OpenView SaaS Benchmarks 2024',
-      'Bessemer Venture Partners Cloud Index 2024',
-    ],
+    excellent: 120,
+    bon: 100,
+    correct: 90,
+    mediocre: 80,
+    sources: ['OpenView 2024', 'Bessemer Cloud Index'],
   },
   churn_rate: {
-    /**
-     * ATTENTION : pour churn_rate, un score PLUS BAS est MEILLEUR.
-     * Seuils : < 0.5 = excellent, 0.5-1 = bon, 1-2 = correct, > 2 = médiocre
-     */
-    thresholds: { excellent: 0.5, bon: 1.0, correct: 2.0 },
-    values: { excellent: 0.5, bon: 1.0, correct: 2.0, mediocre: 3.0 },
-    sources: [
-      'Baremetrics SaaS Benchmarks 2024',
-      'OpenView SaaS Benchmarks 2024',
-    ],
+    /** Inversé : plus bas = mieux. <= 1 = excellent, <= 3 = bon, <= 5 = correct, > 5 = médiocre */
+    excellent: 1,
+    bon: 3,
+    correct: 5,
+    mediocre: 8,
+    sources: ['Recurly 2024', 'ProfitWell'],
   },
   mrr_growth: {
-    /** Seuils : > 15 = excellent, 10-15 = bon, 5-10 = correct, < 5 = médiocre */
-    thresholds: { excellent: 15, bon: 10, correct: 5 },
-    values: { excellent: 15, bon: 10, correct: 5, mediocre: 2 },
-    sources: [
-      'OpenView SaaS Benchmarks 2024',
-      'Bessemer Venture Partners Cloud Index 2024',
-    ],
+    excellent: 15,
+    bon: 8,
+    correct: 3,
+    mediocre: 0,
+    sources: ['SaaS Capital 2024'],
   },
 } as const
 
