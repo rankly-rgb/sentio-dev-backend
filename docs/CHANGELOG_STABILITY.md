@@ -1196,13 +1196,13 @@ Edge Function `get-benchmark-data` : métriques NRR, Churn Rate et MRR Growth de
 | Churn Rate | 30 jours | comptes_churned / comptes_début × 100 |
 | MRR Growth | 30 jours | (MRR_actuel - MRR_30j_ago) / MRR_30j_ago × 100 |
 
-**Benchmarks externes hardcodés (sources : OpenView 2024, Bessemer 2024, Baremetrics 2024) :**
+**Benchmarks externes hardcodés :**
 
-| Métrique | Excellent | Bon | Correct | Médiocre |
-|----------|-----------|-----|---------|----------|
-| NRR (%) | > 110 | 100-110 | 90-100 | < 90 |
-| Churn Rate mensuel (%) | < 0.5 | 0.5-1 | 1-2 | > 2 |
-| MRR Growth mensuel (%) | > 15 | 10-15 | 5-10 | < 5 |
+| Métrique | Excellent | Bon | Correct | Médiocre | Sources |
+|----------|-----------|-----|---------|----------|---------|
+| NRR (%) | >= 120 | >= 100 | >= 90 | < 90 | OpenView 2024, Bessemer Cloud Index |
+| Churn Rate mensuel (%) | <= 1 | <= 3 | <= 5 | > 5 | Recurly 2024, ProfitWell |
+| MRR Growth mensuel (%) | >= 15 | >= 8 | >= 3 | < 3 | SaaS Capital 2024 |
 
 **Peer comparison :**
 - Médiane calculée sur toutes les organisations actives (service_role bypass RLS)
