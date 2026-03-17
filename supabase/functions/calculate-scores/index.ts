@@ -162,7 +162,41 @@ const MAX_BATCHES = 200 // Safety guard: 200 * 500 = 100k accounts max per org
 const DEFAULT_USAGE: UsageStats = { login_count: 0, feature_count: 0, total_events: 0, distinct_features: 0, days_active: 0 }
 const DEFAULT_INVOICE: InvoiceStatus = { has_overdue: false, overdue_count: 0 }
 
-// ── Pre-fetch scoring data for a batch of accounts (3 parallel queries instead of 3N) ──
+// ── Chunked .in() to avoid PostgREST URL length limit (~8000 chars) ──
+// 100 UUIDs × 36 chars ≈ 3600 chars (safe margin)
+const IN_CHUNK_SIZE = 100
+
+async function chunkedIn<T>(
+  supabase: SupabaseClient,
+  table: string,
+  selectCols: string,
+  filterCol: string,
+  filterValues: string[],
+  extraFilters?: (q: ReturnType<SupabaseClient['from']>) => ReturnType<SupabaseClient['from']>,
+  limit?: number,
+): Promise<T[]> {
+  const results: T[] = []
+  for (let i = 0; i < filterValues.length; i += IN_CHUNK_SIZE) {
+    const chunk = filterValues.slice(i, i + IN_CHUNK_SIZE)
+    let query = supabase.from(table).select(selectCols).in(filterCol, chunk)
+    if (extraFilters) query = extraFilters(query) as typeof query
+    if (limit) query = query.limit(limit)
+    const { data, error } = await query
+    if (error) {
+      console.error(JSON.stringify({
+        level: 'error',
+        function_name: 'calculate-scores',
+        message: `${table} chunked query failed: ${error.message}`,
+        chunk_size: chunk.length,
+      }))
+      continue
+    }
+    if (data) results.push(...(data as T[]))
+  }
+  return results
+}
+
+// ── Pre-fetch scoring data for a batch of accounts (chunked to avoid URL limit) ──
 async function prefetchScoringData(
   supabase: SupabaseClient,
   accountIds: string[],
@@ -173,32 +207,38 @@ async function prefetchScoringData(
 }> {
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]
 
-  const [usageResult, hubspotResult, invoiceResult] = await Promise.all([
-    supabase
-      .from('usage_events')
-      .select('account_id, event_type, feature_name, event_count, event_date')
-      .in('account_id', accountIds)
-      .gte('event_date', thirtyDaysAgo)
-      .limit(50000),
-    supabase
-      .from('hubspot_companies')
-      .select('account_id, nps_score, open_ticket_count, open_deal_count, last_meeting_date')
-      .in('account_id', accountIds),
-    supabase
-      .from('invoices')
-      .select('account_id')
-      .in('account_id', accountIds)
-      .in('status', ['open', 'uncollectible']),
+  const [usageRows, hubspotRows, invoiceRows] = await Promise.all([
+    chunkedIn<Record<string, unknown>>(
+      supabase, 'usage_events',
+      'account_id, event_type, feature_name, event_count, event_date',
+      'account_id', accountIds,
+      (q) => q.gte('event_date', thirtyDaysAgo),
+      50000,
+    ),
+    chunkedIn<Record<string, unknown>>(
+      supabase, 'hubspot_companies',
+      'account_id, nps_score, open_ticket_count, open_deal_count, last_meeting_date',
+      'account_id', accountIds,
+      undefined,
+      10000,
+    ),
+    chunkedIn<Record<string, unknown>>(
+      supabase, 'invoices',
+      'account_id, status',
+      'account_id', accountIds,
+      (q) => q.in('status', ['open', 'uncollectible']),
+    ),
   ])
 
   // Build usage stats per account
   const usageMap = new Map<string, UsageStats>()
-  if (usageResult.data) {
+  {
     const grouped = new Map<string, Array<Record<string, unknown>>>()
-    for (const row of usageResult.data) {
-      const list = grouped.get(row.account_id) ?? []
+    for (const row of usageRows) {
+      const aid = row.account_id as string
+      const list = grouped.get(aid) ?? []
       list.push(row)
-      grouped.set(row.account_id, list)
+      grouped.set(aid, list)
     }
     for (const [accountId, rows] of grouped) {
       const stats: UsageStats = { login_count: 0, feature_count: 0, total_events: 0, distinct_features: 0, days_active: 0 }
@@ -222,18 +262,17 @@ async function prefetchScoringData(
 
   // Build hubspot data map
   const hubspotMap = new Map<string, HubspotData | null>()
-  if (hubspotResult.data) {
-    for (const row of hubspotResult.data) {
-      hubspotMap.set(row.account_id, row as unknown as HubspotData)
-    }
+  for (const row of hubspotRows) {
+    hubspotMap.set(row.account_id as string, row as unknown as HubspotData)
   }
 
   // Build invoice status map
   const invoiceStatusMap = new Map<string, InvoiceStatus>()
-  if (invoiceResult.data) {
+  {
     const counts = new Map<string, number>()
-    for (const row of invoiceResult.data) {
-      counts.set(row.account_id, (counts.get(row.account_id) ?? 0) + 1)
+    for (const row of invoiceRows) {
+      const aid = row.account_id as string
+      counts.set(aid, (counts.get(aid) ?? 0) + 1)
     }
     for (const [accountId, count] of counts) {
       invoiceStatusMap.set(accountId, { has_overdue: true, overdue_count: count })
