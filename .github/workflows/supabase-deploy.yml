@@ -25,16 +25,30 @@ jobs:
       - name: Link Supabase project
         run: supabase link --project-ref $SUPABASE_PROJECT_REF
 
-      - name: Repair migration history (remote-only versions → reverted)
-        # Marque comme "reverted" les versions présentes en remote mais absentes
-        # en local, pour permettre à db push de s'exécuter sans erreur de mismatch.
+      - name: Repair remote-only migration versions
+        # Versions présentes en remote sans fichier local (migrations appliquées
+        # directement sur le projet). Les marquer comme "reverted" dans l'historique
+        # pour que db push ne bloque pas sur le mismatch.
         run: |
-          supabase migration list 2>/dev/null || true
-          supabase db push --include-all --dry-run 2>&1 || true
-        continue-on-error: true
+          REMOTE_ONLY=$(supabase migration list 2>/dev/null | awk -F'|' '
+            /[0-9]{14}/ {
+              local=$1; gsub(/[ \t]/, "", local)
+              remote=$2; gsub(/[ \t]/, "", remote)
+              if (local == "" && remote ~ /^[0-9]{14}$/) print remote
+            }
+          ')
+          if [ -n "$REMOTE_ONLY" ]; then
+            echo "Remote-only versions à réparer :"
+            echo "$REMOTE_ONLY"
+            while IFS= read -r version; do
+              [ -n "$version" ] && supabase migration repair --status reverted "$version"
+            done <<< "$REMOTE_ONLY"
+          else
+            echo "Aucune version remote-only — historique cohérent."
+          fi
 
       - name: Push database migrations
-        run: supabase db push --include-all --ignore-version-mismatch
+        run: supabase db push --include-all
 
       - name: Deploy Edge Functions
         run: supabase functions deploy

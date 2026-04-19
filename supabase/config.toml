@@ -1,6 +1,6 @@
 # Supabase project configuration
 # Ref : https://supabase.com/docs/guides/cli/config
-# Last deploy trigger : 2026-04-19T19:00
+# Last deploy trigger : 2026-04-19T19:15
 
 # stripe-webhook : pas de vérification JWT (Stripe signe ses propres requêtes via HMAC)
 [functions.stripe-webhook]
