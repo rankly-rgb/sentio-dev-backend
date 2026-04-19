@@ -53,3 +53,23 @@ verify_jwt = false
 # self-monitor : cron interne (service_role HS256)
 [functions.self-monitor]
 verify_jwt = true
+
+# accounts-api : JWT vérifié dans le code (ES256 — chantiers 1, 5, 7)
+[functions.accounts-api]
+verify_jwt = false
+
+# onboarding-status : JWT vérifié dans le code (ES256 — chantier 2)
+[functions.onboarding-status]
+verify_jwt = false
+
+# dashboard-api : JWT vérifié dans le code (ES256 — chantiers 3, 4)
+[functions.dashboard-api]
+verify_jwt = false
+
+# playbooks-suggested : JWT vérifié dans le code (ES256 — chantier 6)
+[functions.playbooks-suggested]
+verify_jwt = false
+
+# session-ping : JWT vérifié dans le code (ES256 — chantier 7)
+[functions.session-ping]
+verify_jwt = false

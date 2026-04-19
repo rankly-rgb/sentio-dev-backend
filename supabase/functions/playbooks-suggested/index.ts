@@ -1,0 +1,199 @@
+// ============================================================
+// Edge Function : playbooks-suggested
+// Suggestion déterministe du playbook le plus pertinent à activer,
+// basée sur l'état réel du portefeuille.
+//
+// RÈGLES DE PRIORITÉ (ordre décroissant) :
+//   1. en_danger_critique → churn_prevention
+//   2. impayes            → payment_recovery
+//   3. en_churn           → winback
+//   4. en_expansion       → expansion
+//   5. a_risque_leger     → health_monitoring (si >= 3 comptes)
+//   6. renewal_alert insights actifs → renewal
+//
+// CONTRAT API
+// ──────────────────────────────────────────────────────────
+//
+// GET /playbooks-suggested
+//   Response 200 :
+//     {
+//       data: {
+//         suggested_playbook_id: string | null,  // ID du playbook existant si trouvé
+//         template_category: string,             // catégorie suggérée
+//         title: string,                         // titre du playbook (existant ou suggéré)
+//         reason: string,                        // phrase courte expliquant la suggestion
+//         accounts_targeted: number,             // nb de comptes qui seraient ciblés
+//         already_active: boolean,               // un playbook du même type est déjà actif
+//         segment_type: string | null            // segment source de la suggestion
+//       } | null                                 // null si aucune suggestion pertinente
+//     }
+//
+// Auth : JWT utilisateur vérifié dans le code (ES256 via verifyUserAuth)
+// ============================================================
+
+import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
+import { handleCors } from '../_shared/cors.ts'
+import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
+import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+
+interface SuggestionRule {
+  segment_type: string | null
+  template_category: string
+  min_accounts: number
+  reason: (count: number) => string
+  suggested_title: string
+}
+
+const SUGGESTION_RULES: SuggestionRule[] = [
+  {
+    segment_type: 'en_danger_critique',
+    template_category: 'churn_prevention',
+    min_accounts: 1,
+    reason: (n) => `${n} compte(s) en danger critique identifié(s) dans votre portefeuille.`,
+    suggested_title: 'Playbook Prévention Churn',
+  },
+  {
+    segment_type: 'impayes',
+    template_category: 'payment_recovery',
+    min_accounts: 1,
+    reason: (n) => `${n} compte(s) avec des impayés en attente de résolution.`,
+    suggested_title: 'Playbook Recouvrement Paiements',
+  },
+  {
+    segment_type: 'en_churn',
+    template_category: 'winback',
+    min_accounts: 1,
+    reason: (n) => `${n} compte(s) en churn (MRR = 0) — tentative de réactivation possible.`,
+    suggested_title: 'Playbook Winback',
+  },
+  {
+    segment_type: 'en_expansion',
+    template_category: 'expansion',
+    min_accounts: 1,
+    reason: (n) => `${n} compte(s) à fort potentiel d'expansion identifiés.`,
+    suggested_title: 'Playbook Expansion',
+  },
+  {
+    segment_type: 'a_risque_leger',
+    template_category: 'health_monitoring',
+    min_accounts: 3,
+    reason: (n) => `${n} comptes présentent des signaux de risque léger — suivi proactif recommandé.`,
+    suggested_title: 'Playbook Suivi Santé',
+  },
+]
+
+Deno.serve(async (req: Request): Promise<Response> => {
+  const corsResponse = handleCors(req)
+  if (corsResponse) return corsResponse
+
+  let auth
+  try {
+    auth = await verifyUserAuth(req)
+  } catch (err) {
+    if (err instanceof AuthError) return errorResponse(err.message, err.status)
+    return errorResponse('Authentication failed', 401)
+  }
+
+  let supabase
+  try {
+    supabase = createServiceClient()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(JSON.stringify({ level: 'error', function_name: 'playbooks-suggested', message: msg }))
+    return errorResponse('Server configuration error', 500)
+  }
+
+  if (req.method !== 'GET') return errorResponse('Method not allowed', 405)
+
+  const orgId = auth.organizationId
+
+  // 1. Charger les segments avec leurs comptes
+  const { data: segments, error: segErr } = await supabase
+    .from('account_segments')
+    .select('id, segment_type, account_count')
+    .eq('organization_id', orgId)
+    .in('segment_type', SUGGESTION_RULES.map((r) => r.segment_type).filter(Boolean))
+
+  if (segErr) {
+    console.error(JSON.stringify({ level: 'error', function_name: 'playbooks-suggested', message: segErr.message }))
+    return errorResponse('Failed to fetch segments', 500)
+  }
+
+  const segmentByType = new Map(
+    (segments ?? []).map((s: { segment_type: string; id: string; account_count: number | null }) =>
+      [s.segment_type, s]
+    ),
+  )
+
+  // 2. Charger les playbooks actifs/brouillon pour détecter doublons
+  const { data: existingPlaybooks, error: pbErr } = await supabase
+    .from('playbooks')
+    .select('id, title, template_category, status')
+    .eq('organization_id', orgId)
+    .in('status', ['active', 'draft'])
+    .not('template_category', 'is', null)
+    .limit(200)
+
+  if (pbErr) {
+    console.error(JSON.stringify({ level: 'error', function_name: 'playbooks-suggested', message: pbErr.message }))
+    return errorResponse('Failed to fetch playbooks', 500)
+  }
+
+  const activeByCategory = new Map<string, { id: string; title: string; status: string }>()
+  for (const pb of (existingPlaybooks ?? [])) {
+    if (pb.template_category && !activeByCategory.has(pb.template_category)) {
+      activeByCategory.set(pb.template_category, pb)
+    }
+  }
+
+  // 3. Évaluer les règles dans l'ordre de priorité
+  for (const rule of SUGGESTION_RULES) {
+    const segment = rule.segment_type ? segmentByType.get(rule.segment_type) : null
+    const accountCount = segment?.account_count ?? 0
+
+    if (accountCount < rule.min_accounts) continue
+
+    const existing = rule.template_category ? activeByCategory.get(rule.template_category) : undefined
+    const alreadyActive = existing?.status === 'active'
+
+    return jsonResponse({
+      data: {
+        suggested_playbook_id: existing?.id ?? null,
+        template_category: rule.template_category,
+        title: existing?.title ?? rule.suggested_title,
+        reason: rule.reason(accountCount),
+        accounts_targeted: accountCount,
+        already_active: alreadyActive,
+        segment_type: rule.segment_type,
+      },
+    })
+  }
+
+  // 4. Fallback : renewal_alert insights actifs
+  const { count: renewalCount } = await supabase
+    .from('ai_insights')
+    .select('id', { count: 'exact', head: true })
+    .eq('organization_id', orgId)
+    .eq('insight_type', 'renewal_alert')
+    .eq('status', 'active')
+
+  if ((renewalCount ?? 0) > 0) {
+    const existing = activeByCategory.get('renewal')
+    const alreadyActive = existing?.status === 'active'
+
+    return jsonResponse({
+      data: {
+        suggested_playbook_id: existing?.id ?? null,
+        template_category: 'renewal',
+        title: existing?.title ?? 'Playbook Gestion Renouvellements',
+        reason: `${renewalCount} alerte(s) de renouvellement actives dans votre portefeuille.`,
+        accounts_targeted: renewalCount ?? 0,
+        already_active: alreadyActive,
+        segment_type: null,
+      },
+    })
+  }
+
+  // Aucune suggestion pertinente
+  return jsonResponse({ data: null })
+})
