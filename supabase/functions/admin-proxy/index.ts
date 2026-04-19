@@ -11,7 +11,7 @@ import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { createLogger } from '../_shared/structured-logger.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 
-const ALLOWED_ACTIONS = ['sync-stripe', 'calculate-scores', 'health-check', 'self-monitor'] as const
+const ALLOWED_ACTIONS = ['sync-stripe', 'calculate-scores', 'health-check', 'self-monitor', 'generate-insights'] as const
 type AllowedAction = typeof ALLOWED_ACTIONS[number]
 
 interface ProxyRequest {
@@ -146,6 +146,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
         organization_id: body.organization_id,
       })
     } else if (action === 'self-monitor') {
+      targetBody = JSON.stringify({})
+    } else if (action === 'generate-insights') {
       targetBody = JSON.stringify({})
     }
   }
