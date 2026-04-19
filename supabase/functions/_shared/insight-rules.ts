@@ -65,7 +65,7 @@ function daysUntil(dateStr: string): number {
 export function evaluateChurnPrediction(input: InsightInput): InsightCandidate | null {
   if (input.churn_risk_score < 70) return null
 
-  const isCritical = input.churn_risk_score >= 85
+  const isCritical = input.churn_risk_score >= 80
   const priority: InsightPriority = isCritical ? 'critical' : 'high'
   const confidence = clamp(input.churn_risk_score, 0, 95)
 
@@ -123,21 +123,28 @@ export function evaluateRenewalAlert(input: InsightInput): InsightCandidate | nu
   if (!input.contract_end_date) return null
 
   const days = daysUntil(input.contract_end_date)
-  if (days > 60 || days < 0) return null
+  if (days > 60) return null
 
+  const isExpired = days < 0
   const isCritical = days <= 30
-  const priority: InsightPriority = isCritical ? 'critical' : 'high'
-  const confidence = isCritical ? 90 : 75
+  const priority: InsightPriority = (isExpired || isCritical) ? 'critical' : 'high'
+  const confidence = isExpired ? 95 : isCritical ? 90 : 75
 
   return {
     insight_type: 'renewal_alert',
-    title: isCritical
-      ? 'Renouvellement imminent (< 30 jours)'
-      : 'Renouvellement à prévoir (< 60 jours)',
-    description: `Le contrat expire dans ${days} jours. MRR du compte : ${mrrEur(input.mrr_cents)} €. Score de santé : ${input.health_score}%.`,
-    recommended_action: isCritical
-      ? 'Initier le processus de renouvellement immédiatement. Contacter le décideur.'
-      : 'Préparer la proposition de renouvellement et planifier un point commercial.',
+    title: isExpired
+      ? `Contrat expiré depuis ${Math.abs(days)} jours`
+      : isCritical
+        ? 'Renouvellement imminent (< 30 jours)'
+        : 'Renouvellement à prévoir (< 60 jours)',
+    description: isExpired
+      ? `Le contrat a expiré il y a ${Math.abs(days)} jours. MRR du compte : ${mrrEur(input.mrr_cents)} €. Score de santé : ${input.health_score}%.`
+      : `Le contrat expire dans ${days} jours. MRR du compte : ${mrrEur(input.mrr_cents)} €. Score de santé : ${input.health_score}%.`,
+    recommended_action: isExpired
+      ? 'Contrat expiré — traiter en urgence. Contacter le décideur immédiatement pour régularisation.'
+      : isCritical
+        ? 'Initier le processus de renouvellement immédiatement. Contacter le décideur.'
+        : 'Préparer la proposition de renouvellement et planifier un point commercial.',
     priority,
     confidence_score: confidence,
     mrr_impact_cents: input.mrr_cents,
