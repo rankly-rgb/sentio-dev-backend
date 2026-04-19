@@ -32,6 +32,7 @@ import {
   calcChurnRiskScore,
   determineSegmentTypes,
 } from '../_shared/scoring.ts'
+import { generateNarratives } from '../_shared/score-narratives.ts'
 
 // ── Types internes ──────────────────────────────────────────
 interface AccountWithCreatedAt extends Account {
@@ -127,6 +128,7 @@ async function prefetchScoringData(
   usageMap: Map<string, UsageStats>
   hubspotMap: Map<string, HubspotData | null>
   invoiceStatusMap: Map<string, InvoiceStatus>
+  overdueAmountMap: Map<string, number>
 }> {
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]
 
@@ -143,7 +145,7 @@ async function prefetchScoringData(
       .in('account_id', accountIds),
     supabase
       .from('invoices')
-      .select('account_id')
+      .select('account_id, amount_cents')
       .in('account_id', accountIds)
       .in('status', ['open', 'uncollectible']),
   ])
@@ -185,19 +187,23 @@ async function prefetchScoringData(
     }
   }
 
-  // Build invoice status map
+  // Build invoice status map + overdue amount map
   const invoiceStatusMap = new Map<string, InvoiceStatus>()
+  const overdueAmountMap = new Map<string, number>()
   if (invoiceResult.data) {
     const counts = new Map<string, number>()
+    const amounts = new Map<string, number>()
     for (const row of invoiceResult.data) {
       counts.set(row.account_id, (counts.get(row.account_id) ?? 0) + 1)
+      amounts.set(row.account_id, (amounts.get(row.account_id) ?? 0) + (row.amount_cents ?? 0))
     }
     for (const [accountId, count] of counts) {
       invoiceStatusMap.set(accountId, { has_overdue: true, overdue_count: count })
+      overdueAmountMap.set(accountId, amounts.get(accountId) ?? 0)
     }
   }
 
-  return { usageMap, hubspotMap, invoiceStatusMap }
+  return { usageMap, hubspotMap, invoiceStatusMap, overdueAmountMap }
 }
 
 // ── Scoring d'un compte (pure — no DB calls) ────────────────────
@@ -442,7 +448,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           batchCount++
           const { data: batch, error: batchError } = await supabase
             .from('accounts')
-            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, health_score, churn_risk_score, created_at')
+            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, contract_start_date, billing_interval, health_score, churn_risk_score, created_at')
             .eq('organization_id', organizationId)
             .range(batchOffset, batchOffset + SCORING_BATCH_SIZE - 1)
 
@@ -466,7 +472,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
           // Pre-fetch all scoring data in 3 parallel bulk queries (instead of 3N sequential)
           const batchIds = batch.map((a: { id: string }) => a.id)
-          const { usageMap, hubspotMap, invoiceStatusMap } = await prefetchScoringData(supabase, batchIds)
+          const { usageMap, hubspotMap, invoiceStatusMap, overdueAmountMap } = await prefetchScoringData(supabase, batchIds)
 
           // Score each account (pure — no DB calls)
           const historyRows: Array<Record<string, unknown>> = []
@@ -491,6 +497,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
               accountScores.set(account.id, scores)
               accountInvoiceStatus.set(account.id, result.invoiceStatus)
 
+              // Narratives déterministes (FR) — persistées pour accès direct du frontend
+              const narratives = generateNarratives({
+                health_score: scores.health_score,
+                financial_score: scores.financial_score,
+                product_usage_score: scores.product_usage_score,
+                engagement_score: scores.engagement_score,
+                contract_score: scores.contract_score,
+                mrr_cents: account.mrr_cents ?? 0,
+                contract_start_date: (account as Record<string, unknown>).contract_start_date as string | null ?? null,
+                contract_end_date: account.contract_end_date ?? null,
+                billing_interval: (account as Record<string, unknown>).billing_interval as string | null ?? null,
+                overdue_count: invoiceStatus.overdue_count,
+                overdue_amount_cents: overdueAmountMap.get(account.id) ?? 0,
+                total_events_30d: usage.total_events,
+                open_ticket_count: hubspot?.open_ticket_count ?? null,
+                last_meeting_date: hubspot?.last_meeting_date ?? null,
+              })
+
               historyRows.push({
                 organization_id: organizationId,
                 account_id: account.id,
@@ -505,7 +529,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 mrr_cents: account.mrr_cents ?? 0,
               })
 
-              // Update account current scores
+              // Update account current scores + narratives
               const { error: updateError } = await supabase
                 .from('accounts')
                 .update({
@@ -516,6 +540,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
                   financial_score: scores.financial_score,
                   engagement_score: scores.engagement_score,
                   contract_score: scores.contract_score,
+                  health_narrative: narratives.health_narrative,
+                  financial_narrative: narratives.financial_narrative,
+                  usage_narrative: narratives.usage_narrative,
+                  engagement_narrative: narratives.engagement_narrative,
+                  contract_narrative: narratives.contract_narrative,
                   scores_calculated_at: new Date().toISOString(),
                 })
                 .eq('id', account.id)

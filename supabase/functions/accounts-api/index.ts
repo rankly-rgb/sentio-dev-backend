@@ -51,100 +51,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
-
-// ── Narrative helpers ────────────────────────────────────────
-
-function narrativeFinancial(
-  mrr_cents: number,
-  financial_score: number | null,
-  contract_start_date: string | null,
-  overdueCount: number,
-  overdueAmountCents: number,
-): string {
-  if (mrr_cents === 0) return "Compte sans MRR actif — abonnement résilié ou suspendu."
-
-  const score = financial_score ?? 0
-  const mrrEur = (mrr_cents / 100).toFixed(0)
-
-  if (score >= 90) {
-    const tenureMonths = contract_start_date
-      ? Math.floor((Date.now() - new Date(contract_start_date).getTime()) / (1000 * 60 * 60 * 24 * 30))
-      : null
-    const tenureStr = tenureMonths !== null ? `, abonnement actif depuis ${tenureMonths} mois` : ''
-    return `Aucun impayé${tenureStr}. MRR : ${mrrEur} €.`
-  }
-  if (score >= 70) return `Facturation stable. MRR : ${mrrEur} €.`
-  if (score >= 50) {
-    return `Attention : ${overdueCount} facture(s) en retard (${(overdueAmountCents / 100).toFixed(0)} €).`
-  }
-  return `Risque financier élevé : ${overdueCount} impayé(s) pour ${(overdueAmountCents / 100).toFixed(0)} € au total.`
-}
-
-function narrativeUsage(product_usage_score: number | null, totalEvents30d: number): string {
-  const score = product_usage_score ?? 50
-  if (score === 50 && totalEvents30d === 0) return "Aucune donnée d'utilisation disponible."
-  if (score >= 80) return `Utilisation active : ${totalEvents30d} événements sur les 30 derniers jours.`
-  if (score >= 60) return `Utilisation modérée : ${totalEvents30d} événements sur les 30 derniers jours.`
-  if (score >= 40) return `Faible utilisation détectée : seulement ${totalEvents30d} événements sur 30 jours.`
-  return `Utilisation très faible ou inactive (${totalEvents30d} événements). Risque de désengagement.`
-}
-
-function narrativeEngagement(
-  engagement_score: number | null,
-  openTicketCount: number | null,
-  lastMeetingDate: string | null,
-): string {
-  if (openTicketCount === null && lastMeetingDate === null) {
-    return "Aucune donnée HubSpot disponible pour l'engagement."
-  }
-  const score = engagement_score ?? 50
-  const ticketCount = openTicketCount ?? 0
-  const daysSinceMeeting = lastMeetingDate
-    ? Math.floor((Date.now() - new Date(lastMeetingDate).getTime()) / (1000 * 60 * 60 * 24))
-    : null
-
-  if (score >= 70) {
-    const meetingStr = daysSinceMeeting !== null ? `, dernière réunion il y a ${daysSinceMeeting} jour(s)` : ''
-    return `Bon engagement${meetingStr}.`
-  }
-  if (score >= 40) {
-    const ticketStr = ticketCount > 0 ? ` — ${ticketCount} ticket(s) ouvert(s).` : '.'
-    return `Engagement modéré${ticketStr}`
-  }
-  const ticketStr = ticketCount > 0 ? `${ticketCount} ticket(s) ouvert(s)` : 'tickets non renseignés'
-  const meetingStr = daysSinceMeeting !== null
-    ? `, dernière réunion il y a ${daysSinceMeeting} jours`
-    : ', aucune réunion récente'
-  return `Faible engagement : ${ticketStr}${meetingStr}.`
-}
-
-function narrativeContract(
-  contract_score: number | null,
-  contract_end_date: string | null,
-  billing_interval: string | null,
-): string {
-  if (!contract_end_date) {
-    const intervalMap: Record<string, string> = { monthly: 'mensuel', annual: 'annuel' }
-    const intervalStr = billing_interval ? (intervalMap[billing_interval] ?? billing_interval) : 'non précisé'
-    return `Abonnement ${intervalStr}, pas de date d'échéance renseignée.`
-  }
-
-  const daysUntil = Math.floor((new Date(contract_end_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
-
-  if (daysUntil < 0) return `Contrat expiré depuis ${Math.abs(daysUntil)} jour(s). Action requise.`
-  if (daysUntil < 30) return `Renouvellement critique : dans ${daysUntil} jour(s) (${contract_end_date}).`
-  if (daysUntil < 60) return `Renouvellement imminent : dans ${daysUntil} jours (${contract_end_date}).`
-  if (daysUntil < 90) return `Renouvellement dans ${daysUntil} jours — à planifier.`
-  return `Contrat actif, renouvellement dans ${daysUntil} jours (${contract_end_date}).`
-}
-
-function narrativeHealth(health_score: number | null): string {
-  if (health_score === null) return "Score de santé non encore calculé."
-  if (health_score >= 80) return `Score de santé excellent (${health_score}/100).`
-  if (health_score >= 60) return `Score de santé correct (${health_score}/100). Quelques axes d'amélioration.`
-  if (health_score >= 40) return `Score de santé dégradé (${health_score}/100). Attention requise.`
-  return `Score de santé critique (${health_score}/100). Intervention urgente recommandée.`
-}
+import { generateNarratives } from '../_shared/score-narratives.ts'
 
 // ── Entrypoint ───────────────────────────────────────────────
 
@@ -297,43 +204,31 @@ async function handleGetOne(
     }
   })
 
+  const narratives = generateNarratives({
+    health_score: account.health_score,
+    financial_score: account.financial_score,
+    product_usage_score: account.product_usage_score,
+    engagement_score: account.engagement_score,
+    contract_score: account.contract_score,
+    mrr_cents: account.mrr_cents ?? 0,
+    contract_start_date: account.contract_start_date ?? null,
+    contract_end_date: account.contract_end_date ?? null,
+    billing_interval: account.billing_interval ?? null,
+    overdue_count: overdueCount,
+    overdue_amount_cents: overdueAmountCents,
+    total_events_30d: totalEvents30d,
+    open_ticket_count: hubspot?.open_ticket_count ?? null,
+    last_meeting_date: hubspot?.last_meeting_date ?? null,
+  })
+
   const scores = {
-    health: {
-      value: account.health_score,
-      narrative: narrativeHealth(account.health_score),
-    },
-    usage: {
-      value: account.product_usage_score,
-      narrative: narrativeUsage(account.product_usage_score, totalEvents30d),
-    },
-    financial: {
-      value: account.financial_score,
-      narrative: narrativeFinancial(
-        account.mrr_cents ?? 0,
-        account.financial_score,
-        account.contract_start_date,
-        overdueCount,
-        overdueAmountCents,
-      ),
-    },
-    engagement: {
-      value: account.engagement_score,
-      narrative: narrativeEngagement(
-        account.engagement_score,
-        hubspot?.open_ticket_count ?? null,
-        hubspot?.last_meeting_date ?? null,
-      ),
-    },
-    contract: {
-      value: account.contract_score,
-      narrative: narrativeContract(
-        account.contract_score,
-        account.contract_end_date,
-        account.billing_interval,
-      ),
-    },
+    health:     { value: account.health_score,          narrative: narratives.health_narrative },
+    usage:      { value: account.product_usage_score,   narrative: narratives.usage_narrative },
+    financial:  { value: account.financial_score,       narrative: narratives.financial_narrative },
+    engagement: { value: account.engagement_score,      narrative: narratives.engagement_narrative },
+    contract:   { value: account.contract_score,        narrative: narratives.contract_narrative },
     churn_risk: { value: account.churn_risk_score },
-    expansion: { value: account.expansion_score },
+    expansion:  { value: account.expansion_score },
   }
 
   return jsonResponse({
