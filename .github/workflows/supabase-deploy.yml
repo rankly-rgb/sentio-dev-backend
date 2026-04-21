@@ -51,12 +51,19 @@ jobs:
         run: supabase db push --include-all
 
       - name: Set Edge Function secrets
+        # N'écrit que les secrets effectivement définis dans GitHub Secrets.
+        # Évite d'écraser un secret existant avec une chaîne vide si le
+        # GitHub Secret correspondant est absent.
         run: |
-          supabase secrets set \
-            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }} \
-            STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }} \
-            STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }} \
-            SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ARGS=""
+          [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]       && ARGS="$ARGS ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"
+          [ -n "${{ secrets.STRIPE_SECRET_KEY }}" ]        && ARGS="$ARGS STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }}"
+          [ -n "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ]    && ARGS="$ARGS STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}"
+          if [ -n "$ARGS" ]; then
+            supabase secrets set $ARGS
+          else
+            echo "No secrets to update."
+          fi
 
       - name: Deploy Edge Functions
         run: supabase functions deploy
