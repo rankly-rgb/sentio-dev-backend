@@ -160,8 +160,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (!response.ok) {
       const errText = await response.text()
       console.error(JSON.stringify({ level: 'error', function_name: 'account-summary', organization_id: orgId, message: `Anthropic API ${response.status}: ${errText}` }))
-      // Expose le status Anthropic pour faciliter le diagnostic (401/403/404/429)
-      return errorResponse(`AI generation failed (Anthropic ${response.status})`, 502)
+      // Parse le message exact d'Anthropic pour l'exposer au frontend
+      let anthropicMsg = errText
+      try { anthropicMsg = JSON.parse(errText)?.error?.message ?? errText } catch { /* keep raw */ }
+      return errorResponse(`AI generation failed (${response.status}): ${anthropicMsg.slice(0, 300)}`, 502)
     }
 
     const result = await response.json()
