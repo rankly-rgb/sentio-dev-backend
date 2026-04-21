@@ -29,8 +29,8 @@ import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 
 const SUMMARY_TTL_MS = 24 * 60 * 60 * 1000
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
-const MODEL = 'claude-haiku-4-5-20251001'
-const FUNCTION_VERSION = '1.1.0' // bump pour forcer redéploiement après secrets
+const MODEL = 'claude-haiku-4-5'
+const FUNCTION_VERSION = '1.2.0'
 
 // ── Entrypoint ───────────────────────────────────────────────
 
@@ -159,8 +159,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     if (!response.ok) {
       const errText = await response.text()
-      console.error(JSON.stringify({ level: 'error', function_name: 'account-summary', message: `Anthropic API ${response.status}: ${errText}` }))
-      return errorResponse('AI generation failed', 502)
+      console.error(JSON.stringify({ level: 'error', function_name: 'account-summary', organization_id: orgId, message: `Anthropic API ${response.status}: ${errText}` }))
+      // Expose le status Anthropic pour faciliter le diagnostic (401/403/404/429)
+      return errorResponse(`AI generation failed (Anthropic ${response.status})`, 502)
     }
 
     const result = await response.json()
