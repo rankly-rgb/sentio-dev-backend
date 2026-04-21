@@ -133,8 +133,12 @@ describe('evaluateRenewalAlert', () => {
     expect(result!.confidence_score).toBe(90)
   })
 
-  it('returns null when contract already expired (days < 0)', () => {
-    expect(evaluateRenewalAlert({ ...baseInput, contract_end_date: '2026-02-01' })).toBeNull()
+  it('returns critical insight when contract already expired (days < 0)', () => {
+    const result = evaluateRenewalAlert({ ...baseInput, contract_end_date: '2026-02-01' })
+    expect(result).not.toBeNull()
+    expect(result!.priority).toBe('critical')
+    expect(result!.confidence_score).toBe(95)
+    expect(result!.insight_type).toBe('renewal_alert')
   })
 })
 

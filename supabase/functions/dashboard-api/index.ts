@@ -1,7 +1,7 @@
 // ============================================================
 // Edge Function : dashboard-api
-// Données agrégées pour la page "Aujourd'hui" : briefing matinal
-// et wins de la semaine.
+// Données agrégées pour la page "Aujourd'hui" : briefing matinal,
+// wins de la semaine et benchmarks sectoriels.
 //
 // CONTRAT API
 // ──────────────────────────────────────────────────────────
@@ -11,20 +11,20 @@
 //     {
 //       data: {
 //         portfolio: {
-//           current_avg_health: number | null,   // moyenne health score aujourd'hui
-//           week_ago_avg_health: number | null,   // moyenne health score J-7
-//           health_delta_7d: number | null,       // delta en points (positif = amélioration)
+//           current_avg_health: number | null,
+//           week_ago_avg_health: number | null,
+//           health_delta_7d: number | null,
 //           health_trend: "up" | "down" | "stable" | "unknown"
 //         },
-//         risk_accounts_7d: number,    // nb comptes entrés dans un segment risqué en 7j
-//         p0_insights_count: number,   // insights actifs priorité "critical"
-//         insight_du_jour: {           // compte ayant bougé le plus significativement en 24h
+//         risk_accounts_7d: number,
+//         p0_insights_count: number,
+//         insight_du_jour: {
 //           account_id: string,
 //           stripe_customer_id: string,
 //           display_name: string | null,
 //           health_score_now: number,
 //           health_score_yesterday: number,
-//           delta: number,             // positif = amélioration
+//           delta: number,
 //           direction: "improved" | "degraded",
 //           main_dimension: "usage" | "financial" | "engagement" | "contract"
 //         } | null
@@ -32,10 +32,6 @@
 //     }
 //
 // GET /dashboard-api/wins
-//   Seuil "win" : amélioration du health_score >= 10 points sur 7 jours,
-//   avec health_score actuel >= 50. Les 5 meilleurs wins sont retournés
-//   par ordre décroissant de progression.
-//
 //   Response 200 :
 //     {
 //       data: Array<{
@@ -50,6 +46,38 @@
 //         segment_now: string | null,
 //         segment_changed: boolean
 //       }>
+//     }
+//
+// GET /dashboard-api/benchmarks
+//   Calcule NRR, taux de churn et croissance MRR sur 12 mois glissants
+//   et les compare aux standards du marché SaaS B2B (sources 2025).
+//
+//   Response 200 :
+//     {
+//       data: {
+//         nrr: {
+//           value: number | null,       // % (ex: 105.2)
+//           rating: "excellent" | "bon" | "correct" | "mediocre" | null,
+//           thresholds: { excellent: 120, bon: 105, correct: 90 },
+//           higher_is_better: true,
+//           sources: string[]
+//         },
+//         churn_rate: {
+//           value: number | null,       // % revenue churn annuel (ex: 4.5)
+//           rating: "excellent" | "bon" | "correct" | "mediocre" | null,
+//           thresholds: { excellent: 3, bon: 5, correct: 10 },
+//           higher_is_better: false,
+//           sources: string[]
+//         },
+//         mrr_growth: {
+//           value: number | null,       // % croissance MRR 12 mois (ex: 32.1)
+//           rating: "excellent" | "bon" | "correct" | "mediocre" | null,
+//           thresholds: { excellent: 50, bon: 25, correct: 10 },
+//           higher_is_better: true,
+//           sources: string[]
+//         },
+//         peers: { available: false, min_orgs_required: 3 }
+//       }
 //     }
 //
 // Auth : JWT utilisateur vérifié dans le code (ES256 via verifyUserAuth)
@@ -116,8 +144,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (path === 'briefing') return handleBriefing(supabase, orgId)
   if (path === 'wins') return handleWins(supabase, orgId)
+  if (path === 'benchmarks') return handleBenchmarks(supabase, orgId)
 
-  return errorResponse('Not found. Use /dashboard-api/briefing or /dashboard-api/wins', 404)
+  return errorResponse('Not found. Use /dashboard-api/briefing, /dashboard-api/wins or /dashboard-api/benchmarks', 404)
 })
 
 // ── GET /dashboard-api/briefing ──────────────────────────────
@@ -362,4 +391,133 @@ async function handleWins(
   wins.sort((a, b) => b.health_delta - a.health_delta)
 
   return jsonResponse({ data: wins.slice(0, MAX_WINS) })
+}
+
+// ── GET /dashboard-api/benchmarks ───────────────────────────
+// Seuils issus des rapports publiés 2025 :
+//   NRR       : OpenView 2025, Bessemer Cloud Index
+//   Churn     : Recurly 2025, ProfitWell
+//   Croissance: SaaS Capital 2025
+
+const NRR_THRESHOLDS = { excellent: 120, bon: 105, correct: 90 } as const
+const CHURN_THRESHOLDS = { excellent: 3, bon: 5, correct: 10 } as const
+const GROWTH_THRESHOLDS = { excellent: 50, bon: 25, correct: 10 } as const
+
+type Rating = 'excellent' | 'bon' | 'correct' | 'mediocre'
+
+function rateHigher(
+  value: number | null,
+  t: { excellent: number; bon: number; correct: number },
+): Rating | null {
+  if (value === null) return null
+  if (value >= t.excellent) return 'excellent'
+  if (value >= t.bon) return 'bon'
+  if (value >= t.correct) return 'correct'
+  return 'mediocre'
+}
+
+function rateLower(
+  value: number | null,
+  t: { excellent: number; bon: number; correct: number },
+): Rating | null {
+  if (value === null) return null
+  if (value <= t.excellent) return 'excellent'
+  if (value <= t.bon) return 'bon'
+  if (value <= t.correct) return 'correct'
+  return 'mediocre'
+}
+
+async function handleBenchmarks(
+  supabase: ReturnType<typeof createServiceClient>,
+  orgId: string,
+): Promise<Response> {
+  const twelveMonthsAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .split('T')[0]
+
+  const [currentMrrRes, movements12mRes] = await Promise.all([
+    supabase
+      .from('accounts')
+      .select('mrr_cents')
+      .eq('organization_id', orgId)
+      .gt('mrr_cents', 0)
+      .limit(5000),
+
+    supabase
+      .from('mrr_movements')
+      .select('movement_type, amount_cents')
+      .eq('organization_id', orgId)
+      .gte('movement_date', twelveMonthsAgo)
+      .limit(10000),
+  ])
+
+  // MRR actuel total
+  const currentMrr = (currentMrrRes.data ?? []).reduce(
+    (sum: number, a: { mrr_cents: number | null }) => sum + (a.mrr_cents ?? 0),
+    0,
+  )
+
+  // Agréger les mouvements par type
+  let new12m = 0, expansion12m = 0, contraction12m = 0, churn12m = 0, reactivation12m = 0
+  for (const m of (movements12mRes.data ?? [])) {
+    const amt = m.amount_cents ?? 0
+    switch (m.movement_type) {
+      case 'new': new12m += amt; break
+      case 'expansion': expansion12m += amt; break
+      case 'contraction': contraction12m += amt; break
+      case 'churn': churn12m += amt; break
+      case 'reactivation': reactivation12m += amt; break
+    }
+  }
+
+  // MRR de départ (il y a 12 mois) = MRR actuel - mouvements nets sur 12 mois
+  const netMovements12m = new12m + expansion12m + reactivation12m - contraction12m - churn12m
+  const startingMrr = currentMrr - netMovements12m
+
+  // NRR = (MRR existants en fin de période) / (MRR existants en début de période) × 100
+  // On exclut le new business des deux côtés
+  const endingMrrExisting = currentMrr - new12m
+  let nrr: number | null = null
+  if (startingMrr > 0) {
+    nrr = Math.round((endingMrrExisting / startingMrr) * 1000) / 10
+  } else if (currentMrr > 0) {
+    nrr = 100 // pas d'historique = neutre
+  }
+
+  // Churn rate revenue = MRR churné / MRR de départ × 100
+  const churnRate = startingMrr > 0
+    ? Math.round((churn12m / startingMrr) * 1000) / 10
+    : 0
+
+  // Croissance MRR = mouvements nets / MRR de départ × 100
+  const mrrGrowth: number | null = startingMrr > 0
+    ? Math.round((netMovements12m / startingMrr) * 1000) / 10
+    : null
+
+  return jsonResponse({
+    data: {
+      nrr: {
+        value: nrr,
+        rating: rateHigher(nrr, NRR_THRESHOLDS),
+        thresholds: NRR_THRESHOLDS,
+        higher_is_better: true,
+        sources: ['OpenView 2025', 'Bessemer Cloud Index'],
+      },
+      churn_rate: {
+        value: churnRate,
+        rating: rateLower(churnRate, CHURN_THRESHOLDS),
+        thresholds: CHURN_THRESHOLDS,
+        higher_is_better: false,
+        sources: ['Recurly 2025', 'ProfitWell'],
+      },
+      mrr_growth: {
+        value: mrrGrowth,
+        rating: rateHigher(mrrGrowth, GROWTH_THRESHOLDS),
+        thresholds: GROWTH_THRESHOLDS,
+        higher_is_better: true,
+        sources: ['SaaS Capital 2025'],
+      },
+      peers: { available: false, min_orgs_required: 3 },
+    },
+  })
 }
