@@ -78,3 +78,11 @@ verify_jwt = false
 # account-summary : JWT vérifié dans le code (ES256), appel Claude Haiku pour résumé IA
 [functions.account-summary]
 verify_jwt = false
+
+# outbound-webhook-dispatch : appelé par calculate-scores (service_role) ou admin-proxy
+[functions.outbound-webhook-dispatch]
+verify_jwt = false
+
+# outbound-webhook-test : JWT vérifié dans le code (ES256 — test depuis l'UI)
+[functions.outbound-webhook-test]
+verify_jwt = false

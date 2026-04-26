@@ -4,7 +4,7 @@ export async function writeToDLQ(
   supabase: SupabaseClient,
   entry: {
     organization_id: string
-    provider: 'stripe' | 'hubspot' | 'usage'
+    provider: 'stripe' | 'hubspot' | 'usage' | 'outbound'
     event_type: string
     payload: unknown
     error_message: string

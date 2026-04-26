@@ -4,6 +4,87 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Outbound Webhook System v1 (2026-04-26)
+
+Système de webhooks sortants universel : Sentio pousse automatiquement un payload JSON vers des URLs externes (Brevo, Lemlist, Slack, etc.) quand un compte change de segment ou franchit un seuil de churn.
+
+### Architecture Zero-PII
+
+Le payload envoyé ne contient **jamais** d'email, nom, téléphone ni IP. Uniquement `stripe_customer_id` + métriques agrégées. C'est l'outil d'emailing du client qui détient les emails et déclenche les séquences.
+
+### Nouvelles tables
+
+| Table | Rôle |
+|-------|------|
+| `outbound_webhook_destinations` | Destinations configurées par org : URL, provider, trigger_segments, trigger_churn_threshold, secret header |
+| `outbound_webhook_logs` | Audit de chaque tentative de dispatch (success, HTTP status, response_body tronquée 500 chars) |
+
+Migration : `20260426000001_outbound_webhooks.sql`  
+— RLS org_isolation sur les deux tables  
+— CHECK `provider IN ('brevo','mailchimp','lemlist','activecampaign','slack','custom')`  
+— CHECK `triggered_by IN ('segment_change','churn_threshold','manual')`  
+— Extension du CHECK `webhook_dead_letter.provider` : ajout de `'outbound'`
+
+### Nouvelles Edge Functions
+
+| Fonction | Trigger | Rôle |
+|----------|---------|------|
+| `outbound-webhook-dispatch` | POST (service_role) | Dispatch vers toutes les destinations matchées d'une org |
+| `outbound-webhook-test` | POST (JWT ES256) | Test unitaire d'une destination depuis l'UI |
+
+**Logique de dispatch (`outbound-webhook-dispatch`) :**
+1. Récupère les destinations actives de l'org
+2. Filtre : `segment_current ∈ trigger_segments` OU `churn_risk_score >= trigger_churn_threshold`
+3. Envoie en parallèle (`Promise.allSettled`) avec timeout 10s
+4. Ajoute le secret header si configuré (`secret_header_name: secret_header_value`)
+5. Log dans `outbound_webhook_logs` (succès et échecs)
+6. En cas d'échec, écrit dans `webhook_dead_letter` (`provider: 'outbound'`) pour retry
+
+**Payload envoyé (Zero-PII) :**
+```json
+{
+  "source": "sentio_ai",
+  "event": "account_risk_detected",
+  "account": {
+    "stripe_customer_id": "cus_XXX",
+    "segment": "en_danger_critique",
+    "segment_previous": "a_risque_leger",
+    "health_score": 28,
+    "churn_risk_score": 75,
+    "expansion_score": 12,
+    "mrr_cents": 49900,
+    "mrr_eur": 499
+  },
+  "triggered_at": "2026-04-26T13:53:00Z",
+  "organization_id": "uuid"
+}
+```
+
+### Intégration calculate-scores
+
+Après la mise à jour des scores de chaque compte, détection automatique :
+- **Changement de segment primaire** : comparaison old/new via `determineSegmentTypes()`
+- **Seuil churn** : `churn_risk_score >= 60`
+
+Si l'une des conditions est vraie, le compte est ajouté à une file de dispatch. La file est envoyée en **fire-and-forget** (`Promise.allSettled` non-await) après tous les batchs de l'org — le scoring n'est jamais bloqué.
+
+Champs ajoutés au SELECT accounts : `stripe_customer_id`, `expansion_score`.
+
+### Modifications shared
+
+- `_shared/dlq.ts` : type `provider` étendu avec `'outbound'`
+
+### Tests
+
+`supabase/tests/outbound-webhook-dispatch.test.ts` — 21 tests :
+- Filtrage correct par segment (match, no-match, union segment∨churn)
+- Filtrage correct par churn_threshold (gte, lt, égalité exacte)
+- Destinations inactives ignorées
+- Payload Zero-PII vérifié (absence de `email`, `name`, `phone`, `ip`)
+- Log `outbound_webhook_logs` avec `success=true` pour 2xx, `success=false` pour 4xx
+
+---
+
 ## Stability Plan v1 (2026-03-02)
 
 Infrastructure de résilience et observabilité ajoutée aux Edge Functions.

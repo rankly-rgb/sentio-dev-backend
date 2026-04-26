@@ -37,6 +37,16 @@ import { generateNarratives } from '../_shared/score-narratives.ts'
 // ── Types internes ──────────────────────────────────────────
 interface AccountWithCreatedAt extends Account {
   created_at: string
+  stripe_customer_id?: string
+  expansion_score?: number
+}
+
+interface DispatchTask {
+  account: AccountWithCreatedAt
+  scores: ScoreResult
+  oldSegment: string
+  newSegment: string
+  hasOverdue: boolean
 }
 
 interface ScoreResult {
@@ -47,6 +57,12 @@ interface ScoreResult {
   financial_score: number
   engagement_score: number
   contract_score: number
+}
+
+// ── Helper : segment primaire (hors 'nouveaux' non-exclusif) ────────────────
+function getPrimarySegment(segTypes: SegmentType[]): string {
+  const nonNew = segTypes.filter((t) => t !== 'nouveaux')
+  return (nonNew[0] ?? segTypes[0] ?? 'stables') as string
 }
 
 // ── Segment definitions (mirrored in migration) ─────────────
@@ -440,6 +456,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         const accountScores = new Map<string, ScoreResult>()
         const accountInvoiceStatus = new Map<string, InvoiceStatus>()
         const allAccounts: AccountWithCreatedAt[] = []
+        const dispatchQueue: DispatchTask[] = []
         let batchOffset = 0
         let batchFailed = false
         let batchCount = 0
@@ -448,7 +465,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           batchCount++
           const { data: batch, error: batchError } = await supabase
             .from('accounts')
-            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, contract_start_date, billing_interval, health_score, churn_risk_score, created_at')
+            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, contract_start_date, billing_interval, health_score, churn_risk_score, expansion_score, stripe_customer_id, created_at')
             .eq('organization_id', organizationId)
             .range(batchOffset, batchOffset + SCORING_BATCH_SIZE - 1)
 
@@ -564,6 +581,31 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
               accountsScored++
               logger.increment('records_processed')
+
+              // Détecter changement de segment ou seuil churn (pour dispatch outbound)
+              const hasOverdue = invoiceStatus.has_overdue
+              const oldSegTypes = determineSegmentTypes(
+                {
+                  health_score: account.health_score ?? 50,
+                  churn_risk_score: account.churn_risk_score ?? 50,
+                  expansion_score: account.expansion_score ?? 50,
+                },
+                account.mrr_cents ?? 0,
+                hasOverdue,
+                account.created_at,
+              )
+              const newSegTypes = determineSegmentTypes(
+                scores,
+                account.mrr_cents ?? 0,
+                hasOverdue,
+                account.created_at,
+              )
+              const oldSegment = getPrimarySegment(oldSegTypes)
+              const newSegment = getPrimarySegment(newSegTypes)
+
+              if (oldSegment !== newSegment || scores.churn_risk_score >= 60) {
+                dispatchQueue.push({ account, scores, oldSegment, newSegment, hasOverdue })
+              }
             } catch (err) {
               console.error(JSON.stringify({
                 level: 'error',
@@ -603,6 +645,44 @@ Deno.serve(async (req: Request): Promise<Response> => {
         if (allAccounts.length === 0) {
           await logger.complete({ accounts_scored: 0, segments_assigned: 0 })
           continue
+        }
+
+        // ── Outbound webhook dispatch (fire-and-forget) ─────────────────────
+        if (dispatchQueue.length > 0) {
+          const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+          const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+
+          Promise.allSettled(
+            dispatchQueue.map(({ account, scores, oldSegment, newSegment }) => {
+              const eventType = oldSegment !== newSegment ? 'segment_change' : 'churn_threshold'
+              return fetch(`${supabaseUrl}/functions/v1/outbound-webhook-dispatch`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${supabaseKey}`,
+                },
+                body: JSON.stringify({
+                  organization_id: organizationId,
+                  account_id: account.id,
+                  stripe_customer_id: account.stripe_customer_id ?? '',
+                  event_type: eventType,
+                  segment_previous: oldSegment,
+                  segment_current: newSegment,
+                  health_score: scores.health_score,
+                  churn_risk_score: scores.churn_risk_score,
+                  expansion_score: scores.expansion_score,
+                  mrr_cents: account.mrr_cents ?? 0,
+                }),
+              }).catch((err) => {
+                console.error(JSON.stringify({
+                  level: 'warn',
+                  function_name: 'calculate-scores',
+                  organization_id: organizationId,
+                  message: `outbound dispatch fire-and-forget failed: ${err instanceof Error ? err.message : String(err)}`,
+                }))
+              })
+            }),
+          ).catch(() => {})
         }
 
         // ── Segment Assignment ──────────────────────────────
