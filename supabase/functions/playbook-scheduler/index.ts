@@ -14,7 +14,6 @@ import { alertSlack } from '../_shared/slack-alert.ts'
 import { createLogger } from '../_shared/structured-logger.ts'
 import {
   evaluateConditions,
-  executeAction,
   calculateNextScheduledAt,
   type PlaybookAction,
   type AccountData,
@@ -22,6 +21,7 @@ import {
   type ExecutionFrequency,
   VALID_EXECUTION_FREQUENCIES,
 } from '../_shared/playbook-engine.ts'
+import { dispatchAction } from '../_shared/action-dispatcher.ts'
 
 const MAX_ACCOUNTS_PER_PLAYBOOK = 200
 const COOLDOWN_HOURS = 24
@@ -115,7 +115,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         let accountQuery = supabase
           .from('accounts')
-          .select('id, organization_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
+          .select('id, organization_id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
           .eq('organization_id', orgId)
 
         // Filter by segment if defined
@@ -214,16 +214,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
             continue
           }
 
-          // Process actions
+          // Process actions sequentially (order matters)
           const actionResults: ActionResult[] = []
           let completedSteps = 0
           let failedSteps = 0
 
           for (const action of actions) {
-            const result = executeAction(action, acc, {
+            const result = await dispatchAction(action, acc, {
               playbookId,
               executionId: execution.id,
-            })
+              organizationId: orgId,
+            }, supabase)
             actionResults.push(result)
             if (result.status === 'completed') completedSteps++
             else if (result.status === 'failed') failedSteps++

@@ -12,7 +12,6 @@ import { createLogger } from '../_shared/structured-logger.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import {
   evaluateConditions,
-  executeAction,
   calculateStepDueDate,
   type PlaybookAction,
   type WorkflowStep,
@@ -20,6 +19,7 @@ import {
   type ActionResult,
 } from '../_shared/playbook-engine.ts'
 import { executeWorkflowStep } from '../_shared/workflow-executor.ts'
+import { dispatchAction } from '../_shared/action-dispatcher.ts'
 
 const MAX_ACCOUNTS_PER_RUN = 200
 
@@ -127,7 +127,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: accounts } = await supabase
     .from('accounts')
-    .select('id, organization_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
+    .select('id, organization_id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
     .eq('organization_id', body.organization_id)
     .in('id', accountIds)
 
@@ -333,16 +333,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         executionId = execution.id
 
-        // Process actions sequentially
+        // Process actions sequentially (order matters)
         const actionResults: ActionResult[] = []
         let completedSteps = 0
         let failedSteps = 0
 
         for (const action of actions) {
-          const result = executeAction(action, acc, {
+          const result = await dispatchAction(action, acc, {
             playbookId: body.playbook_id,
             executionId: execution.id,
-          })
+            organizationId: body.organization_id,
+          }, supabase)
           actionResults.push(result)
           if (result.status === 'completed') completedSteps++
           else if (result.status === 'failed') failedSteps++

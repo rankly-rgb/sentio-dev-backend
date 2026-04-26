@@ -28,6 +28,8 @@ export const VALID_ACTION_TYPES = [
   'schedule_review',
   'flag_for_review',
   'send_email',
+  'hubspot_enroll_sequence',
+  'hubspot_update_company',
 ] as const
 
 export type PlaybookActionType = typeof VALID_ACTION_TYPES[number]
@@ -74,6 +76,8 @@ export const VALID_COMPARISON_OPERATORS: ComparisonOperator[] = [
 export interface AccountData {
   id: string
   organization_id: string
+  stripe_customer_id: string | null
+  hubspot_company_id: string | null
   health_score: number | null
   churn_risk_score: number | null
   expansion_score: number | null
