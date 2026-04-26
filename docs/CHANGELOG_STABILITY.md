@@ -4,6 +4,60 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## HubSpot Playbook Dispatch v1 (2026-04-26)
+
+Dispatch réel des actions playbook vers HubSpot. Remplace le stub log-only (`executeAction`) par un dispatcher async (`dispatchAction`) branché sur l'API HubSpot, avec rate limiting, retry et DLQ.
+
+### Architecture Zero-PII
+
+Les appels HubSpot n'utilisent que des identifiants opaques (`hubspot_company_id`, `contactId` HubSpot). Sentio ne stocke ni ne transmet jamais d'email, nom ou téléphone. L'outil d'emailing du client (HubSpot) détient les emails et les utilise lors de l'enrôlement.
+
+### Nouveaux fichiers
+
+| Fichier | Rôle |
+|---------|------|
+| `_shared/hubspot-client.ts` | Client API HubSpot : `getCompanyContacts()`, `enrollInSequence()`, `updateCompanyProperties()` — rate limiter 5 appels/sec, timeout 10s, retry 2x |
+| `_shared/action-dispatcher.ts` | `dispatchAction()` async — dispatch HubSpot réel + fallback log-only pour les autres types + DLQ sur échec |
+
+### Nouveaux types d'actions playbook
+
+| Type | Config requise | Comportement |
+|------|---------------|--------------|
+| `hubspot_enroll_sequence` | `sequence_id`, `sender_id` | Récupère les contacts de la company HubSpot, enrôle jusqu'à 5 contacts dans la séquence |
+| `hubspot_update_company` | `properties: {...}` | PATCH des propriétés HubSpot de la company (ex: `hs_lead_status: "at_risk"`) |
+
+**Logique d'enrôlement :**
+1. Récupère les contacts associés à `account.hubspot_company_id` via `GET /crm/v3/objects/companies/{id}/associations/contacts`
+2. Enrôle en parallèle (`Promise.allSettled`) jusqu'à 5 contacts via `POST /automation/v4/sequences/{seqId}/enrollments`
+3. Si 0 contact → status `skipped` (pas d'erreur)
+4. Si échec partiel ou total → `writeToDLQ` provider `hubspot` + status selon résultat
+
+### Modifications shared
+
+- `playbook-engine.ts` : `VALID_ACTION_TYPES` étendu avec `hubspot_enroll_sequence` et `hubspot_update_company` ; `AccountData` enrichi avec `stripe_customer_id` et `hubspot_company_id`
+
+### Modifications Edge Functions
+
+- `playbook-execute` + `playbook-scheduler` : SELECT accounts étendu (`stripe_customer_id`, `hubspot_company_id`) ; `executeAction()` → `dispatchAction()` async
+- Les actions non-HubSpot continuent en log-only (V1, pas de régression)
+
+### Tests
+
+`supabase/tests/action-dispatcher.test.ts` — 15 tests :
+- Enrollment succès (2 contacts), config manquante, hubspot_company_id absent, 0 contact en HubSpot
+- DLQ écrit sur échec total (429) et sur échec partiel (1/3 contacts)
+- Limite à 5 contacts max
+- Actions log-only (slack_notify, create_task) : pas d'appel externe
+- Zero-PII : payload DLQ ne contient pas `@`, `email`, `phone`, `ip`
+
+### Prérequis côté client
+
+- Variable d'env `HUBSPOT_API_KEY` (Private App token HubSpot) configurée dans les secrets Supabase
+- Les contacts du client doivent déjà exister dans HubSpot et être associés à leurs companies
+- Le `sender_id` = HubSpot User ID de l'expéditeur (visible dans HubSpot → Paramètres → Utilisateurs & Équipes)
+
+---
+
 ## Outbound Webhook System v1 (2026-04-26)
 
 Système de webhooks sortants universel : Sentio pousse automatiquement un payload JSON vers des URLs externes (Brevo, Lemlist, Slack, etc.) quand un compte change de segment ou franchit un seuil de churn.
