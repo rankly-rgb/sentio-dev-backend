@@ -4,6 +4,117 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Onboarding Flow Backend v1 (2026-04-30)
+
+Flux d'onboarding complet côté backend : de l'inscription jusqu'au "aha moment" (voir ses premiers comptes à risque). Enrichissement de `onboarding-status` existant + nouvelle Edge Function `onboarding-first-win`.
+
+### Décision d'architecture — pas de table `onboarding_state`
+
+L'état d'onboarding est dérivé des sources de vérité existantes plutôt que dupliqué dans une table séparée :
+
+| Donnée | Source |
+|--------|--------|
+| `stripe_connected` | `data_syncs` (sync_source='stripe', sync_status='completed') |
+| `hubspot_connected` | `data_syncs` (sync_source='hubspot', sync_status='completed') |
+| `first_win_seen` | `organizations.aha_moment_seen_at` |
+| `onboarding_completed` | `organizations.onboarding_completed` |
+
+Créer une table séparée aurait introduit deux sources de vérité divergentes et des problèmes de cohérence.
+
+### Modifications Edge Functions
+
+#### `onboarding-status` — GET enrichi
+
+Nouveaux champs dans la réponse :
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `current_step` | `'stripe' \| 'hubspot' \| 'first_win' \| 'done'` | Étape courante de l'onboarding |
+| `at_risk_count` | `number` | Comptes avec `health_score < 40` |
+| `onboarding_completed` | `boolean` | Onboarding définitivement terminé |
+
+Logique `current_step` (if/else chain) :
+1. `!stripe_connected` → `'stripe'`
+2. `stripe && !hubspot && !onboarding_completed` → `'hubspot'` (skippable via PATCH)
+3. `stripe && !first_win_seen` → `'first_win'`
+4. → `'done'`
+
+#### `onboarding-status` — PATCH endpoint (nouveau)
+
+```
+PATCH /onboarding-status
+Body: { field: 'first_win_seen' | 'onboarding_completed', value: true }
+Response 200: { success: true }
+```
+
+- `first_win_seen = true` → écrit `organizations.aha_moment_seen_at` (idempotent)
+- `onboarding_completed = true` → écrit `organizations.onboarding_completed = true`
+- Le `POST /aha-seen` existant est conservé pour rétrocompatibilité
+
+### Nouvelle Edge Function `onboarding-first-win`
+
+```
+GET /onboarding-first-win
+Auth: Bearer token (JWT ES256)
+```
+
+Retourne les données du aha moment :
+
+```json
+{
+  "data": {
+    "total_accounts": 42,
+    "at_risk_accounts": [
+      {
+        "stripe_customer_id": "cus_xxx",
+        "display_name": "Acme Corp",
+        "health_score": 18,
+        "churn_risk": 82,
+        "mrr": 49900,
+        "top_risk_reason": "Invoice impayée depuis 20 jours"
+      }
+    ],
+    "mrr_at_risk": 148700,
+    "global_health_score": 63
+  }
+}
+```
+
+**Logique `top_risk_reason` (zero N+1 — 2 queries batch pour les top 3) :**
+1. Invoice `open/uncollectible` avec `due_date < today-7j` → `"Invoice impayée depuis X jours"`
+2. Dernier `usage_event` > 30 jours ou absent → `"Aucune connexion depuis X jours"`
+3. `financial_score < 30` → `"Santé financière dégradée"`
+4. Fallback → `"Score de santé faible"`
+
+### Nouveaux fichiers
+
+| Fichier | Rôle |
+|---------|------|
+| `supabase/functions/onboarding-first-win/index.ts` | Edge Function GET aha moment |
+| `supabase/tests/onboarding-first-win.test.ts` | 25 tests : sélection top 3, mrr_at_risk, global_health_score, buildRiskReason, Zero-PII |
+| `supabase/tests/onboarding-status.test.ts` | 17 tests : determineCurrentStep (9 cas), validatePatchBody (8 cas) |
+
+### Tests
+
+42 nouveaux tests, 322 total (anciens 280 + 42) :
+
+- `determineCurrentStep` : 9 cas couvrant les 4 étapes + transitions skip HubSpot
+- `validatePatchBody` : 8 cas (champs valides, value!=true, string "true", field inconnu, body null)
+- `buildRiskReason` : 7 cas (facture, singulier/pluriel, usage absent, usage>30j, financial, fallback, priorité)
+- Sélection top 3 : 4 cas (tri ASC, < 3 comptes, null health_score, aucun compte scoré)
+- `calcMrrAtRisk` : 4 cas (seuil strict < 40, aucun risque, mrr null, health null)
+- `calcGlobalHealthScore` : 4 cas (moyenne, arrondi, liste vide, null)
+- Zero-PII : 5 cas (email, phone, ip, name absents ; stripe_customer_id présent)
+
+### Registration config.toml
+
+```toml
+[functions.onboarding-first-win]
+verify_jwt = false
+```
+
+---
+
 ## HubSpot Playbook Dispatch v1 (2026-04-26)
 
 Dispatch réel des actions playbook vers HubSpot. Remplace le stub log-only (`executeAction`) par un dispatcher async (`dispatchAction`) branché sur l'API HubSpot, avec rate limiting, retry et DLQ.
