@@ -86,3 +86,7 @@ verify_jwt = false
 # outbound-webhook-test : JWT vérifié dans le code (ES256 — test depuis l'UI)
 [functions.outbound-webhook-test]
 verify_jwt = false
+
+# onboarding-first-win : JWT vérifié dans le code (ES256 — aha moment data)
+[functions.onboarding-first-win]
+verify_jwt = false

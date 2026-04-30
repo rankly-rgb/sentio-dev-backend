@@ -1,6 +1,6 @@
 // ============================================================
 // Edge Function : onboarding-status
-// Expose l'état d'onboarding de l'organisation courante.
+// Expose et met à jour l'état d'onboarding de l'organisation.
 //
 // CONTRAT API
 // ──────────────────────────────────────────────────────────
@@ -9,15 +9,18 @@
 //   Response 200 :
 //     {
 //       data: {
-//         stripe_connected: boolean,       // au moins 1 compte avec sync Stripe réussi
-//         hubspot_connected: boolean,      // au moins 1 compte avec sync HubSpot réussi
-//         first_score_calculated: boolean, // au moins 1 score calculé pour l'org
-//         aha_moment_ready: boolean,       // stripe_connected ET first_score_calculated
-//         aha_moment_seen: boolean,        // aha_moment_seen_at IS NOT NULL
-//         first_score_calculated_at: string | null,  // ISO timestamp
-//         aha_moment_seen_at: string | null,         // ISO timestamp
-//         accounts_count: number,          // nb de comptes importés
-//         top_risk_account: {              // présent si aha_moment_ready et non encore vu
+//         stripe_connected: boolean,
+//         hubspot_connected: boolean,
+//         first_score_calculated: boolean,
+//         aha_moment_ready: boolean,
+//         aha_moment_seen: boolean,        // alias first_win_seen
+//         onboarding_completed: boolean,
+//         current_step: 'stripe' | 'hubspot' | 'first_win' | 'done',
+//         first_score_calculated_at: string | null,
+//         aha_moment_seen_at: string | null,
+//         accounts_count: number,
+//         at_risk_count: number,           // comptes avec health_score < 40
+//         top_risk_account: {
 //           id: string,
 //           stripe_customer_id: string,
 //           display_name: string | null,
@@ -27,8 +30,11 @@
 //       }
 //     }
 //
-// POST /onboarding-status/aha-seen
-//   Marque le aha moment comme vu (met à jour aha_moment_seen_at).
+// PATCH /onboarding-status
+//   Body : { field: 'first_win_seen' | 'onboarding_completed', value: true }
+//   Response 200 : { success: true }
+//
+// POST /onboarding-status/aha-seen   (conservé pour rétrocompatibilité)
 //   Body : {} (vide)
 //   Response 200 : { data: { aha_moment_seen_at: string } }
 //
@@ -65,10 +71,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const orgId = auth.organizationId
   const path = url.pathname.split('/').pop()
 
-  // POST .../aha-seen — marquer le aha moment comme vu
+  // POST .../aha-seen — rétrocompatibilité
   if (req.method === 'POST' && path === 'aha-seen') {
     return handleAhaSeen(supabase, orgId)
   }
+
+  if (req.method === 'PATCH') return handlePatch(supabase, orgId, req)
 
   if (req.method === 'GET') return handleGetStatus(supabase, orgId)
 
@@ -81,20 +89,17 @@ async function handleGetStatus(
   supabase: ReturnType<typeof createServiceClient>,
   orgId: string,
 ): Promise<Response> {
-  // Parallel: org, stripe indicator, hubspot indicator, accounts count
-  const [orgRes, stripeRes, hubspotRes, accountsCountRes] = await Promise.all([
+  const [orgRes, stripeRes, hubspotRes, accountsCountRes, atRiskCountRes] = await Promise.all([
     supabase.from('organizations')
-      .select('first_score_calculated_at, aha_moment_seen_at')
+      .select('first_score_calculated_at, aha_moment_seen_at, onboarding_completed')
       .eq('id', orgId)
       .maybeSingle(),
-    // Stripe connecté = au moins 1 sync Stripe complété
     supabase.from('data_syncs')
       .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId)
       .eq('sync_source', 'stripe')
       .eq('sync_status', 'completed')
       .limit(1),
-    // HubSpot connecté = au moins 1 sync HubSpot complété
     supabase.from('data_syncs')
       .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId)
@@ -104,6 +109,10 @@ async function handleGetStatus(
     supabase.from('accounts')
       .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId),
+    supabase.from('accounts')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .lt('health_score', 40),
   ])
 
   if (orgRes.error) {
@@ -115,12 +124,12 @@ async function handleGetStatus(
   const stripeConnected = (stripeRes.count ?? 0) > 0
   const hubspotConnected = (hubspotRes.count ?? 0) > 0
   const accountsCount = accountsCountRes.count ?? 0
+  const atRiskCount = atRiskCountRes.count ?? 0
+  const onboardingCompleted = org?.onboarding_completed ?? false
 
-  // Déduire first_score_calculated depuis la colonne ou depuis score_history
   const firstScoreAt = org?.first_score_calculated_at ?? null
   let firstScoreCalculated = firstScoreAt !== null
 
-  // Si pas encore marqué, vérifier score_history (rétrocompatibilité)
   if (!firstScoreCalculated && accountsCount > 0) {
     const { count: scoreCount } = await supabase
       .from('score_history')
@@ -133,7 +142,8 @@ async function handleGetStatus(
   const ahaMomentReady = stripeConnected && firstScoreCalculated
   const ahaMomentSeen = org?.aha_moment_seen_at !== null && org?.aha_moment_seen_at !== undefined
 
-  // Compte le plus à risque (pour le aha moment)
+  const currentStep = determineCurrentStep(stripeConnected, hubspotConnected, ahaMomentSeen, onboardingCompleted)
+
   let topRiskAccount = null
   if (ahaMomentReady && !ahaMomentSeen) {
     const { data: riskAccount } = await supabase
@@ -154,15 +164,79 @@ async function handleGetStatus(
       first_score_calculated: firstScoreCalculated,
       aha_moment_ready: ahaMomentReady,
       aha_moment_seen: ahaMomentSeen,
+      onboarding_completed: onboardingCompleted,
+      current_step: currentStep,
       first_score_calculated_at: firstScoreAt,
       aha_moment_seen_at: org?.aha_moment_seen_at ?? null,
       accounts_count: accountsCount,
+      at_risk_count: atRiskCount,
       top_risk_account: topRiskAccount,
     },
   })
 }
 
-// ── POST /onboarding-status/aha-seen ────────────────────────
+function determineCurrentStep(
+  stripeConnected: boolean,
+  hubspotConnected: boolean,
+  firstWinSeen: boolean,
+  onboardingCompleted: boolean,
+): 'stripe' | 'hubspot' | 'first_win' | 'done' {
+  if (!stripeConnected) return 'stripe'
+  if (!hubspotConnected && !onboardingCompleted) return 'hubspot'
+  if (!firstWinSeen) return 'first_win'
+  return 'done'
+}
+
+// ── PATCH /onboarding-status ─────────────────────────────────
+
+async function handlePatch(
+  supabase: ReturnType<typeof createServiceClient>,
+  orgId: string,
+  req: Request,
+): Promise<Response> {
+  let body: { field: unknown; value: unknown }
+  try {
+    body = await req.json()
+  } catch {
+    return errorResponse('Invalid JSON body', 400)
+  }
+
+  const { field, value } = body
+
+  if (value !== true) {
+    return errorResponse('value must be true', 400)
+  }
+
+  if (field === 'first_win_seen') {
+    const now = new Date().toISOString()
+    const { error } = await supabase
+      .from('organizations')
+      .update({ aha_moment_seen_at: now })
+      .eq('id', orgId)
+      .is('aha_moment_seen_at', null) // idempotent
+    if (error) {
+      console.error(JSON.stringify({ level: 'error', function_name: 'onboarding-status', message: error.message }))
+      return errorResponse('Failed to mark first win as seen', 500)
+    }
+    return jsonResponse({ success: true })
+  }
+
+  if (field === 'onboarding_completed') {
+    const { error } = await supabase
+      .from('organizations')
+      .update({ onboarding_completed: true })
+      .eq('id', orgId)
+    if (error) {
+      console.error(JSON.stringify({ level: 'error', function_name: 'onboarding-status', message: error.message }))
+      return errorResponse('Failed to mark onboarding as completed', 500)
+    }
+    return jsonResponse({ success: true })
+  }
+
+  return errorResponse('Invalid field. Must be first_win_seen or onboarding_completed', 400)
+}
+
+// ── POST /onboarding-status/aha-seen  (rétrocompatibilité) ───
 
 async function handleAhaSeen(
   supabase: ReturnType<typeof createServiceClient>,
@@ -174,14 +248,13 @@ async function handleAhaSeen(
     .from('organizations')
     .update({ aha_moment_seen_at: now })
     .eq('id', orgId)
-    .is('aha_moment_seen_at', null) // idempotent : ne ré-écrit pas si déjà vu
+    .is('aha_moment_seen_at', null)
 
   if (error) {
     console.error(JSON.stringify({ level: 'error', function_name: 'onboarding-status', message: error.message }))
     return errorResponse('Failed to mark aha moment as seen', 500)
   }
 
-  // Relire la valeur réelle (peut être inchangée si déjà marqué)
   const { data: org } = await supabase
     .from('organizations')
     .select('aha_moment_seen_at')
