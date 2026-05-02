@@ -70,38 +70,65 @@ jobs:
 
       - name: Schedule compute-peer-benchmarks (daily 02:00 UTC)
         # Récupère la service_role key via la Management API, puis crée/remplace
-        # le job pg_cron via une query SQL. Idempotent : cron.unschedule ignore
-        # l'erreur si le job n'existe pas encore.
+        # le job pg_cron via une query SQL. Idempotent.
+        # Soft-fail avec warning si la clé est inaccessible (ne bloque pas le deploy).
         run: |
-          SERVICE_ROLE_KEY=$(curl -sf \
+          set -euo pipefail
+
+          # ── 1. Récupérer la service_role key ──────────────────────────
+          RESP=$(curl -s -w "\n%{http_code}" \
             "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/api-keys" \
-            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN")
+          HTTP_CODE=$(printf '%s' "$RESP" | tail -1)
+          BODY=$(printf '%s' "$RESP" | head -1)
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::warning::Management API /api-keys returned HTTP $HTTP_CODE — cron non configuré"
+            echo "Body: $BODY"
+            exit 0
+          fi
+
+          SERVICE_ROLE_KEY=$(printf '%s' "$BODY" \
             | jq -r '.[] | select(.name == "service_role") | .api_key')
 
           if [ -z "$SERVICE_ROLE_KEY" ]; then
-            echo "ERROR: Could not retrieve service_role key" && exit 1
+            echo "::warning::service_role key introuvable dans la réponse — cron non configuré"
+            exit 0
           fi
 
-          PROJECT_URL="https://${SUPABASE_PROJECT_REF}.supabase.co"
+          FUNCTION_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/compute-peer-benchmarks"
 
-          SQL=$(cat <<SQL
-          select cron.unschedule('compute-peer-benchmarks-daily');
-          SQL
-          )
-          curl -sf -X POST \
-            "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/database/query" \
-            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"query\": \"$SQL\"}" || true
+          # ── 2. Helper : exécuter du SQL via la Management API ─────────
+          run_sql() {
+            local SQL_BODY
+            SQL_BODY=$(jq -Rcs '{"query":.}' <<< "$1")
+            RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$SQL_BODY")
+            local CODE
+            CODE=$(printf '%s' "$RESULT" | tail -1)
+            local OUT
+            OUT=$(printf '%s' "$RESULT" | head -1)
+            echo "SQL HTTP $CODE : $OUT"
+            [ "$CODE" = "200" ] || [ "$CODE" = "201" ]
+          }
 
-          SQL=$(printf \
-            "select cron.schedule('compute-peer-benchmarks-daily', '0 2 * * *', \$\$select net.http_post(url:='%s/functions/v1/compute-peer-benchmarks', headers:='{\"Content-Type\":\"application/json\",\"Authorization\":\"Bearer %s\"}'::jsonb, body:='{}'::jsonb) as request_id;\$\$);" \
-            "$PROJECT_URL" "$SERVICE_ROLE_KEY")
+          # ── 3. Supprimer l'ancien job s'il existe ─────────────────────
+          run_sql "select cron.unschedule('compute-peer-benchmarks-daily');" || true
 
-          curl -sf -X POST \
-            "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/database/query" \
-            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"query\": \"$SQL\"}"
+          # ── 4. Créer le job pg_cron ───────────────────────────────────
+          run_sql "select cron.schedule(
+            'compute-peer-benchmarks-daily',
+            '0 2 * * *',
+            \$cmd\$
+              select net.http_post(
+                url        := '${FUNCTION_URL}',
+                headers    := '{\"Content-Type\":\"application/json\",\"Authorization\":\"Bearer ${SERVICE_ROLE_KEY}\"}'::jsonb,
+                body       := '{}'::jsonb
+              ) as request_id;
+            \$cmd\$
+          );"
 
-          echo "Cron schedule created: compute-peer-benchmarks-daily @ 0 2 * * *"
+          echo "✓ Cron schedule créé : compute-peer-benchmarks-daily @ 0 2 * * *"
