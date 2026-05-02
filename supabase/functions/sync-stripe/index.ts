@@ -420,11 +420,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Method not allowed', 405)
   }
 
-  const apiKey = Deno.env.get('STRIPE_SECRET_KEY')
-  if (!apiKey) {
-    return errorResponse('STRIPE_SECRET_KEY not configured', 500)
-  }
-
   let body: {
     organization_id?: string
     sync_type?: 'incremental' | 'full_sync'
@@ -447,21 +442,37 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Server configuration error', 500)
   }
 
-  // Résoudre l'organisation
+  // Résoudre l'organisation + lire la clé Stripe per-org
   let organizationId = body.organization_id
-  if (!organizationId) {
-    const { data } = await supabase
+  let orgStripeKey: string | null = null
+
+  if (organizationId) {
+    const { data: orgData } = await supabase
       .from('organizations')
-      .select('id')
+      .select('stripe_api_key')
+      .eq('id', organizationId)
+      .maybeSingle()
+    orgStripeKey = orgData?.stripe_api_key ?? null
+  } else {
+    const { data: orgData } = await supabase
+      .from('organizations')
+      .select('id, stripe_api_key')
       .eq('is_active', true)
       .order('created_at', { ascending: true })
       .limit(1)
-      .single()
-    organizationId = data?.id
+      .maybeSingle()
+    organizationId = orgData?.id
+    orgStripeKey = orgData?.stripe_api_key ?? null
   }
 
   if (!organizationId) {
     return errorResponse('No active organization found', 404)
+  }
+
+  // Clé Stripe : priorité org > variable d'env globale
+  const apiKey = orgStripeKey ?? Deno.env.get('STRIPE_SECRET_KEY')
+  if (!apiKey) {
+    return errorResponse('Clé Stripe non configurée. Ajoutez votre clé dans Intégrations → Stripe.', 500)
   }
 
   const syncType = body.sync_type ?? 'incremental'

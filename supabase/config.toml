@@ -94,3 +94,7 @@ verify_jwt = false
 # compute-peer-benchmarks : cron quotidien (service_role HS256)
 [functions.compute-peer-benchmarks]
 verify_jwt = true
+
+# integrations-config : JWT vérifié dans le code (ES256 — configuration clés API)
+[functions.integrations-config]
+verify_jwt = false
