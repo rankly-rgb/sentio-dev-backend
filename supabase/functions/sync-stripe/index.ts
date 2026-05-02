@@ -446,24 +446,30 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let organizationId = body.organization_id
   let orgStripeKey: string | null = null
 
+  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '1_org_resolve', organization_id_from_body: organizationId ?? null }))
+
   if (organizationId) {
-    const { data: orgData } = await supabase
+    const { data: orgData, error: orgErr } = await supabase
       .from('organizations')
       .select('stripe_api_key')
       .eq('id', organizationId)
       .maybeSingle()
+    if (orgErr) console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', step: '1_org_query', error: orgErr.message }))
     orgStripeKey = orgData?.stripe_api_key ?? null
   } else {
-    const { data: orgData } = await supabase
+    const { data: orgData, error: orgErr } = await supabase
       .from('organizations')
       .select('id, stripe_api_key')
       .eq('is_active', true)
       .order('created_at', { ascending: true })
       .limit(1)
       .maybeSingle()
+    if (orgErr) console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', step: '1_org_fallback_query', error: orgErr.message }))
     organizationId = orgData?.id
     orgStripeKey = orgData?.stripe_api_key ?? null
   }
+
+  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '2_org_resolved', organization_id: organizationId ?? null, has_org_key: orgStripeKey !== null }))
 
   if (!organizationId) {
     return errorResponse('No active organization found', 404)
@@ -477,6 +483,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const syncType = body.sync_type ?? 'incremental'
   const isManual = body.is_manual ?? false
+
+  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '3_key_ok', sync_type: syncType }))
 
   // Pour le sync incrémental, récupérer la date du dernier sync
   let createdAfter: number | undefined
@@ -516,12 +524,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
   })
 
   // Acquire cron lock to prevent concurrent sync runs
+  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '4_acquiring_lock' }))
   const lockAcquired = await acquireCronLock(supabase, 'sync-stripe', 300)
+  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '5_lock_result', acquired: lockAcquired }))
   if (!lockAcquired) {
     return errorResponse('Sync already in progress', 409)
   }
 
+  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '6_logger_start' }))
   await logger.start()
+  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '7_sync_begin' }))
 
   try {
     // Sync dans l'ordre : customers → subscriptions (always full) → invoices
