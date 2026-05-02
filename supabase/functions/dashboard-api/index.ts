@@ -76,7 +76,16 @@
 //           higher_is_better: true,
 //           sources: string[]
 //         },
-//         peers: { available: false, min_orgs_required: 3 }
+//         peers:
+//           | { available: false, min_orgs_required: 3 }
+//           | {
+//               available: true,
+//               org_count: number,
+//               computed_at: string,
+//               nrr: { p25: number, p50: number, p75: number },
+//               churn_rate: { p25: number, p50: number, p75: number },
+//               mrr_growth: { p25: number, p50: number, p75: number }
+//             }
 //       }
 //     }
 //
@@ -435,7 +444,7 @@ async function handleBenchmarks(
     .toISOString()
     .split('T')[0]
 
-  const [currentMrrRes, movements12mRes] = await Promise.all([
+  const [currentMrrRes, movements12mRes, peersRes] = await Promise.all([
     supabase
       .from('accounts')
       .select('mrr_cents')
@@ -449,6 +458,14 @@ async function handleBenchmarks(
       .eq('organization_id', orgId)
       .gte('movement_date', twelveMonthsAgo)
       .limit(10000),
+
+    // Dernier snapshot peers disponible
+    supabase
+      .from('peer_benchmarks')
+      .select('org_count, computed_at, nrr_p25, nrr_p50, nrr_p75, churn_rate_p25, churn_rate_p50, churn_rate_p75, mrr_growth_p25, mrr_growth_p50, mrr_growth_p75')
+      .order('computed_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
   ])
 
   // MRR actuel total
@@ -494,6 +511,19 @@ async function handleBenchmarks(
     ? Math.round((netMovements12m / startingMrr) * 1000) / 10
     : null
 
+  // Peers : snapshot le plus récent si disponible
+  const peerRow = peersRes.data
+  const peers = peerRow
+    ? {
+        available: true as const,
+        org_count: peerRow.org_count,
+        computed_at: peerRow.computed_at,
+        nrr: { p25: peerRow.nrr_p25, p50: peerRow.nrr_p50, p75: peerRow.nrr_p75 },
+        churn_rate: { p25: peerRow.churn_rate_p25, p50: peerRow.churn_rate_p50, p75: peerRow.churn_rate_p75 },
+        mrr_growth: { p25: peerRow.mrr_growth_p25, p50: peerRow.mrr_growth_p50, p75: peerRow.mrr_growth_p75 },
+      }
+    : { available: false as const, min_orgs_required: 3 }
+
   return jsonResponse({
     data: {
       nrr: {
@@ -517,7 +547,7 @@ async function handleBenchmarks(
         higher_is_better: true,
         sources: ['SaaS Capital 2025'],
       },
-      peers: { available: false, min_orgs_required: 3 },
+      peers,
     },
   })
 }

@@ -90,3 +90,7 @@ verify_jwt = false
 # onboarding-first-win : JWT vérifié dans le code (ES256 — aha moment data)
 [functions.onboarding-first-win]
 verify_jwt = false
+
+# compute-peer-benchmarks : cron quotidien (service_role HS256)
+[functions.compute-peer-benchmarks]
+verify_jwt = true
