@@ -67,3 +67,41 @@ jobs:
 
       - name: Deploy Edge Functions
         run: supabase functions deploy
+
+      - name: Schedule compute-peer-benchmarks (daily 02:00 UTC)
+        # Récupère la service_role key via la Management API, puis crée/remplace
+        # le job pg_cron via une query SQL. Idempotent : cron.unschedule ignore
+        # l'erreur si le job n'existe pas encore.
+        run: |
+          SERVICE_ROLE_KEY=$(curl -sf \
+            "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/api-keys" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            | jq -r '.[] | select(.name == "service_role") | .api_key')
+
+          if [ -z "$SERVICE_ROLE_KEY" ]; then
+            echo "ERROR: Could not retrieve service_role key" && exit 1
+          fi
+
+          PROJECT_URL="https://${SUPABASE_PROJECT_REF}.supabase.co"
+
+          SQL=$(cat <<SQL
+          select cron.unschedule('compute-peer-benchmarks-daily');
+          SQL
+          )
+          curl -sf -X POST \
+            "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/database/query" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\": \"$SQL\"}" || true
+
+          SQL=$(printf \
+            "select cron.schedule('compute-peer-benchmarks-daily', '0 2 * * *', \$\$select net.http_post(url:='%s/functions/v1/compute-peer-benchmarks', headers:='{\"Content-Type\":\"application/json\",\"Authorization\":\"Bearer %s\"}'::jsonb, body:='{}'::jsonb) as request_id;\$\$);" \
+            "$PROJECT_URL" "$SERVICE_ROLE_KEY")
+
+          curl -sf -X POST \
+            "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/database/query" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\": \"$SQL\"}"
+
+          echo "Cron schedule created: compute-peer-benchmarks-daily @ 0 2 * * *"
