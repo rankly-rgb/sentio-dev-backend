@@ -98,3 +98,11 @@ verify_jwt = true
 # integrations-config : JWT vérifié dans le code (ES256 — configuration clés API)
 [functions.integrations-config]
 verify_jwt = false
+
+# playbook-executor : appelé par calculate-scores/stripe-webhook (service_role fire-and-forget)
+[functions.playbook-executor]
+verify_jwt = false
+
+# playbook-test : JWT vérifié dans le code (ES256 — test manuel depuis UI)
+[functions.playbook-test]
+verify_jwt = false

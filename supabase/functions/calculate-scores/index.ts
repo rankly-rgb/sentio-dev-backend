@@ -647,7 +647,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           continue
         }
 
-        // ── Outbound webhook dispatch (fire-and-forget) ─────────────────────
+        // ── Outbound webhook dispatch + Playbook executor (fire-and-forget) ──
         if (dispatchQueue.length > 0) {
           const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
           const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
@@ -655,24 +655,26 @@ Deno.serve(async (req: Request): Promise<Response> => {
           Promise.allSettled(
             dispatchQueue.map(({ account, scores, oldSegment, newSegment }) => {
               const eventType = oldSegment !== newSegment ? 'segment_change' : 'churn_threshold'
-              return fetch(`${supabaseUrl}/functions/v1/outbound-webhook-dispatch`, {
+              const commonBody = {
+                organization_id: organizationId,
+                account_id: account.id,
+                stripe_customer_id: account.stripe_customer_id ?? '',
+                segment_previous: oldSegment,
+                segment_current: newSegment,
+                health_score: scores.health_score,
+                churn_risk_score: scores.churn_risk_score,
+                expansion_score: scores.expansion_score,
+                mrr_cents: account.mrr_cents ?? 0,
+              }
+              const headers = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${supabaseKey}`,
+              }
+              // Dispatch outbound webhook (JSON générique)
+              const outboundP = fetch(`${supabaseUrl}/functions/v1/outbound-webhook-dispatch`, {
                 method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${supabaseKey}`,
-                },
-                body: JSON.stringify({
-                  organization_id: organizationId,
-                  account_id: account.id,
-                  stripe_customer_id: account.stripe_customer_id ?? '',
-                  event_type: eventType,
-                  segment_previous: oldSegment,
-                  segment_current: newSegment,
-                  health_score: scores.health_score,
-                  churn_risk_score: scores.churn_risk_score,
-                  expansion_score: scores.expansion_score,
-                  mrr_cents: account.mrr_cents ?? 0,
-                }),
+                headers,
+                body: JSON.stringify({ ...commonBody, event_type: eventType }),
               }).catch((err) => {
                 console.error(JSON.stringify({
                   level: 'warn',
@@ -681,6 +683,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
                   message: `outbound dispatch fire-and-forget failed: ${err instanceof Error ? err.message : String(err)}`,
                 }))
               })
+              // Dispatch playbook executor (connecteurs email/slack/etc.)
+              const playbookP = fetch(`${supabaseUrl}/functions/v1/playbook-executor`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ ...commonBody, trigger_reason: eventType }),
+              }).catch((err) => {
+                console.error(JSON.stringify({
+                  level: 'warn',
+                  function_name: 'calculate-scores',
+                  organization_id: organizationId,
+                  message: `playbook-executor fire-and-forget failed: ${err instanceof Error ? err.message : String(err)}`,
+                }))
+              })
+              return Promise.all([outboundP, playbookP])
             }),
           ).catch(() => {})
         }

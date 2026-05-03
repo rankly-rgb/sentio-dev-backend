@@ -513,9 +513,38 @@ Deno.serve(async (req: Request): Promise<Response> => {
         break
       case 'invoice.created':
       case 'invoice.paid':
-      case 'invoice.payment_failed':
       case 'invoice.voided':
         await handleInvoiceEvent(supabase, organizationId, event, logger)
+        break
+      case 'invoice.payment_failed':
+        await handleInvoiceEvent(supabase, organizationId, event, logger)
+        // Fire-and-forget playbook-executor — ne jamais bloquer le webhook
+        {
+          const failedInvoice = event.data.object as { customer?: string }
+          if (failedInvoice.customer) {
+            const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+            const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+            fetch(`${supabaseUrl}/functions/v1/playbook-executor`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${supabaseKey}`,
+              },
+              body: JSON.stringify({
+                organization_id: organizationId,
+                stripe_customer_id: failedInvoice.customer,
+                trigger_reason: 'invoice_past_due',
+              }),
+            }).catch((err) => {
+              console.warn(JSON.stringify({
+                level: 'warn',
+                function_name: 'stripe-webhook',
+                organization_id: organizationId,
+                message: `playbook-executor invoice_past_due fire-and-forget failed: ${err instanceof Error ? err.message : String(err)}`,
+              }))
+            })
+          }
+        }
         break
     }
 
