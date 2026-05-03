@@ -110,3 +110,7 @@ verify_jwt = false
 # playbook-approve : JWT verifie dans le code (ES256 — validation CS)
 [functions.playbook-approve]
 verify_jwt = false
+
+# on-user-signup : JWT vérifié dans le code (ES256 — email de bienvenue post-signup)
+[functions.on-user-signup]
+verify_jwt = false
