@@ -18,6 +18,7 @@ interface PlaybookDestination {
   name: string                        // Ex: "Brevo - Séquence churn critique"
   connector: ConnectorType            // Voir enum ci-dessous
   is_active: boolean
+  require_approval: boolean           // true = mise en queue avant exécution
   trigger_segments: string[]          // Ex: ["en_danger_critique", "en_churn"]
   trigger_churn_threshold: number | null  // 0-100. null = pas de seuil
   trigger_on_invoice_past_due: boolean
@@ -55,6 +56,33 @@ interface PlaybookExecutionLog {
   error_message: string | null        // Tronqué à 500 chars, sans PII
   connector_response: string | null   // Tronqué à 500 chars, sans PII
   executed_at: string                 // ISO 8601
+  created_at: string                  // ISO 8601
+  updated_at: string                  // ISO 8601
+}
+```
+
+### `playbook_approval_queue`
+
+```typescript
+interface PlaybookApprovalQueueItem {
+  id: string                          // UUID
+  organization_id: string             // UUID
+  destination_id: string              // UUID → playbook_destinations.id
+  account_id: string                  // UUID → accounts.id
+  stripe_customer_id: string          // Identifiant opaque Stripe (Zero-PII)
+  connector: ConnectorType
+  trigger_reason: TriggerReason
+  segment_at_trigger: string | null
+  segment_previous: string | null
+  churn_risk_at_trigger: number | null
+  health_score_at_trigger: number | null
+  expansion_score_at_trigger: number | null
+  mrr_cents_at_trigger: number | null
+  status: 'pending' | 'approved' | 'rejected' | 'expired'
+  reviewed_by: string | null          // auth_user_id du reviewer
+  reviewed_at: string | null          // ISO 8601
+  review_comment: string | null
+  expires_at: string                  // ISO 8601 — auto-expiry 48h après création
   created_at: string                  // ISO 8601
   updated_at: string                  // ISO 8601
 }
@@ -187,9 +215,10 @@ Déclenche les actions pour un account. Appelée en fire-and-forget par calculat
 **Response 200** :
 ```typescript
 {
-  executed: number        // Nombre de destinations déclenchées avec succès
+  executed: number        // Destinations déclenchées immédiatement (require_approval=false)
+  queued: number          // Destinations mises en attente de validation (require_approval=true)
   failed: number          // Nombre d'échecs
-  destinations: string[]  // Noms des destinations déclenchées
+  destinations: string[]  // Noms des destinations exécutées immédiatement
 }
 ```
 
@@ -227,6 +256,82 @@ Teste une destination sans attendre un vrai signal.
 - `401` : non authentifié
 - `404` : destination inconnue ou n'appartient pas à l'org
 - `500` : erreur de configuration serveur
+
+---
+
+### PATCH `/functions/v1/playbook-approve`
+
+Valide ou rejette un item de la queue. Si approuvé, appelle immédiatement le connecteur.
+
+**Auth** : `Authorization: Bearer <jwt_user>` (JWT ES256 utilisateur)
+
+**Request body** :
+```typescript
+{
+  queue_item_id: string           // UUID — requis
+  action: 'approved' | 'rejected'
+  comment?: string                // Commentaire optionnel (visible dans l'historique)
+}
+```
+
+**Response 200** :
+```typescript
+// Rejet
+{ success: true, action: 'rejected' }
+
+// Approbation
+{
+  success: boolean                // true si le connecteur a répondu 2xx
+  action: 'approved'
+  connector_result: {
+    http_status: number | null
+    connector_response: string | null   // Tronqué à 500 chars, sans PII
+    error_message: string | null        // Tronqué à 500 chars, sans PII
+  }
+}
+```
+
+**Erreurs** :
+- `400` : payload invalide
+- `401` : non authentifié
+- `404` : queue item inconnu ou n'appartient pas à l'org
+- `409` : item déjà traité (status ≠ pending)
+- `410` : item expiré (délai 48h dépassé)
+- `500` : erreur de configuration serveur
+
+**Note** : si `action = 'approved'` et que le connecteur échoue, la réponse retourne `success: false` mais le statut de l'item est quand même mis à `approved`. L'échec connecteur est loggé dans `playbook_execution_logs` et `webhook_dead_letter`.
+
+---
+
+### GET `playbook_approval_queue` — via Supabase client
+
+```typescript
+// Items en attente de validation (non expirés)
+const { data } = await supabase
+  .from('playbook_approval_queue')
+  .select(`
+    *,
+    playbook_destinations ( name, connector )
+  `)
+  .eq('status', 'pending')
+  .gt('expires_at', new Date().toISOString())
+  .order('created_at', { ascending: false })
+
+// Historique de validation
+const { data } = await supabase
+  .from('playbook_approval_queue')
+  .select('*')
+  .in('status', ['approved', 'rejected', 'expired'])
+  .order('reviewed_at', { ascending: false })
+  .limit(50)
+
+// Badge : nombre d'items en attente (pour le menu nav)
+const { count } = await supabase
+  .from('playbook_approval_queue')
+  .select('*', { count: 'exact', head: true })
+  .eq('status', 'pending')
+  .gt('expires_at', new Date().toISOString())
+```
 
 ---
 

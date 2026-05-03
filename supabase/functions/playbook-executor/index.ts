@@ -82,6 +82,7 @@ interface PlaybookDestination {
   name: string
   connector: string
   is_active: boolean
+  require_approval: boolean
   trigger_segments: string[]
   trigger_churn_threshold: number | null
   trigger_on_invoice_past_due: boolean
@@ -227,8 +228,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
   )
 
   if (matched.length === 0) {
-    return jsonResponse({ executed: 0, failed: 0, destinations: [] })
+    return jsonResponse({ executed: 0, queued: 0, failed: 0, destinations: [] })
   }
+
+  // ── Bifurcation : immediate vs approval queue ────────────
+  const immediateDestinations = matched.filter((d) => !d.require_approval)
+  const queuedDestinations = matched.filter((d) => d.require_approval)
 
   // ── Lookup account si données manquantes ────────────────
   let accountRow: AccountRow | null = null
@@ -259,6 +264,45 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Account introuvable pour ce stripe_customer_id', 404)
   }
 
+  // ── Insérer les destinations en attente de validation ────
+  let queued = 0
+  if (queuedDestinations.length > 0) {
+    const queueRows = queuedDestinations.map((dest) => ({
+      organization_id: input.organization_id,
+      destination_id: dest.id,
+      account_id: accountId,
+      stripe_customer_id: input.stripe_customer_id,
+      connector: dest.connector,
+      trigger_reason: input.trigger_reason,
+      segment_at_trigger: segmentCurrent,
+      segment_previous: input.segment_previous ?? null,
+      churn_risk_at_trigger: churnRisk,
+      health_score_at_trigger: healthScore,
+      expansion_score_at_trigger: expansionScore,
+      mrr_cents_at_trigger: mrrCents,
+      expires_at: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
+    }))
+
+    const { error: queueError } = await supabase
+      .from('playbook_approval_queue')
+      .insert(queueRows)
+
+    if (queueError) {
+      console.error(JSON.stringify({
+        level: 'error',
+        function_name: 'playbook-executor',
+        organization_id: input.organization_id,
+        message: `approval queue insert failed: ${queueError.message}`,
+      }))
+    } else {
+      queued = queuedDestinations.length
+    }
+  }
+
+  if (immediateDestinations.length === 0) {
+    return jsonResponse({ executed: 0, queued, failed: 0, destinations: [] })
+  }
+
   // ── Récupérer la clé Stripe de l'org ────────────────────
   const { data: orgRow } = await supabase
     .from('organizations')
@@ -274,13 +318,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     ? await getCustomerEmailTransit(input.stripe_customer_id, stripeApiKey)
     : null
 
-  // ── Exécuter les destinations en parallèle ───────────────
+  // ── Exécuter les destinations immédiates en parallèle ────
   let executed = 0
   let failed = 0
   const triggeredNames: string[] = []
 
   const results = await Promise.allSettled(
-    matched.map(async (dest) => {
+    immediateDestinations.map(async (dest) => {
       const config: ConnectorConfig = {
         api_key: dest.api_key_vault_key ?? '',
         api_endpoint: dest.api_endpoint ?? undefined,
@@ -374,5 +418,5 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq('organization_id', input.organization_id)
   }
 
-  return jsonResponse({ executed, failed, destinations: triggeredNames })
+  return jsonResponse({ executed, queued, failed, destinations: triggeredNames })
 })
