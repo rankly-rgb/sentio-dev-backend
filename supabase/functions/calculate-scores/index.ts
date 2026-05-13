@@ -720,6 +720,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
           }))
         }
 
+        // Marquer le premier scoring réussi pour l'onboarding (idempotent)
+        if (accountsScored > 0) {
+          await supabase
+            .from('organizations')
+            .update({ first_score_calculated_at: new Date().toISOString() })
+            .eq('id', organizationId)
+            .is('first_score_calculated_at', null)
+        }
+
         await logger.complete({ accounts_scored: accountsScored, segments_assigned: segmentsAssigned, errors })
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)

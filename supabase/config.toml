@@ -63,6 +63,10 @@ verify_jwt = false
 [functions.onboarding-status]
 verify_jwt = false
 
+# org-settings : JWT vérifié dans le code (ES256)
+[functions.org-settings]
+verify_jwt = false
+
 # dashboard-api : JWT vérifié dans le code (ES256 — chantiers 3, 4)
 [functions.dashboard-api]
 verify_jwt = false
@@ -113,4 +117,20 @@ verify_jwt = false
 
 # on-user-signup : JWT vérifié dans le code (ES256 — email de bienvenue post-signup)
 [functions.on-user-signup]
+verify_jwt = false
+
+# Onboarding V2 — étapes comportementales (Skrob / Eyal)
+[functions.create-organization-with-invitation]
+verify_jwt = false
+
+[functions.update-onboarding-step]
+verify_jwt = false
+
+[functions.get-onboarding-status-v2]
+verify_jwt = false
+
+[functions.get-accounts-summary]
+verify_jwt = false
+
+[functions.save-org-preferences]
 verify_jwt = false

@@ -121,5 +121,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Failed to save integration key', 500)
   }
 
+  // Déclencher le pipeline onboarding automatiquement après connexion Stripe
+  if (provider === 'stripe') {
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+    const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    if (supabaseUrl && serviceKey) {
+      fetch(`${supabaseUrl}/functions/v1/sync-stripe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${serviceKey}` },
+        body: JSON.stringify({ organization_id: orgId, sync_type: 'full_sync', triggered_by: 'onboarding' }),
+      }).catch((err) => {
+        console.error(JSON.stringify({
+          level: 'warn',
+          function_name: 'integrations-config',
+          message: `onboarding sync trigger failed: ${err instanceof Error ? err.message : String(err)}`,
+        }))
+      })
+    }
+  }
+
   return jsonResponse({ success: true })
 })

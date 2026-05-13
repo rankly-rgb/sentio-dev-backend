@@ -425,6 +425,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     sync_type?: 'incremental' | 'full_sync'
     created_after?: number
     is_manual?: boolean
+    triggered_by?: string
   } = {}
 
   try {
@@ -483,6 +484,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const syncType = body.sync_type ?? 'incremental'
   const isManual = body.is_manual ?? false
+  const triggeredBy = body.triggered_by ?? 'cron'
+  const isOnboarding = triggeredBy === 'onboarding'
 
   console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '3_key_ok', sync_type: syncType }))
 
@@ -523,9 +526,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     isManual,
   })
 
-  // Acquire cron lock to prevent concurrent sync runs
-  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '4_acquiring_lock' }))
-  const lockAcquired = await acquireCronLock(supabase, 'sync-stripe', 300)
+  // Lock per-org pour les syncs onboarding, lock global pour les crons
+  const lockName = isOnboarding ? `sync-stripe-${organizationId}` : 'sync-stripe'
+  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '4_acquiring_lock', lock_name: lockName }))
+  const lockAcquired = await acquireCronLock(supabase, lockName, 300)
   console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '5_lock_result', acquired: lockAcquired }))
   if (!lockAcquired) {
     return errorResponse('Sync already in progress', 409)
@@ -548,6 +552,25 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq('id', organizationId)
 
     await logger.complete({ sync_type: syncType, created_after: createdAfter })
+
+    // Déclencher le scoring automatiquement après un sync onboarding
+    if (isOnboarding) {
+      const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+      const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+      if (supabaseUrl && serviceKey) {
+        fetch(`${supabaseUrl}/functions/v1/calculate-scores`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${serviceKey}` },
+          body: JSON.stringify({ organization_id: organizationId }),
+        }).catch((err) => {
+          console.error(JSON.stringify({
+            level: 'warn',
+            function_name: 'sync-stripe',
+            message: `onboarding score trigger failed: ${err instanceof Error ? err.message : String(err)}`,
+          }))
+        })
+      }
+    }
 
     return jsonResponse({
       success: true,
@@ -573,6 +596,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     return errorResponse(`Sync failed: ${msg}`, 500)
   } finally {
-    await releaseCronLock(supabase, 'sync-stripe')
+    await releaseCronLock(supabase, lockName)
   }
 })

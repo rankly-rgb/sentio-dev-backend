@@ -89,7 +89,7 @@ async function handleGetStatus(
   supabase: ReturnType<typeof createServiceClient>,
   orgId: string,
 ): Promise<Response> {
-  const [orgRes, stripeRes, hubspotRes, accountsCountRes, atRiskCountRes] = await Promise.all([
+  const [orgRes, stripeRes, stripeSyncRunningRes, hubspotRes, accountsCountRes, atRiskCountRes] = await Promise.all([
     supabase.from('organizations')
       .select('first_score_calculated_at, aha_moment_seen_at, onboarding_completed')
       .eq('id', orgId)
@@ -99,6 +99,12 @@ async function handleGetStatus(
       .eq('organization_id', orgId)
       .eq('sync_source', 'stripe')
       .eq('sync_status', 'completed')
+      .limit(1),
+    supabase.from('data_syncs')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('sync_source', 'stripe')
+      .eq('sync_status', 'running')
       .limit(1),
     supabase.from('data_syncs')
       .select('id', { count: 'exact', head: true })
@@ -122,6 +128,7 @@ async function handleGetStatus(
 
   const org = orgRes.data
   const stripeConnected = (stripeRes.count ?? 0) > 0
+  const stripeSyncInProgress = (stripeSyncRunningRes.count ?? 0) > 0
   const hubspotConnected = (hubspotRes.count ?? 0) > 0
   const accountsCount = accountsCountRes.count ?? 0
   const atRiskCount = atRiskCountRes.count ?? 0
@@ -160,6 +167,7 @@ async function handleGetStatus(
   return jsonResponse({
     data: {
       stripe_connected: stripeConnected,
+      stripe_sync_in_progress: stripeSyncInProgress,
       hubspot_connected: hubspotConnected,
       first_score_calculated: firstScoreCalculated,
       aha_moment_ready: ahaMomentReady,
