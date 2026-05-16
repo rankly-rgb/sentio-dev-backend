@@ -318,6 +318,7 @@ async function syncSubscriptions(
 
     const row: Record<string, unknown> = {
       id: acctId,
+      organization_id: organizationId,
       mrr_cents: totalMrr,
       arr_cents: totalMrr * 12,
       seat_count: totalSeats > 0 ? totalSeats : null,
