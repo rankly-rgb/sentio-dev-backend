@@ -54,7 +54,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             sync_status: 'failed',
             completed_at: new Date().toISOString(),
             error_message: 'Auto-failed by self-monitor: exceeded 15 min running time',
-            error_type: 'timeout',
+            error_type: 'network_error',
             is_retryable: true,
           })
           .eq('id', sync.id)

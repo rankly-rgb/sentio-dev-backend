@@ -356,12 +356,12 @@ async function syncInvoices(
   }
 
   const invoiceRows: Record<string, unknown>[] = []
-  let skipped = 0
+  let orphaned = 0 // invoices for Stripe customers not yet in accounts — not a failure
 
   for await (const invoice of paginateStripe<StripeInvoice>('/invoices', apiKey, extraParams, logger)) {
     const accountId = invoiceCustomerMap.get(invoice.customer)
     if (!accountId) {
-      skipped++
+      orphaned++
       continue
     }
 
@@ -387,7 +387,13 @@ async function syncInvoices(
   const { processed, failed } = await batchUpsert(supabase, 'invoices', invoiceRows, 'stripe_invoice_id')
   logger.increment('records_processed', processed)
   logger.increment('invoices_processed', processed)
-  logger.increment('records_failed', failed + skipped)
+  logger.increment('records_failed', failed)
+  if (orphaned > 0) {
+    console.warn(JSON.stringify({
+      level: 'warn', function_name: 'sync-stripe',
+      message: `${orphaned} invoices skipped — no matching account (expected during initial sync)`,
+    }))
+  }
 }
 
 // ── Entrypoint ───────────────────────────────────────────────

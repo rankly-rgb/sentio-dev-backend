@@ -84,16 +84,24 @@ export class DataSyncLogger {
       ? Math.round((completedAt.getTime() - this.startedAt.getTime()) / 1000)
       : null
 
-    await this.supabase
-      .from('data_syncs')
-      .update({
-        sync_status: 'completed',
-        completed_at: completedAt.toISOString(),
-        duration_seconds: durationSeconds,
-        sync_summary: summary ?? null,
-        ...this.counts,
-      })
-      .eq('id', this.syncId)
+    try {
+      const { error } = await this.supabase
+        .from('data_syncs')
+        .update({
+          sync_status: 'completed',
+          completed_at: completedAt.toISOString(),
+          duration_seconds: durationSeconds,
+          sync_summary: summary ?? null,
+          ...this.counts,
+        })
+        .eq('id', this.syncId)
+
+      if (error) {
+        console.error('[DataSyncLogger] complete() UPDATE failed:', error.message, error.code, JSON.stringify(this.counts))
+      }
+    } catch (err) {
+      console.error('[DataSyncLogger] complete() threw:', err instanceof Error ? err.message : String(err))
+    }
   }
 
   async fail(errorMessage: string, errorType = 'api_error', isRetryable = true): Promise<void> {
