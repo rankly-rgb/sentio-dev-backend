@@ -19,6 +19,7 @@ const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
 const MAX_PAGES = 50
 const STRIPE_TIMEOUT_MS = 8000
+const DB_BATCH_SIZE = 500
 
 const stripeCircuitBreaker = new CircuitBreaker({
   name: 'stripe-api',
@@ -165,6 +166,28 @@ function calcMrrCents(sub: StripeSubscription): number {
   return Math.round((amount * qty) / (interval === 'year' ? 12 : 1))
 }
 
+// ── Helpers batch ─────────────────────────────────────────────
+async function batchUpsert<T extends Record<string, unknown>>(
+  supabase: SupabaseClient,
+  table: string,
+  rows: T[],
+  onConflict: string,
+): Promise<{ processed: number; failed: number }> {
+  let processed = 0
+  let failed = 0
+  for (let i = 0; i < rows.length; i += DB_BATCH_SIZE) {
+    const chunk = rows.slice(i, i + DB_BATCH_SIZE)
+    const { error } = await supabase.from(table).upsert(chunk, { onConflict, ignoreDuplicates: false })
+    if (error) {
+      console.error(`[sync-stripe] batch upsert ${table} error:`, error.message)
+      failed += chunk.length
+    } else {
+      processed += chunk.length
+    }
+  }
+  return { processed, failed }
+}
+
 // ── Sync customers → accounts ─────────────────────────────────
 async function syncCustomers(
   supabase: SupabaseClient,
@@ -176,26 +199,21 @@ async function syncCustomers(
   const extraParams: Record<string, string> = {}
   if (createdAfter) extraParams['created[gt]'] = String(createdAfter)
 
-  for await (const customer of paginateStripe<StripeCustomer>('/customers', apiKey, extraParams, logger)) {
-    const { error } = await supabase
-      .from('accounts')
-      .upsert(
-        {
-          organization_id: organizationId,
-          stripe_customer_id: customer.id,
-          last_stripe_sync_at: new Date().toISOString(),
-        },
-        { onConflict: 'organization_id,stripe_customer_id', ignoreDuplicates: false },
-      )
+  const syncedAt = new Date().toISOString()
+  const rows: Record<string, unknown>[] = []
 
-    if (error) {
-      console.error('[sync-stripe] account upsert error:', error.message)
-      logger.increment('records_failed')
-    } else {
-      logger.increment('records_processed')
-      logger.increment('accounts_processed')
-    }
+  for await (const customer of paginateStripe<StripeCustomer>('/customers', apiKey, extraParams, logger)) {
+    rows.push({
+      organization_id: organizationId,
+      stripe_customer_id: customer.id,
+      last_stripe_sync_at: syncedAt,
+    })
   }
+
+  const { processed, failed } = await batchUpsert(supabase, 'accounts', rows, 'organization_id,stripe_customer_id')
+  logger.increment('records_processed', processed)
+  logger.increment('accounts_processed', processed)
+  logger.increment('records_failed', failed)
 }
 
 // ── Sync subscriptions ────────────────────────────────────────
@@ -220,7 +238,7 @@ async function syncSubscriptions(
     if (a.stripe_customer_id) customerToAccount.set(a.stripe_customer_id, a.id)
   }
 
-  // Track per-account metadata from active subs for propagation
+  // Track per-account metadata from active subs for MRR aggregation
   const accountSubMeta = new Map<string, Array<{
     mrrCents: number
     billingInterval: string
@@ -229,113 +247,85 @@ async function syncSubscriptions(
     contractEnd: string | null
   }>>()
 
-  for await (const sub of paginateStripe<StripeSubscription>('/subscriptions', apiKey, extraParams, logger)) {
-    // Résoudre l'account via la Map pré-construite (O(1) au lieu d'un SELECT)
-    const accountId = customerToAccount.get(sub.customer)
+  // Collect all subscription rows — batch upsert at the end
+  const subRows: Record<string, unknown>[] = []
 
+  for await (const sub of paginateStripe<StripeSubscription>('/subscriptions', apiKey, extraParams, logger)) {
+    const accountId = customerToAccount.get(sub.customer)
     if (!accountId) {
-      console.warn('[sync-stripe] account not found for customer', sub.customer)
       logger.increment('records_failed')
       continue
     }
-
-    const accountRow = { id: accountId }
 
     const mrrCents = calcMrrCents(sub)
     const interval = getSubscriptionInterval(sub)
     const qty = sub.items?.data?.[0]?.quantity ?? sub.quantity ?? 1
-    const cancelAt = sub.cancel_at
-      ? new Date(sub.cancel_at * 1000).toISOString().split('T')[0]
-      : null
-    const canceledAt = sub.canceled_at
-      ? new Date(sub.canceled_at * 1000).toISOString()
-      : null
-    const trialEnd = sub.trial_end
-      ? new Date(sub.trial_end * 1000).toISOString().split('T')[0]
-      : null
-    const periodStart = sub.current_period_start
-      ? new Date(sub.current_period_start * 1000).toISOString().split('T')[0]
-      : null
-    const periodEnd = sub.current_period_end
-      ? new Date(sub.current_period_end * 1000).toISOString().split('T')[0]
-      : null
 
-    const { error } = await supabase
-      .from('subscriptions')
-      .upsert(
-        {
-          organization_id: organizationId,
-          account_id: accountRow.id,
-          stripe_sub_id: sub.id,
-          stripe_price_id: sub.items?.data?.[0]?.price?.id ?? null,
-          stripe_product_id: sub.items?.data?.[0]?.price?.product ?? null,
-          status: sub.status,
-          mrr_cents: mrrCents,
-          quantity: qty,
-          trial_end_date: trialEnd,
-          cancel_at: cancelAt,
-          canceled_at: canceledAt,
-        },
-        { onConflict: 'stripe_sub_id', ignoreDuplicates: false },
-      )
+    subRows.push({
+      organization_id: organizationId,
+      account_id: accountId,
+      stripe_sub_id: sub.id,
+      stripe_price_id: sub.items?.data?.[0]?.price?.id ?? null,
+      stripe_product_id: sub.items?.data?.[0]?.price?.product ?? null,
+      status: sub.status,
+      mrr_cents: mrrCents,
+      quantity: qty,
+      trial_end_date: sub.trial_end ? new Date(sub.trial_end * 1000).toISOString().split('T')[0] : null,
+      cancel_at: sub.cancel_at ? new Date(sub.cancel_at * 1000).toISOString().split('T')[0] : null,
+      canceled_at: sub.canceled_at ? new Date(sub.canceled_at * 1000).toISOString() : null,
+    })
 
-    if (error) {
-      console.error('[sync-stripe] subscription upsert error:', error.message)
-      logger.increment('records_failed')
-      continue
-    }
-
-    logger.increment('records_processed')
-    logger.increment('subscriptions_processed')
-
-    // Collect metadata from active subs for account propagation
+    // Collect metadata from active subs for account MRR propagation
     if (sub.status === 'active' || sub.status === 'trialing') {
-      const subs = accountSubMeta.get(accountRow.id) ?? []
-      subs.push({
+      const periodStart = sub.current_period_start
+        ? new Date(sub.current_period_start * 1000).toISOString().split('T')[0]
+        : null
+      const periodEnd = sub.current_period_end
+        ? new Date(sub.current_period_end * 1000).toISOString().split('T')[0]
+        : null
+      const list = accountSubMeta.get(accountId) ?? []
+      list.push({
         mrrCents,
         billingInterval: interval === 'year' ? 'annual' : 'monthly',
         quantity: qty,
         contractStart: periodStart,
         contractEnd: periodEnd,
       })
-      accountSubMeta.set(accountRow.id, subs)
+      accountSubMeta.set(accountId, list)
     }
   }
 
-  // Aggregate MRR + propagate metadata per account (using pre-built Map)
-  const allAccountIds = Array.from(customerToAccount.values())
-  for (const acctId of allAccountIds) {
+  // Phase 1 : batch upsert subscriptions
+  const { processed: subOk, failed: subFail } = await batchUpsert(supabase, 'subscriptions', subRows, 'stripe_sub_id')
+  logger.increment('records_processed', subOk)
+  logger.increment('subscriptions_processed', subOk)
+  logger.increment('records_failed', subFail)
+
+  // Phase 2 : batch upsert account MRR aggregates
+  // upsert on accounts with onConflict='id' to batch-update all in one round-trip per 500 rows
+  const accountUpdateRows: Record<string, unknown>[] = []
+  for (const acctId of customerToAccount.values()) {
     const subs = accountSubMeta.get(acctId) ?? []
-    const totalMrr = subs.reduce((sum: number, s) => sum + s.mrrCents, 0)
-    const totalSeats = subs.reduce((sum: number, s) => sum + s.quantity, 0)
+    const totalMrr = subs.reduce((sum, s) => sum + s.mrrCents, 0)
+    const totalSeats = subs.reduce((sum, s) => sum + s.quantity, 0)
+    const primary = subs.length > 0 ? subs.sort((a, b) => b.mrrCents - a.mrrCents)[0] : null
 
-    // Use highest-MRR subscription for interval and contract dates
-    const primary = subs.length > 0
-      ? subs.sort((a, b) => b.mrrCents - a.mrrCents)[0]
-      : null
-
-    const updateData: Record<string, unknown> = {
+    const row: Record<string, unknown> = {
+      id: acctId,
       mrr_cents: totalMrr,
       arr_cents: totalMrr * 12,
       seat_count: totalSeats > 0 ? totalSeats : null,
     }
-
     if (primary) {
-      updateData.billing_interval = primary.billingInterval
-      updateData.contract_start_date = primary.contractStart
-      updateData.contract_end_date = primary.contractEnd
+      row.billing_interval = primary.billingInterval
+      row.contract_start_date = primary.contractStart
+      row.contract_end_date = primary.contractEnd
     }
-
-    const { error: updateErr } = await supabase
-      .from('accounts')
-      .update(updateData)
-      .eq('id', acctId)
-
-    if (updateErr) {
-      console.error('[sync-stripe] account MRR update error:', updateErr.message, 'account:', acctId)
-      logger.increment('records_failed')
-    }
+    accountUpdateRows.push(row)
   }
+
+  const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id')
+  logger.increment('records_failed', acctFail)
 }
 
 // ── Sync invoices ─────────────────────────────────────────────
@@ -365,50 +355,39 @@ async function syncInvoices(
     if (s.stripe_sub_id) stripeSubMap.set(s.stripe_sub_id, s.id)
   }
 
+  const invoiceRows: Record<string, unknown>[] = []
+  let skipped = 0
+
   for await (const invoice of paginateStripe<StripeInvoice>('/invoices', apiKey, extraParams, logger)) {
     const accountId = invoiceCustomerMap.get(invoice.customer)
-
     if (!accountId) {
-      logger.increment('records_failed')
+      skipped++
       continue
     }
 
     const subscriptionId = invoice.subscription ? (stripeSubMap.get(invoice.subscription) ?? null) : null
-
-    const invoiceDate = new Date(invoice.created * 1000).toISOString().split('T')[0]
-    const dueDate = invoice.due_date
-      ? new Date(invoice.due_date * 1000).toISOString().split('T')[0]
-      : null
     const paidAt = invoice.status_transitions?.paid_at
       ? new Date(invoice.status_transitions.paid_at * 1000).toISOString()
       : null
 
-    const { error } = await supabase
-      .from('invoices')
-      .upsert(
-        {
-          organization_id: organizationId,
-          account_id: accountId,
-          subscription_id: subscriptionId,
-          stripe_invoice_id: invoice.id,
-          amount_cents: invoice.amount_due,
-          currency: invoice.currency,
-          status: invoice.status,
-          invoice_date: invoiceDate,
-          due_date: dueDate,
-          paid_at: paidAt,
-        },
-        { onConflict: 'stripe_invoice_id', ignoreDuplicates: false },
-      )
-
-    if (error) {
-      console.error('[sync-stripe] invoice upsert error:', error.message)
-      logger.increment('records_failed')
-    } else {
-      logger.increment('records_processed')
-      logger.increment('invoices_processed')
-    }
+    invoiceRows.push({
+      organization_id: organizationId,
+      account_id: accountId,
+      subscription_id: subscriptionId,
+      stripe_invoice_id: invoice.id,
+      amount_cents: invoice.amount_due,
+      currency: invoice.currency,
+      status: invoice.status,
+      invoice_date: new Date(invoice.created * 1000).toISOString().split('T')[0],
+      due_date: invoice.due_date ? new Date(invoice.due_date * 1000).toISOString().split('T')[0] : null,
+      paid_at: paidAt,
+    })
   }
+
+  const { processed, failed } = await batchUpsert(supabase, 'invoices', invoiceRows, 'stripe_invoice_id')
+  logger.increment('records_processed', processed)
+  logger.increment('invoices_processed', processed)
+  logger.increment('records_failed', failed + skipped)
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
