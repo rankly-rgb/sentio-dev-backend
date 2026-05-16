@@ -274,6 +274,79 @@ Paramètres complets de l'organisation. Le GET retourne la locale **et** le dict
 
 ---
 
+## Playbooks — contenu bilingue
+
+### playbook-crud (GET list)
+
+`GET /functions/v1/playbook-crud`
+
+Retourne la liste paginée avec les champs de contenu résolus selon la locale de l'organisation appelante.
+
+**Champs ajoutés à chaque objet playbook :**
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `display_name` | `string` | Titre résolu selon la locale (jamais null) |
+| `display_description` | `string` | Description résolue selon la locale (jamais null) |
+| `title_fr` | `string \| null` | Titre français explicite |
+| `title_en` | `string \| null` | Titre anglais |
+| `description_fr` | `string \| null` | Description française explicite |
+| `description_en` | `string \| null` | Description anglaise |
+
+**Chaîne de fallback :**
+- `locale=fr` : `title_fr` → `title_en` → `title` (legacy)
+- `locale=en` : `title_en` → `title_fr` → `title` (legacy)
+
+---
+
+### playbook-crud (GET single)
+
+`GET /functions/v1/playbook-crud?id=<uuid>`
+
+Retourne tous les champs bruts (`title_fr`, `title_en`, `description_fr`, `description_en`) pour alimenter le formulaire d'édition multilingue, plus les champs résolus `display_name` / `display_description`.
+
+---
+
+### playbook-crud (POST create)
+
+`POST /functions/v1/playbook-crud`
+
+**Body (champs bilingues)** — au moins un champ `title_*` obligatoire :
+
+```json
+{
+  "title": "string (legacy — copié dans title_fr et title_en si les variants sont absents)",
+  "title_fr": "string?",
+  "title_en": "string?",
+  "description": "string? (legacy)",
+  "description_fr": "string?",
+  "description_en": "string?"
+}
+```
+
+**Règle de validation :** au moins un parmi `title`, `title_fr`, `title_en` doit être non-vide.
+
+**Comportement legacy :** si seul `title` est fourni, il est copié dans `title_fr` et `title_en`.
+
+---
+
+### playbook-crud (PUT/PATCH update)
+
+`PUT /functions/v1/playbook-crud?id=<uuid>`
+
+Accepte les mêmes champs bilingues que le POST. Seuls les champs fournis sont mis à jour.
+
+```json
+{
+  "title_fr": "string?",
+  "title_en": "string?",
+  "description_fr": "string?",
+  "description_en": "string?"
+}
+```
+
+---
+
 ## Fonctions existantes (inchangées)
 
 ### onboarding-status (GET/PATCH)

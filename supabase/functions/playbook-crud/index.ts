@@ -86,12 +86,25 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
 
   // Enforce auth org_id — ignore body.organization_id to prevent cross-tenant writes
   const organizationId = authOrgId
-  const title = body.title as string | undefined
+  const title    = body.title    as string | undefined
+  const titleFr  = body.title_fr as string | undefined
+  const titleEn  = body.title_en as string | undefined
 
   if (!organizationId) return errorResponse('organization_id is required', 400)
-  if (!title || typeof title !== 'string' || title.trim().length === 0) {
-    return errorResponse('title is required and must be a non-empty string', 400)
+
+  // Validate: title or at least one locale variant required
+  const hasTitleFr = titleFr && titleFr.trim().length > 0
+  const hasTitleEn = titleEn && titleEn.trim().length > 0
+  const hasTitleLegacy = title && title.trim().length > 0
+
+  if (!hasTitleFr && !hasTitleEn && !hasTitleLegacy) {
+    return errorResponse('At least one of title, title_fr, or title_en must be non-empty', 400)
   }
+
+  // Legacy call: only title provided → replicate to title_fr (EN populated only if absent)
+  const resolvedTitle   = hasTitleLegacy ? (title as string).trim() : (hasTitleFr ? titleFr!.trim() : titleEn!.trim())
+  const resolvedTitleFr = hasTitleFr ? titleFr!.trim() : (hasTitleLegacy ? resolvedTitle : null)
+  const resolvedTitleEn = hasTitleEn ? titleEn!.trim() : (hasTitleLegacy ? resolvedTitle : null)
 
   // Determine if workflow
   const isWorkflow = body.is_workflow === true
@@ -152,13 +165,23 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     return errorResponse(`priority must be one of: ${VALID_PRIORITIES.join(', ')}`, 400)
   }
 
+  const rawDesc   = (body.description    as string | null) ?? null
+  const rawDescFr = (body.description_fr as string | null) ?? null
+  const rawDescEn = (body.description_en as string | null) ?? null
+
+  // Legacy: description only → replicate to description_fr
+  const resolvedDescFr = rawDescFr ?? rawDesc
+  const resolvedDescEn = rawDescEn ?? rawDesc
+
   const insertPayload: Record<string, unknown> = {
     organization_id: organizationId,
-    title: title.trim(),
+    title: resolvedTitle,
     actions: validatedActions,
     trigger_conditions: validatedTrigger,
     eligibility_criteria: validatedEligibility,
-    description: (body.description as string) ?? null,
+    description: rawDesc,
+    description_fr: resolvedDescFr,
+    description_en: resolvedDescEn,
     playbook_type: (body.playbook_type as string) ?? 'manual',
     template_category: (body.template_category as string) ?? null,
     priority: (body.priority as string) ?? 'medium',
@@ -172,8 +195,8 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     is_workflow: isWorkflow,
     steps: validatedSteps,
     status: 'draft',
-    title_en: (body.title_en as string | null) ?? null,
-    description_en: (body.description_en as string | null) ?? null,
+    title_fr: resolvedTitleFr,
+    title_en: resolvedTitleEn,
   }
 
   const { data, error } = await supabase
@@ -312,8 +335,10 @@ async function handleUpdate(supabase: SupabaseClient, id: string, req: Request, 
     updates.title = (body.title as string).trim()
   }
 
-  if (body.description !== undefined) updates.description = body.description
-  if (body.title_en !== undefined) updates.title_en = body.title_en
+  if (body.description    !== undefined) updates.description    = body.description
+  if (body.title_fr       !== undefined) updates.title_fr       = body.title_fr
+  if (body.title_en       !== undefined) updates.title_en       = body.title_en
+  if (body.description_fr !== undefined) updates.description_fr = body.description_fr
   if (body.description_en !== undefined) updates.description_en = body.description_en
   if (body.segment_id !== undefined) updates.segment_id = body.segment_id
   if (body.insight_id !== undefined) updates.insight_id = body.insight_id
@@ -456,16 +481,40 @@ async function handleUpdate(supabase: SupabaseClient, id: string, req: Request, 
 
 // ── Localisation i18n ───────────────────────────────────────
 
+/**
+ * Enrichit un playbook avec display_name et display_description
+ * résolus selon la locale de l'org.
+ *
+ * Chaîne de fallback :
+ *   FR : title_fr → title_en → title
+ *   EN : title_en → title_fr → title
+ * (idem pour description)
+ */
 export function localizePlaybook(
   playbook: Record<string, unknown>,
   lang: 'fr' | 'en',
 ): Record<string, unknown> {
-  if (lang !== 'en') return playbook
-  return {
-    ...playbook,
-    title: (playbook.title_en as string | null) ?? playbook.title,
-    description: (playbook.description_en as string | null) ?? playbook.description,
-  }
+  const titleFr  = nonEmpty(playbook.title_fr as string | null)
+  const titleEn  = nonEmpty(playbook.title_en as string | null)
+  const titleLeg = (playbook.title as string) ?? ''
+
+  const descFr  = nonEmpty(playbook.description_fr as string | null)
+  const descEn  = nonEmpty(playbook.description_en as string | null)
+  const descLeg = (playbook.description as string | null) ?? ''
+
+  const displayName = lang === 'en'
+    ? (titleEn ?? titleFr ?? titleLeg)
+    : (titleFr ?? titleEn ?? titleLeg)
+
+  const displayDescription = lang === 'en'
+    ? (descEn ?? descFr ?? descLeg)
+    : (descFr ?? descEn ?? descLeg)
+
+  return { ...playbook, display_name: displayName, display_description: displayDescription }
+}
+
+function nonEmpty(v: string | null | undefined): string | null {
+  return v && v.trim().length > 0 ? v : null
 }
 
 // ── ARCHIVE (soft delete) ───────────────────────────────────
