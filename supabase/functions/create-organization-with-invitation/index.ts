@@ -36,14 +36,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Authentication failed', 401)
   }
 
-  let body: { user_id?: unknown; email?: unknown; company_name?: unknown }
+  let body: { user_id?: unknown; email?: unknown; company_name?: unknown; locale?: unknown }
   try {
     body = await req.json()
   } catch {
     return errorResponse('Invalid JSON body', 400)
   }
 
-  const { user_id, company_name } = body
+  const { user_id, company_name, locale } = body
   // email reçu en transit uniquement — jamais lu ni persisté
 
   if (!user_id || typeof user_id !== 'string') {
@@ -86,6 +86,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const today = new Date().toISOString().split('T')[0]
 
+  const resolvedLocale = (locale === 'en') ? 'en' : 'fr'
+
   // 3. Créer l'organisation (onboarding_step = 'promise')
   const { data: org, error: orgErr } = await supabase
     .from('organizations')
@@ -95,6 +97,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       onboarding_completed: false,
       plan_type: 'free',
       trial_ends_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+      locale: resolvedLocale,
     })
     .select('id')
     .single()

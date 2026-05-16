@@ -38,6 +38,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { type Lang, t } from '../_shared/translations.ts'
 
 interface AccountRow {
   id: string
@@ -93,6 +94,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const orgId = auth.organizationId
+
+  // Récupérer la langue de l'org
+  const { data: orgRow } = await supabase
+    .from('organizations')
+    .select('locale')
+    .eq('id', orgId)
+    .maybeSingle()
+  const lang: Lang = ((orgRow?.locale ?? 'fr') as Lang)
 
   // Récupérer tous les comptes avec scores
   const { data: accounts, error: accountsError } = await supabase
@@ -158,7 +167,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       health_score: account.health_score ?? 0,
       churn_risk: account.churn_risk_score ?? 0,
       mrr: account.mrr_cents ?? 0,
-      top_risk_reason: buildRiskReason(account, overdueByAccount, lastUsageByAccount, today),
+      top_risk_reason: buildRiskReason(account, overdueByAccount, lastUsageByAccount, today, lang),
     }
   })
 
@@ -181,18 +190,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
   })
 })
 
-function buildRiskReason(
+export function buildRiskReason(
   account: AccountRow,
   overdueByAccount: Map<string, InvoiceRow>,
   lastUsageByAccount: Map<string, string>,
   today: number,
+  lang: Lang = 'fr',
 ): string {
   // 1. Facture impayée ?
   const overdueInvoice = overdueByAccount.get(account.id)
   if (overdueInvoice?.due_date) {
     const dueDaysAgo = Math.floor((today - new Date(overdueInvoice.due_date).getTime()) / (1000 * 60 * 60 * 24))
     if (dueDaysAgo > 0) {
-      return `Invoice impayée depuis ${dueDaysAgo} jour${dueDaysAgo > 1 ? 's' : ''}`
+      return t(lang, 'risk.overdue_invoice', { days: dueDaysAgo })
     }
   }
 
@@ -201,17 +211,16 @@ function buildRiskReason(
   if (lastUsageAt) {
     const daysSinceUsage = Math.floor((today - new Date(lastUsageAt).getTime()) / (1000 * 60 * 60 * 24))
     if (daysSinceUsage >= 30) {
-      return `Aucune connexion depuis ${daysSinceUsage} jours`
+      return t(lang, 'risk.no_usage_days', { days: daysSinceUsage })
     }
   } else {
-    // Aucun événement d'usage enregistré
-    return 'Aucune connexion depuis plus de 30 jours'
+    return t(lang, 'risk.no_usage_long')
   }
 
   // 3. Santé financière dégradée ?
   if ((account.financial_score ?? 100) < 30) {
-    return 'Santé financière dégradée'
+    return t(lang, 'risk.financial_degraded')
   }
 
-  return 'Score de santé faible'
+  return t(lang, 'risk.low_health')
 }

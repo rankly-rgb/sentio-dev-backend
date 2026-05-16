@@ -27,9 +27,13 @@ après `supabase.auth.signUp()`.
 {
   "user_id": "uuid",
   "email": "transit uniquement — jamais persisté",
-  "company_name": "Acme Corp"
+  "company_name": "Acme Corp",
+  "locale": "fr"
 }
 ```
+
+> `locale` est optionnel — défaut `'fr'`. Valeurs acceptées : `'fr'` | `'en'`.
+
 
 **Response 200**
 ```json
@@ -204,6 +208,69 @@ est `stripe` ou `revelation`.
 ```
 
 **Codes d'erreur** : `400` (valeur hors contrainte), `401`, `500`
+
+---
+
+## Locale organisation
+
+### get-organization-locale
+
+Retourne la locale de l'organisation appelante. À appeler au chargement de l'app pour hydrater le contexte locale frontend.
+
+| | |
+|---|---|
+| **URL** | `https://upqakxuatlshhqiagbqw.supabase.co/functions/v1/get-organization-locale` |
+| **Méthode** | `GET` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**Response 200**
+```json
+{ "locale": "fr" }
+```
+
+**Codes d'erreur** : `401`, `404`, `500`
+
+---
+
+### update-organization-locale
+
+Met à jour la locale de l'organisation. Valeurs acceptées : `'fr'` | `'en'`.
+
+| | |
+|---|---|
+| **URL** | `https://upqakxuatlshhqiagbqw.supabase.co/functions/v1/update-organization-locale` |
+| **Méthode** | `PATCH` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**Body**
+```json
+{ "locale": "en" }
+```
+
+**Response 200**
+```json
+{ "success": true, "locale": "en" }
+```
+
+**Codes d'erreur**
+
+| Code | Cas |
+|------|-----|
+| `400` | `locale` manquant ou valeur hors `['fr', 'en']` |
+| `401` | JWT absent ou invalide |
+| `500` | Erreur base de données |
+
+---
+
+### org-settings (GET/PATCH)
+
+Paramètres complets de l'organisation. Le GET retourne la locale **et** le dictionnaire de traductions complet, ce qui permet au frontend de charger toutes les chaînes en une seule requête.
+
+| | |
+|---|---|
+| **URL** | `https://upqakxuatlshhqiagbqw.supabase.co/functions/v1/org-settings` |
+| **GET** | Retourne `{ data: { locale: 'fr' \| 'en', translations: Record<string, string> } }` |
+| **PATCH body** | `{ locale: 'fr' \| 'en' }` → Response `{ success: true }` |
 
 ---
 

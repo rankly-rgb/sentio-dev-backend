@@ -134,3 +134,10 @@ verify_jwt = false
 
 [functions.save-org-preferences]
 verify_jwt = false
+
+# Locale organisation — JWT vérifié dans le code (ES256)
+[functions.get-organization-locale]
+verify_jwt = false
+
+[functions.update-organization-locale]
+verify_jwt = false

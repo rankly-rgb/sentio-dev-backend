@@ -51,11 +51,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const orgId = auth.organizationId
 
+  // Résoudre la langue de l'org une seule fois par requête
+  const { data: orgRow } = await supabase
+    .from('organizations')
+    .select('locale')
+    .eq('id', orgId)
+    .maybeSingle()
+  const lang: 'fr' | 'en' = (orgRow?.locale === 'en') ? 'en' : 'fr'
+
   switch (req.method) {
     case 'POST':
       return handleCreate(supabase, req, orgId)
     case 'GET':
-      return id ? handleGetOne(supabase, id, orgId) : handleList(supabase, url, orgId)
+      return id ? handleGetOne(supabase, id, orgId, lang) : handleList(supabase, url, orgId, lang)
     case 'PUT':
     case 'PATCH':
       return id ? handleUpdate(supabase, id, req, orgId) : errorResponse('id query parameter required', 400)
@@ -164,6 +172,8 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     is_workflow: isWorkflow,
     steps: validatedSteps,
     status: 'draft',
+    title_en: (body.title_en as string | null) ?? null,
+    description_en: (body.description_en as string | null) ?? null,
   }
 
   const { data, error } = await supabase
@@ -182,7 +192,7 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
 
 // ── LIST ────────────────────────────────────────────────────
 
-async function handleList(supabase: SupabaseClient, url: URL, authOrgId: string): Promise<Response> {
+async function handleList(supabase: SupabaseClient, url: URL, authOrgId: string, lang: 'fr' | 'en'): Promise<Response> {
   // Use auth org_id — query param ignored to prevent cross-tenant reads
   const orgId = authOrgId
 
@@ -228,12 +238,14 @@ async function handleList(supabase: SupabaseClient, url: URL, authOrgId: string)
     return errorResponse(`Failed to list playbooks: ${error.message}`, 500)
   }
 
-  return jsonResponse({ data, total: count, page, per_page: perPage })
+  const localizedData = (data ?? []).map((p: Record<string, unknown>) => localizePlaybook(p, lang))
+
+  return jsonResponse({ data: localizedData, total: count, page, per_page: perPage })
 }
 
 // ── GET ONE ─────────────────────────────────────────────────
 
-async function handleGetOne(supabase: SupabaseClient, id: string, authOrgId: string): Promise<Response> {
+async function handleGetOne(supabase: SupabaseClient, id: string, authOrgId: string, lang: 'fr' | 'en'): Promise<Response> {
   const { data: playbook, error } = await supabase
     .from('playbooks')
     .select('*')
@@ -267,7 +279,7 @@ async function handleGetOne(supabase: SupabaseClient, id: string, authOrgId: str
       : null,
   }
 
-  return jsonResponse({ ...playbook, execution_stats: stats })
+  return jsonResponse({ ...localizePlaybook(playbook as Record<string, unknown>, lang), execution_stats: stats })
 }
 
 // ── UPDATE ──────────────────────────────────────────────────
@@ -301,6 +313,8 @@ async function handleUpdate(supabase: SupabaseClient, id: string, req: Request, 
   }
 
   if (body.description !== undefined) updates.description = body.description
+  if (body.title_en !== undefined) updates.title_en = body.title_en
+  if (body.description_en !== undefined) updates.description_en = body.description_en
   if (body.segment_id !== undefined) updates.segment_id = body.segment_id
   if (body.insight_id !== undefined) updates.insight_id = body.insight_id
 
@@ -438,6 +452,20 @@ async function handleUpdate(supabase: SupabaseClient, id: string, req: Request, 
   }
 
   return jsonResponse(data)
+}
+
+// ── Localisation i18n ───────────────────────────────────────
+
+export function localizePlaybook(
+  playbook: Record<string, unknown>,
+  lang: 'fr' | 'en',
+): Record<string, unknown> {
+  if (lang !== 'en') return playbook
+  return {
+    ...playbook,
+    title: (playbook.title_en as string | null) ?? playbook.title,
+    description: (playbook.description_en as string | null) ?? playbook.description,
+  }
 }
 
 // ── ARCHIVE (soft delete) ───────────────────────────────────

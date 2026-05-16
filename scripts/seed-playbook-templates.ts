@@ -30,7 +30,9 @@ function emailHtml(body: string): string {
 interface WorkflowTemplate {
   organization_id: string
   title: string
+  title_en: string
   description: string
+  description_en: string
   playbook_type: string
   template_category: string
   priority: string
@@ -56,7 +58,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Alerte Churn Critique',
+    title_en: 'Critical Churn Alert',
     description: 'Escalade immediate pour sauvetage de comptes en danger critique. 4 etapes sur 10 jours.',
+    description_en: 'Immediate escalation to save accounts in critical danger. 4 steps over 10 days.',
     playbook_type: 'semi_automated',
     template_category: 'churn_prevention',
     priority: 'critical',
@@ -115,7 +119,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Onboarding Accelere',
+    title_en: 'Fast-track Onboarding',
     description: 'Accompagnement des nouveaux comptes (< 90 jours) pour atteindre le First Value en 14 jours. 6 etapes sur 60 jours.',
+    description_en: 'Guides new accounts (< 90 days) to First Value within 14 days. 6 steps over 60 days.',
     playbook_type: 'automated',
     template_category: 'onboarding',
     priority: 'critical',
@@ -191,7 +197,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Expansion Upsell Sieges',
+    title_en: 'Seat Expansion Upsell',
     description: 'Convertir la saturation des sieges en expansion de licences. 4 etapes sur 14 jours.',
+    description_en: 'Convert seat saturation into license expansion. 4 steps over 14 days.',
     playbook_type: 'semi_automated',
     template_category: 'expansion',
     priority: 'high',
@@ -246,7 +254,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Relance Comptes Inactifs',
+    title_en: 'Re-engagement of Inactive Accounts',
     description: 'Reactivation des comptes dormants avant que l\'inactivite ne mene au churn. 4 etapes sur 20 jours.',
+    description_en: 'Re-activates dormant accounts before inactivity leads to churn. 4 steps over 20 days.',
     playbook_type: 'automated',
     template_category: 'reactivation',
     priority: 'high',
@@ -305,7 +315,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Renouvellement Contrat 90/60/30',
+    title_en: 'Contract Renewal Sequence 90/60/30',
     description: 'Sequence de renouvellement anticipee sur 90 jours pour comptes annuels. 6 etapes.',
+    description_en: 'Anticipatory renewal sequence over 90 days for annual contracts. 6 steps.',
     playbook_type: 'semi_automated',
     template_category: 'renewal',
     priority: 'critical',
@@ -381,7 +393,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Prevention Churn Enterprise',
+    title_en: 'Enterprise Churn Prevention',
     description: 'Protection ultra-prioritaire des comptes strategiques (ARR > 50K EUR). 5 etapes sur 14 jours.',
+    description_en: 'Ultra-priority protection for strategic accounts (ARR > 50K EUR). 5 steps over 14 days.',
     playbook_type: 'semi_automated',
     template_category: 'churn_prevention',
     priority: 'critical',
@@ -441,7 +455,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Adoption Progressive Feature',
+    title_en: 'Progressive Feature Adoption',
     description: 'Maximiser l\'adoption des features pour augmenter la stickiness. 4 etapes sur 14 jours.',
+    description_en: 'Maximise feature adoption to increase stickiness. 4 steps over 14 days.',
     playbook_type: 'automated',
     template_category: 'customer_education',
     priority: 'medium',
@@ -496,7 +512,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'NPS Detracteurs Recovery',
+    title_en: 'NPS Detractors Recovery',
     description: 'Transformer une experience negative en opportunite de fidelisation (Service Recovery Paradox). 5 etapes sur 30 jours.',
+    description_en: 'Turn a negative experience into a loyalty opportunity (Service Recovery Paradox). 5 steps over 30 days.',
     playbook_type: 'semi_automated',
     template_category: 'nps_detractors',
     priority: 'critical',
@@ -559,7 +577,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Champions Advocacy',
+    title_en: 'Champions Advocacy',
     description: 'Transformer les clients satisfaits en ambassadeurs actifs. 4 etapes sur 14 jours.',
+    description_en: 'Transform satisfied customers into active brand ambassadors. 4 steps over 14 days.',
     playbook_type: 'semi_automated',
     template_category: 'champions_advocacy',
     priority: 'medium',
@@ -618,7 +638,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Multi-touch Growth Nurturing',
+    title_en: 'Multi-touch Growth Nurturing',
     description: 'Maximiser retention et expansion avec un modele scalable pour comptes Growth (MRR 2K-10K EUR). 5 etapes sur 90 jours.',
+    description_en: 'Maximise retention and expansion with a scalable model for Growth accounts (MRR 2K–10K EUR). 5 steps over 90 days.',
     playbook_type: 'automated',
     template_category: 'expansion',
     priority: 'high',
@@ -682,7 +704,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Downgrade Prevention',
+    title_en: 'Downgrade Prevention',
     description: 'Comprendre les raisons et proposer des alternatives au downgrade complet. 5 etapes sur 3 jours.',
+    description_en: 'Understand reasons and propose alternatives to a full downgrade. 5 steps over 3 days.',
     playbook_type: 'semi_automated',
     template_category: 'downgrade_prevention',
     priority: 'high',
@@ -741,7 +765,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Success Planning Strategique',
+    title_en: 'Strategic Success Planning',
     description: 'Co-construire un plan de succes aligne sur les OKR du client. 5 etapes sur 90 jours.',
+    description_en: 'Co-build a success plan aligned with customer OKRs. 5 steps over 90 days.',
     playbook_type: 'semi_automated',
     template_category: 'success_planning',
     priority: 'medium',
@@ -808,7 +834,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Payment Failure Recovery',
+    title_en: 'Payment Failure Recovery',
     description: 'Recuperer les paiements echoues sans friction. Dunning intelligent en 8 etapes sur 30 jours.',
+    description_en: 'Recover failed payments without friction. Smart dunning in 8 steps over 30 days.',
     playbook_type: 'automated',
     template_category: 'payment_recovery',
     priority: 'critical',
@@ -902,7 +930,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Health Monitoring Weekly',
+    title_en: 'Weekly Health Monitoring',
     description: 'Detection precoce des degradations avant qu\'elles ne deviennent critiques. Analyse hebdomadaire automatique.',
+    description_en: 'Early detection of degradation before it becomes critical. Automated weekly analysis.',
     playbook_type: 'automated',
     template_category: 'health_monitoring',
     priority: 'high',
@@ -951,7 +981,9 @@ const templates: WorkflowTemplate[] = [
   {
     organization_id: ORG_ID,
     title: 'Customer Education Certification',
+    title_en: 'Customer Education Certification',
     description: 'Augmenter l\'adoption et la stickiness via la formation structuree. Programme de certification en 6 etapes sur 60 jours.',
+    description_en: 'Increase adoption and stickiness through structured training. Certification programme in 6 steps over 60 days.',
     playbook_type: 'automated',
     template_category: 'customer_education',
     priority: 'medium',
