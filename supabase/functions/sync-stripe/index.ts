@@ -18,7 +18,7 @@ import { alertSlack } from '../_shared/slack-alert.ts'
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
 const MAX_PAGES = 50
-const STRIPE_TIMEOUT_MS = 8000
+const STRIPE_TIMEOUT_MS = 20000
 const DB_BATCH_SIZE = 500
 
 const stripeCircuitBreaker = new CircuitBreaker({
@@ -99,14 +99,14 @@ async function stripeGet<T>(
         return resp.json() as Promise<T>
       }),
     {
-      maxRetries: 3,
+      maxRetries: 2,
       baseDelayMs: 1000,
-      maxDelayMs: 15000,
+      maxDelayMs: 10000,
       jitter: true,
       retryOn: (err) => {
         const msg = err instanceof Error ? err.message : String(err)
-        // Retry on timeout, 5xx, rate limits — not on 4xx client errors
-        return msg.includes('timed out') || msg.includes('→ 5') || msg.includes('→ 429')
+        // Retry on 5xx and rate limits only — don't retry timeouts to avoid wall-clock exhaustion
+        return msg.includes('→ 5') || msg.includes('→ 429')
       },
     },
   )
@@ -179,7 +179,13 @@ async function batchUpsert<T extends Record<string, unknown>>(
     const chunk = rows.slice(i, i + DB_BATCH_SIZE)
     const { error } = await supabase.from(table).upsert(chunk, { onConflict, ignoreDuplicates: false })
     if (error) {
-      console.error(`[sync-stripe] batch upsert ${table} error:`, error.message)
+      console.error(JSON.stringify({
+        level: 'error', function_name: 'sync-stripe',
+        message: `batch upsert ${table} failed`,
+        error_message: error.message, error_code: error.code,
+        error_details: error.details, error_hint: error.hint,
+        chunk_size: chunk.length, chunk_offset: i,
+      }))
       failed += chunk.length
     } else {
       processed += chunk.length
