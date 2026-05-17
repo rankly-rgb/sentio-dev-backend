@@ -4,6 +4,16 @@
 
 DROP INDEX IF EXISTS public.idx_accounts_org_stripe_unique;
 
-ALTER TABLE public.accounts
-  ADD CONSTRAINT accounts_org_stripe_unique
-  UNIQUE (organization_id, stripe_customer_id);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'accounts_org_stripe_unique'
+      AND conrelid = 'public.accounts'::regclass
+  ) THEN
+    ALTER TABLE public.accounts
+      ADD CONSTRAINT accounts_org_stripe_unique
+      UNIQUE (organization_id, stripe_customer_id);
+  END IF;
+END;
+$$;
