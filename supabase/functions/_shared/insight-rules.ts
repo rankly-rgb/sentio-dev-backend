@@ -15,6 +15,7 @@ export type InsightType =
   | 'renewal_alert'
   | 'payment_risk'
   | 'usage_drop'
+  | 'account_health_summary'
 
 export type InsightPriority = 'low' | 'medium' | 'high' | 'critical'
 
@@ -215,6 +216,58 @@ export function evaluateUsageDrop(input: InsightInput): InsightCandidate | null 
   }
 }
 
+// ── Règle 6 : Account Health Summary (fallback) ─────────────
+// Fires for paying accounts when no specific issue is detected.
+// Guarantees at least 1 insight per account from Day 1 of onboarding.
+
+export function evaluateAccountHealthSummary(input: InsightInput): InsightCandidate | null {
+  if (input.mrr_cents <= 0) return null
+
+  const health = input.health_score
+  const churn = input.churn_risk_score
+
+  let priority: InsightPriority
+  let title: string
+  let description: string
+  let action: string
+
+  if (health < 30) {
+    priority = 'critical'
+    title = 'Compte en état critique'
+    description = `Score de santé très bas (${health}%) avec un risque de churn de ${churn}%. MRR : ${mrrEur(input.mrr_cents)} €. Situation nécessitant une attention immédiate.`
+    action = 'Analyser les causes du score bas et contacter le client dans les 48h.'
+  } else if (health < 50) {
+    priority = 'high'
+    title = 'Compte à risque — surveillance requise'
+    description = `Score de santé de ${health}% avec un risque de churn de ${churn}%. MRR : ${mrrEur(input.mrr_cents)} €. Suivi renforcé recommandé.`
+    action = 'Planifier un check-in avec le client dans les 7 prochains jours.'
+  } else if (health < 70) {
+    priority = 'medium'
+    title = 'Compte à surveiller'
+    description = `Score de santé de ${health}% avec un risque de churn de ${churn}%. MRR : ${mrrEur(input.mrr_cents)} €. Évolution à surveiller.`
+    action = "Effectuer un suivi mensuel et surveiller l'évolution des indicateurs."
+  } else {
+    priority = 'low'
+    title = 'Compte en bonne santé'
+    description = `Score de santé de ${health}% avec un risque de churn faible (${churn}%). MRR : ${mrrEur(input.mrr_cents)} €. Compte stable.`
+    action = "Maintenir l'engagement actuel et identifier les opportunités d'expansion."
+  }
+
+  return {
+    insight_type: 'account_health_summary',
+    title,
+    description,
+    recommended_action: action,
+    priority,
+    confidence_score: 80,
+    mrr_impact_cents: input.mrr_cents,
+    source_scores: {
+      health_score: health,
+      churn_risk_score: churn,
+    },
+  }
+}
+
 // ── Orchestrateur ────────────────────────────────────────────
 
 export function evaluateInsightRules(input: InsightInput): InsightCandidate[] {
@@ -231,6 +284,12 @@ export function evaluateInsightRules(input: InsightInput): InsightCandidate[] {
   for (const rule of rules) {
     const result = rule(input)
     if (result) candidates.push(result)
+  }
+
+  // Fallback: generate a health summary when no specific issue is detected
+  if (candidates.length === 0) {
+    const summary = evaluateAccountHealthSummary(input)
+    if (summary) candidates.push(summary)
   }
 
   return candidates

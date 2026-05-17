@@ -6,6 +6,7 @@ import {
   evaluateRenewalAlert,
   evaluatePaymentRisk,
   evaluateUsageDrop,
+  evaluateAccountHealthSummary,
   type InsightInput,
 } from '../functions/_shared/insight-rules'
 
@@ -217,12 +218,70 @@ describe('evaluateUsageDrop', () => {
   })
 })
 
+// ── Account Health Summary (fallback) ───────────────────────
+
+describe('evaluateAccountHealthSummary', () => {
+  it('returns null when mrr_cents is 0', () => {
+    expect(evaluateAccountHealthSummary({ ...baseInput, mrr_cents: 0 })).toBeNull()
+  })
+
+  it('returns low priority when health >= 70', () => {
+    const result = evaluateAccountHealthSummary({ ...baseInput, health_score: 80 })
+    expect(result).not.toBeNull()
+    expect(result!.insight_type).toBe('account_health_summary')
+    expect(result!.priority).toBe('low')
+  })
+
+  it('returns medium priority when health 50-69', () => {
+    const result = evaluateAccountHealthSummary({ ...baseInput, health_score: 65 })
+    expect(result!.priority).toBe('medium')
+  })
+
+  it('returns high priority when health 30-49', () => {
+    const result = evaluateAccountHealthSummary({ ...baseInput, health_score: 40 })
+    expect(result!.priority).toBe('high')
+  })
+
+  it('returns critical priority when health < 30', () => {
+    const result = evaluateAccountHealthSummary({ ...baseInput, health_score: 20 })
+    expect(result!.priority).toBe('critical')
+  })
+
+  it('description contains MRR in euros', () => {
+    const result = evaluateAccountHealthSummary({ ...baseInput, mrr_cents: 150000 })
+    expect(result!.description).toContain('€')
+  })
+
+  it('source_scores contains health and churn', () => {
+    const result = evaluateAccountHealthSummary({ ...baseInput, health_score: 65, churn_risk_score: 35 })
+    expect(result!.source_scores).toEqual({ health_score: 65, churn_risk_score: 35 })
+  })
+
+  it('mrr_impact_cents equals account MRR', () => {
+    const result = evaluateAccountHealthSummary({ ...baseInput, mrr_cents: 200000 })
+    expect(result!.mrr_impact_cents).toBe(200000)
+  })
+})
+
 // ── evaluateInsightRules (orchestrator) ──────────────────────
 
 describe('evaluateInsightRules', () => {
-  it('returns empty array for healthy account with no issues', () => {
+  it('returns health summary for healthy account with no issues', () => {
     const result = evaluateInsightRules(baseInput)
+    expect(result).toHaveLength(1)
+    expect(result[0].insight_type).toBe('account_health_summary')
+  })
+
+  it('returns empty array for free account (mrr=0) with no issues', () => {
+    const result = evaluateInsightRules({ ...baseInput, mrr_cents: 0 })
     expect(result).toEqual([])
+  })
+
+  it('does not add health summary when specific issues are detected', () => {
+    const result = evaluateInsightRules({ ...baseInput, churn_risk_score: 80 })
+    const types = result.map((r) => r.insight_type)
+    expect(types).toContain('churn_prediction')
+    expect(types).not.toContain('account_health_summary')
   })
 
   it('returns churn_prediction for high churn risk account', () => {
