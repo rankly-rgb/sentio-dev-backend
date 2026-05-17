@@ -2,7 +2,9 @@
 // Edge Function : track-usage
 // POST /functions/v1/track-usage
 // Ingère les événements d'usage produit (Zero-PII).
-// Auth : SUPABASE_ANON_KEY ou service_role (selon config)
+// Auth : X-Sentio-Webhook-Secret header — secret partagé par org,
+//        stocké dans webhook_configs (provider='usage').
+//        Identifie et scope l'org sans JWT.
 // ============================================================
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
@@ -24,9 +26,7 @@ interface TrackUsagePayload {
   event_count?: number
   event_date?: string   // ISO date YYYY-MM-DD, défaut = aujourd'hui
   source?: SourceType
-
-  // Optionnel : permet de bypasser la résolution si déjà connu
-  organization_id?: string
+  // organization_id retiré du payload de confiance : l'org est déduite du secret header
 }
 
 function isValidEventType(v: unknown): v is EventType {
@@ -49,6 +49,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (req.method !== 'POST') {
     return errorResponse('Method not allowed', 405)
+  }
+
+  // ── Authentification par secret partagé ──────────────────
+  const webhookSecret = req.headers.get('X-Sentio-Webhook-Secret')
+  if (!webhookSecret) {
+    return errorResponse('Missing X-Sentio-Webhook-Secret header', 401)
   }
 
   // ── Parse payload ────────────────────────────────────────
@@ -92,40 +98,52 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Server configuration error', 500)
   }
 
-  // ── Résolution du compte ─────────────────────────────────
+  // ── Validation du secret + résolution de l'org ───────────
+  const { data: webhookConfig, error: configError } = await supabase
+    .from('webhook_configs')
+    .select('organization_id')
+    .eq('webhook_secret', webhookSecret)
+    .eq('provider', 'usage')
+    .eq('is_active', true)
+    .maybeSingle()
+
+  if (configError || !webhookConfig) {
+    return errorResponse('Invalid or inactive webhook secret', 401)
+  }
+
+  // L'org est déduite du secret — le payload ne peut pas la forger
+  const organizationId: string = webhookConfig.organization_id
+
+  // ── Résolution du compte (scopé à l'org du secret) ───────
   let accountId: string | null = payload.account_id ?? null
-  let organizationId: string | null = payload.organization_id ?? null
 
   if (!accountId && payload.stripe_customer_id) {
-    let query = supabase
+    const { data, error } = await supabase
       .from('accounts')
-      .select('id, organization_id')
+      .select('id')
       .eq('stripe_customer_id', payload.stripe_customer_id)
+      .eq('organization_id', organizationId)
+      .maybeSingle()
 
-    if (organizationId) {
-      query = query.eq('organization_id', organizationId)
-    }
-
-    const { data, error } = await query.single()
     if (error || !data) {
       return errorResponse('Account not found for stripe_customer_id', 404)
     }
     accountId = data.id
-    organizationId = data.organization_id
-  } else if (accountId && !organizationId) {
+  } else if (accountId) {
     const { data, error } = await supabase
       .from('accounts')
-      .select('organization_id')
+      .select('id')
       .eq('id', accountId)
-      .single()
+      .eq('organization_id', organizationId)
+      .maybeSingle()
+
     if (error || !data) {
       return errorResponse('Account not found', 404)
     }
-    organizationId = data.organization_id
   }
 
-  if (!accountId || !organizationId) {
-    return errorResponse('Cannot resolve account or organization', 400)
+  if (!accountId) {
+    return errorResponse('Cannot resolve account', 400)
   }
 
   // ── Insertion de l'événement ─────────────────────────────
