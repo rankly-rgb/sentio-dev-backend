@@ -102,18 +102,28 @@ export function calcContractScore(account: Account): number {
 }
 
 // ── Calcul Expansion Score ────────────────────────────────────
+// Mode ratio   (seat_limit connu)  : (seat_usage_pct×60%) + (feature_ceiling×40%)
+// Mode absolu  (seat_limit absent) : (seat_count_signal×80%) + (feature_ceiling×20%)
+//   → seat_count_signal = min(100, seat_count / 15 × 100)
+//     15 sièges = signal 100 (seuil empirique équipes mid-market)
+//   → poids 80/20 pour compenser l'absence du ratio d'occupation
 export function calcExpansionScore(account: Account, stats: UsageStats): number {
-  // 0 quand seat_limit absent : on ne peut pas calculer un taux d'occupation sans plafond
-  let seatUsagePct = 0
-  if (account.seat_count !== null && account.seat_limit !== null && account.seat_limit > 0) {
-    seatUsagePct = Math.min(100, (account.seat_count / account.seat_limit) * 100)
-  }
-
   const featureCeilingScore = Math.min(100, (stats.distinct_features / 10) * 100)
 
-  return Math.round(
-    (seatUsagePct * 0.6 + featureCeilingScore * 0.4) * 100,
-  ) / 100
+  if (account.seat_count !== null && account.seat_limit !== null && account.seat_limit > 0) {
+    // Mode ratio : on connaît le plafond contractuel
+    const seatUsagePct = Math.min(100, (account.seat_count / account.seat_limit) * 100)
+    return Math.round((seatUsagePct * 0.6 + featureCeilingScore * 0.4) * 100) / 100
+  }
+
+  if (account.seat_count !== null && account.seat_count > 0) {
+    // Mode absolu : pas de plafond connu, signal basé sur la taille absolue de l'équipe
+    const seatSignal = Math.min(100, (account.seat_count / 15) * 100)
+    return Math.round((seatSignal * 0.8 + featureCeilingScore * 0.2) * 100) / 100
+  }
+
+  // Pas de données sièges ni usage
+  return Math.round(featureCeilingScore * 0.4 * 100) / 100
 }
 
 // ── Health Score composite ────────────────────────────────────

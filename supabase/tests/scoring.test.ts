@@ -210,21 +210,34 @@ describe('calcExpansionScore', () => {
   }
 
   it('returns 0 for no seat data and no features', () => {
-    // seatUsagePct = 0 (inconnu sans seat_limit), featureCeiling = 0 → (0*0.6 + 0*0.4) = 0
+    // seat_count null, no features → 0
     expect(calcExpansionScore(baseAccount, baseStats)).toBe(0)
   })
 
-  it('returns 100 for full seats and max features', () => {
+  it('returns 100 for full seats (ratio mode) and max features', () => {
+    // Mode ratio : seat_limit connu → (100*0.6 + 100*0.4) = 100
     const acct = { ...baseAccount, seat_count: 10, seat_limit: 10 }
     const stats = { ...baseStats, distinct_features: 10 }
     expect(calcExpansionScore(acct, stats)).toBe(100)
   })
 
-  it('uses 0 for seat score when no seat_limit', () => {
-    const acct = { ...baseAccount, seat_count: 5, seat_limit: null }
+  it('uses absolute mode when seat_limit absent (15 seats = signal 100)', () => {
+    // Mode absolu : 15 seats → seatSignal=100, featureCeiling=50 → 100*0.8 + 50*0.2 = 90
+    const acct = { ...baseAccount, seat_count: 15, seat_limit: null }
     const stats = { ...baseStats, distinct_features: 5 }
-    // seatUsagePct = 0 (seat_limit absent), featureCeiling = 50 → 0*0.6 + 50*0.4 = 20
-    expect(calcExpansionScore(acct, stats)).toBe(20)
+    expect(calcExpansionScore(acct, stats)).toBe(90)
+  })
+
+  it('absolute mode: 15+ seats with no usage exceeds expansion threshold of 75', () => {
+    // 15 seats, no usage → seatSignal=100 → 100*0.8 = 80 > 75
+    const acct = { ...baseAccount, seat_count: 15, seat_limit: null }
+    expect(calcExpansionScore(acct, baseStats)).toBe(80)
+  })
+
+  it('absolute mode: small team (5 seats) stays below expansion threshold', () => {
+    // 5 seats → seatSignal = 5/15*100 = 33.33 → 33.33*0.8 = 26.67
+    const acct = { ...baseAccount, seat_count: 5, seat_limit: null }
+    expect(calcExpansionScore(acct, baseStats)).toBe(26.67)
   })
 })
 
