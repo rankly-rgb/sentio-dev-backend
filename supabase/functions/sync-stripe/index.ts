@@ -491,51 +491,72 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Server configuration error', 500)
   }
 
-  // Résoudre l'organisation + lire la clé Stripe per-org
-  let organizationId = body.organization_id
-  let orgStripeKey: string | null = null
-
-  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '1_org_resolve', organization_id_from_body: organizationId ?? null }))
-
-  if (organizationId) {
-    const { data: orgData, error: orgErr } = await supabase
-      .from('organizations')
-      .select('stripe_api_key')
-      .eq('id', organizationId)
-      .maybeSingle()
-    if (orgErr) console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', step: '1_org_query', error: orgErr.message }))
-    orgStripeKey = orgData?.stripe_api_key ?? null
-  } else {
-    const { data: orgData, error: orgErr } = await supabase
-      .from('organizations')
-      .select('id, stripe_api_key')
-      .eq('is_active', true)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle()
-    if (orgErr) console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', step: '1_org_fallback_query', error: orgErr.message }))
-    organizationId = orgData?.id
-    orgStripeKey = orgData?.stripe_api_key ?? null
-  }
-
-  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '2_org_resolved', organization_id: organizationId ?? null, has_org_key: orgStripeKey !== null }))
-
-  if (!organizationId) {
-    return errorResponse('No active organization found', 404)
-  }
-
-  // Clé Stripe : priorité org > variable d'env globale
-  const apiKey = orgStripeKey ?? Deno.env.get('STRIPE_SECRET_KEY')
-  if (!apiKey) {
-    return errorResponse('Clé Stripe non configurée. Ajoutez votre clé dans Intégrations → Stripe.', 500)
-  }
-
   const syncType = body.sync_type ?? 'incremental'
   const isManual = body.is_manual ?? false
   const triggeredBy = body.triggered_by ?? 'cron'
   const isOnboarding = triggeredBy === 'onboarding'
 
-  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '3_key_ok', sync_type: syncType }))
+  // ── Résoudre les orgs à traiter ──────────────────────────────
+  // Avec organization_id → 1 org ciblée
+  // Sans organization_id → toutes les orgs actives avec une clé Stripe (mode cron)
+  let orgsToSync: Array<{ id: string; stripe_api_key: string | null }> = []
+
+  if (body.organization_id) {
+    const { data, error } = await supabase
+      .from('organizations')
+      .select('id, stripe_api_key')
+      .eq('id', body.organization_id)
+      .eq('is_active', true)
+      .maybeSingle()
+    if (error) console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', step: 'org_query', error: error.message }))
+    if (data) orgsToSync = [data]
+  } else {
+    const { data, error } = await supabase
+      .from('organizations')
+      .select('id, stripe_api_key')
+      .eq('is_active', true)
+      .order('created_at', { ascending: true })
+    if (error) console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', step: 'orgs_query', error: error.message }))
+    orgsToSync = (data ?? []).filter((o) => o.stripe_api_key || Deno.env.get('STRIPE_SECRET_KEY'))
+  }
+
+  if (orgsToSync.length === 0) {
+    return errorResponse('No active organization with Stripe key found', 404)
+  }
+
+  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: 'orgs_resolved', count: orgsToSync.length, sync_type: syncType }))
+
+  // ── Si plusieurs orgs → traitement séquentiel (fire-and-return) ─
+  if (orgsToSync.length > 1) {
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+    const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    const results: Array<{ organization_id: string; status: string }> = []
+
+    for (const org of orgsToSync) {
+      try {
+        const res = await fetch(`${supabaseUrl}/functions/v1/sync-stripe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${serviceKey}` },
+          body: JSON.stringify({ organization_id: org.id, sync_type: syncType, triggered_by: triggeredBy }),
+          signal: AbortSignal.timeout(280000), // 280s — laisse 20s de marge avant timeout Edge Function
+        })
+        results.push({ organization_id: org.id, status: res.ok ? 'triggered' : `http_${res.status}` })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(JSON.stringify({ level: 'warn', function_name: 'sync-stripe', organization_id: org.id, message: `dispatch failed: ${msg}` }))
+        results.push({ organization_id: org.id, status: 'error' })
+      }
+    }
+
+    return jsonResponse({ success: true, mode: 'all_orgs', results })
+  }
+
+  // ── Traitement d'une seule org ────────────────────────────────
+  const organizationId = orgsToSync[0].id
+  const apiKey = orgsToSync[0].stripe_api_key ?? Deno.env.get('STRIPE_SECRET_KEY')
+  if (!apiKey) {
+    return errorResponse('Clé Stripe non configurée. Ajoutez votre clé dans Intégrations → Stripe.', 500)
+  }
 
   // Pour le sync incrémental, récupérer la date du dernier sync
   let createdAfter: number | undefined
@@ -552,7 +573,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     if (lastSync?.completed_at) {
       const lastSyncMs = new Date(lastSync.completed_at).getTime()
-      // Guard against future timestamps or invalid dates
       if (lastSyncMs > 0 && lastSyncMs <= Date.now()) {
         createdAfter = Math.floor(lastSyncMs / 1000) - 3600 // -1h de marge
       } else {
@@ -574,26 +594,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
     isManual,
   })
 
-  // Lock per-org pour les syncs onboarding, lock global pour les crons
-  const lockName = isOnboarding ? `sync-stripe-${organizationId}` : 'sync-stripe'
-  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '4_acquiring_lock', lock_name: lockName }))
+  // Lock toujours per-org (pas de lock global) pour permettre les syncs parallèles
+  const lockName = `sync-stripe-${organizationId}`
   const lockAcquired = await acquireCronLock(supabase, lockName, 300)
-  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '5_lock_result', acquired: lockAcquired }))
   if (!lockAcquired) {
-    return errorResponse('Sync already in progress', 409)
+    return errorResponse('Sync already in progress for this organization', 409)
   }
 
-  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '6_logger_start' }))
   await logger.start()
-  console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: '7_sync_begin' }))
 
   try {
-    // Sync dans l'ordre : customers → subscriptions (always full) → invoices
     await syncCustomers(supabase, organizationId, apiKey, logger, createdAfter)
     await syncSubscriptions(supabase, organizationId, apiKey, logger)
     await syncInvoices(supabase, organizationId, apiKey, logger, createdAfter)
 
-    // Mettre à jour le timestamp de sync sur l'organisation
     await supabase
       .from('organizations')
       .update({ updated_at: new Date().toISOString() })
@@ -601,7 +615,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     await logger.complete({ sync_type: syncType, created_after: createdAfter })
 
-    // Déclencher le scoring après chaque sync (onboarding ou cron)
+    // Déclencher le scoring après chaque sync
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     if (supabaseUrl && serviceKey) {
