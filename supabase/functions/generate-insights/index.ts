@@ -296,7 +296,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       const logger = new DataSyncLogger({
         supabase,
         organizationId,
-        syncSource: 'insights' as 'scoring', // Cast: data_syncs check constraint updated
+        syncSource: 'insights',
         syncType: 'daily',
         triggeredBy: 'cron',
       })
@@ -313,6 +313,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             .from('accounts')
             .select('id, organization_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, contract_end_date, created_at')
             .eq('organization_id', organizationId)
+            .not('scores_calculated_at', 'is', null)
             .range(batchOffset, batchOffset + BATCH_SIZE - 1)
 
           if (batchError) {
