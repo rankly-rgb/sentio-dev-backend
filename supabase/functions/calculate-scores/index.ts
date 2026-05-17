@@ -729,12 +729,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
             .is('first_score_calculated_at', null)
         }
 
-        // Déclencher generate-insights immédiatement après le scoring (fire-and-forget)
-        // Garantit que les insights sont à jour dès l'onboarding, sans attendre le cron 04:00 UTC
+        // Déclencher generate-insights après le scoring (EdgeRuntime.waitUntil garantit l'exécution)
         if (accountsScored > 0) {
           const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
           const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-          fetch(`${supabaseUrl}/functions/v1/generate-insights`, {
+          const insightPromise = fetch(`${supabaseUrl}/functions/v1/generate-insights`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -746,9 +745,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
               level: 'warn',
               function_name: 'calculate-scores',
               organization_id: organizationId,
-              message: `generate-insights fire-and-forget failed: ${err instanceof Error ? err.message : String(err)}`,
+              message: `generate-insights trigger failed: ${err instanceof Error ? err.message : String(err)}`,
             }))
           })
+          EdgeRuntime.waitUntil(insightPromise)
         }
 
         await logger.complete({ accounts_scored: accountsScored, segments_assigned: segmentsAssigned, errors })

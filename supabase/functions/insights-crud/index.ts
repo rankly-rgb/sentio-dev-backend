@@ -18,7 +18,7 @@ import { createServiceClient, errorResponse, jsonResponse } from '../_shared/sup
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 
 // ── Valid values ─────────────────────────────────────────────
-const VALID_INSIGHT_TYPES = ['churn_prediction', 'expansion_opportunity', 'renewal_alert', 'payment_risk', 'usage_drop'] as const
+const VALID_INSIGHT_TYPES = ['churn_prediction', 'expansion_opportunity', 'renewal_alert', 'payment_risk', 'usage_drop', 'account_health_summary'] as const
 const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'] as const
 const VALID_STATUSES = ['active', 'acknowledged', 'resolved', 'dismissed'] as const
 const VALID_SORT_FIELDS = ['created_at', 'priority', 'confidence_score', 'mrr_impact_cents'] as const

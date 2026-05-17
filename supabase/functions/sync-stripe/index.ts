@@ -615,11 +615,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     await logger.complete({ sync_type: syncType, created_after: createdAfter })
 
-    // Déclencher le scoring après chaque sync
+    // Déclencher le scoring après chaque sync (EdgeRuntime.waitUntil garantit l'exécution)
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     if (supabaseUrl && serviceKey) {
-      fetch(`${supabaseUrl}/functions/v1/calculate-scores`, {
+      const scorePromise = fetch(`${supabaseUrl}/functions/v1/calculate-scores`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${serviceKey}` },
         body: JSON.stringify({ organization_id: organizationId }),
@@ -630,6 +630,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
           message: `score trigger failed: ${err instanceof Error ? err.message : String(err)}`,
         }))
       })
+      // waitUntil empêche Deno de terminer la fonction avant la fin du fetch background
+      EdgeRuntime.waitUntil(scorePromise)
     }
 
     return jsonResponse({
