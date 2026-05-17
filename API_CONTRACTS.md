@@ -420,9 +420,444 @@ signUp()
 
 ---
 
+---
+
+## Comptes
+
+### accounts-api (GET list / GET single / PATCH)
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/accounts-api` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**GET** — Liste paginée
+
+Query params : `limit` (1–100, défaut 50), `cursor` (UUID), `search` (texte libre sur display_name ou stripe_customer_id)
+
+```json
+{
+  "data": [ /* Account[] */ ],
+  "pagination": { "limit": 50, "next_cursor": "uuid | null", "has_more": false }
+}
+```
+
+**GET** `?id=<uuid>` — Détail avec scores narratifs, insights et segments
+
+```json
+{
+  "data": {
+    "...account_fields": {},
+    "display_name": "string | null",
+    "scores": {
+      "health":     { "value": 72, "narrative": "Santé globale bonne" },
+      "usage":      { "value": 80, "narrative": "..." },
+      "financial":  { "value": 65, "narrative": "..." },
+      "engagement": { "value": 70, "narrative": "..." },
+      "contract":   { "value": 60, "narrative": "..." },
+      "churn_risk": { "value": 28 },
+      "expansion":  { "value": 45 }
+    },
+    "insights": [ { "...insight_fields": {}, "is_new": true } ],
+    "segments": [ { "segment_type": "stables", "priority": "normal", "added_at": "iso" } ],
+    "hubspot": { "...hubspot_company_fields": {} }
+  }
+}
+```
+
+**PATCH** `?id=<uuid>` — Mise à jour du display_name (alias Sentio, jamais synchronisé)
+
+Body : `{ "display_name": "string | null" }`  
+Response 200 : `{ "data": { "id": "uuid", "display_name": "string | null" } }`
+
+**Codes d'erreur** : `400`, `401`, `404`, `500`
+
+---
+
+### account-summary (GET)
+
+Résumé IA en français des métriques d'un compte, généré par Claude Haiku et mis en cache 24h.
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/account-summary?account_id=<uuid>` |
+| **Méthode** | `GET` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**Response 200**
+```json
+{
+  "summary": "Ce compte présente un profil stable...",
+  "generated_at": "2026-05-17T10:00:00Z",
+  "cached": true
+}
+```
+
+**Codes d'erreur**
+
+| Code | Cas |
+|------|-----|
+| `400` | `account_id` manquant |
+| `401` | JWT invalide |
+| `404` | Compte introuvable |
+| `503` | `ANTHROPIC_API_KEY` non configuré |
+
+---
+
+## Dashboard
+
+### dashboard-api (GET)
+
+Données agrégées pour la page "Aujourd'hui".
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/dashboard-api/<route>` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**GET /briefing** — Briefing matinal
+
+```json
+{
+  "data": {
+    "portfolio": {
+      "current_avg_health": 72.4,
+      "week_ago_avg_health": 69.1,
+      "health_delta_7d": 3.3,
+      "health_trend": "up"
+    },
+    "risk_accounts_7d": 4,
+    "p0_insights_count": 2,
+    "insight_du_jour": {
+      "account_id": "uuid",
+      "stripe_customer_id": "cus_xxx",
+      "display_name": "Acme Corp",
+      "health_score_now": 42,
+      "health_score_yesterday": 61,
+      "delta": -19,
+      "direction": "degraded",
+      "main_dimension": "usage"
+    }
+  }
+}
+```
+
+`health_trend` : `"up" | "down" | "stable" | "unknown"`  
+`insight_du_jour` : `null` si aucun compte n'a bougé significativement.
+
+**GET /wins** — Comptes améliorés sur les 7 derniers jours
+
+```json
+{
+  "data": [
+    {
+      "account_id": "uuid",
+      "stripe_customer_id": "cus_xxx",
+      "display_name": "Beta SAS",
+      "health_score_now": 78,
+      "health_score_7d_ago": 54,
+      "health_delta": 24,
+      "main_dimension": "financial",
+      "segment_before": "a_risque_leger",
+      "segment_now": "stables",
+      "segment_changed": true
+    }
+  ]
+}
+```
+
+**GET /benchmarks** — NRR, churn et croissance MRR vs standards marché SaaS B2B
+
+```json
+{
+  "data": {
+    "nrr":       { "value": 105.2, "rating": "bon", "thresholds": { "excellent": 120, "bon": 105, "correct": 90 }, "higher_is_better": true, "sources": ["..."] },
+    "churn_rate":{ "value": 4.5,   "rating": "bon", "thresholds": { "excellent": 3, "bon": 5, "correct": 10 },    "higher_is_better": false, "sources": ["..."] },
+    "mrr_growth":{ "value": 32.1,  "rating": "excellent", "thresholds": { "excellent": 50, "bon": 25, "correct": 10 }, "higher_is_better": true, "sources": ["..."] },
+    "peers": { "available": false, "min_orgs_required": 3 }
+  }
+}
+```
+
+`rating` : `"excellent" | "bon" | "correct" | "mediocre" | null`  
+`peers.available: true` retourne les percentiles inter-orgs (p25/p50/p75) quand ≥ 3 orgs dans peer_benchmarks.
+
+**Codes d'erreur** : `401`, `500`
+
+---
+
+## Insights
+
+### insights-crud (GET / PATCH)
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/insights-crud` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**GET** — Liste paginée avec filtres
+
+Query params : `type` (churn_prediction | expansion_opportunity | renewal_alert | payment_risk | usage_drop), `priority` (low | medium | high | critical), `status` (active | acknowledged | resolved | dismissed), `sort` (created_at | priority | confidence_score | mrr_impact_cents), `order` (asc | desc), `limit` (défaut 20), `offset`
+
+```json
+{
+  "data": [ { "...insight_fields": {} } ],
+  "pagination": { "total": 42, "limit": 20, "offset": 0 }
+}
+```
+
+**GET** `?id=<uuid>` — Détail d'un insight
+
+**GET** `?stats=true` — Compteurs agrégés
+
+```json
+{
+  "data": {
+    "total": 12,
+    "by_status":   { "active": 5, "acknowledged": 3, "resolved": 3, "dismissed": 1 },
+    "by_priority": { "critical": 1, "high": 3, "medium": 6, "low": 2 },
+    "by_type":     { "churn_prediction": 4, "payment_risk": 3, "...": 0 }
+  }
+}
+```
+
+**PATCH** `?id=<uuid>` — Transition de statut
+
+Body : `{ "status": "acknowledged" | "resolved" | "dismissed" }`
+
+Transitions autorisées : `active → acknowledged | resolved | dismissed`, `acknowledged → resolved | dismissed`. Les statuts `resolved` et `dismissed` sont terminaux.
+
+**Codes d'erreur** : `400` (transition invalide), `401`, `404`, `409` (transition impossible), `500`
+
+---
+
+## Playbooks
+
+### playbook-execute (POST)
+
+Exécute un playbook manuellement sur des comptes ou un segment.
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/playbook-execute` |
+| **Méthode** | `POST` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**Body**
+```json
+{
+  "playbook_id": "uuid",
+  "account_ids": ["uuid"],
+  "segment_id": "uuid",
+  "execution_source": "manual",
+  "cooldown_hours": 24
+}
+```
+
+`account_ids` OU `segment_id` — au moins l'un. Max 200 comptes par run.  
+`cooldown_hours` : ignore les comptes déjà exécutés dans ce délai (défaut : pas de cooldown).
+
+**Response 200**
+```json
+{ "executed": 3, "skipped": 1, "failed": 0 }
+```
+
+**Codes d'erreur** : `400`, `401`, `404` (playbook introuvable), `500`
+
+---
+
+### playbook-approve (PATCH)
+
+Valide ou rejette un item de la file d'approbation CS.
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/playbook-approve` |
+| **Méthode** | `PATCH` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**Body**
+```json
+{
+  "queue_item_id": "uuid",
+  "action": "approved",
+  "comment": "Approuvé après vérification"
+}
+```
+
+`action` : `"approved" | "rejected"`. `comment` optionnel.
+
+**Response 200**
+```json
+{ "success": true, "action": "approved", "connector_result": { "..." : "" } }
+```
+
+**Codes d'erreur**
+
+| Code | Cas |
+|------|-----|
+| `400` | Payload invalide |
+| `401` | JWT invalide |
+| `404` | Item de queue introuvable |
+| `409` | Item déjà traité |
+| `410` | Item expiré |
+| `500` | Erreur DB ou connecteur |
+
+> Transit PII : si action = `approved`, l'email Stripe est récupéré depuis l'API en mémoire uniquement, jamais persisté.
+
+---
+
+### playbooks-suggested (GET)
+
+Suggestion déterministe du playbook le plus pertinent à activer, basée sur l'état réel du portefeuille.
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/playbooks-suggested` |
+| **Méthode** | `GET` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**Priorité de suggestion** : `en_danger_critique → churn_prevention` > `impayes → payment_recovery` > `en_churn → winback` > `en_expansion → expansion` > `a_risque_leger → health_monitoring` > `renewal insights actifs → renewal`
+
+**Response 200**
+```json
+{
+  "data": {
+    "suggested_playbook_id": "uuid | null",
+    "template_category": "churn_prevention",
+    "title": "Alerte churn critique",
+    "reason": "3 comptes en danger critique détectés",
+    "accounts_targeted": 3,
+    "already_active": false,
+    "segment_type": "en_danger_critique"
+  }
+}
+```
+
+`data` est `null` si aucune suggestion pertinente.
+
+**Codes d'erreur** : `401`, `500`
+
+---
+
+### outbound-webhook-test (POST)
+
+Envoie un payload de test vers une destination outbound configurée (sans attendre un vrai événement).
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/outbound-webhook-test` |
+| **Méthode** | `POST` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**Body**
+```json
+{
+  "destination_id": "uuid"
+}
+```
+
+**Response 200**
+```json
+{ "success": true, "status": 200, "response": "OK" }
+```
+
+**Codes d'erreur** : `400`, `401`, `404` (destination inconnue ou autre org), `500`
+
+---
+
+## Session
+
+### session-ping (POST)
+
+Met à jour `last_seen_at` du profil courant. À appeler à chaque ouverture de session pour calculer les badges "nouveaux".
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/session-ping` |
+| **Méthode** | `POST` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+| **Body** | `{}` (vide ou ignoré) |
+
+**Response 200**
+```json
+{
+  "data": {
+    "last_seen_at": "2026-05-16T08:00:00Z",
+    "current_seen_at": "2026-05-17T10:00:00Z",
+    "new_insights_count": 3,
+    "new_score_changes_count": 5
+  }
+}
+```
+
+`last_seen_at` = timestamp de la session précédente (avant ce ping). Le frontend utilise cette valeur pour afficher des badges sans refaire de requête.
+
+`new_score_changes_count` : comptes dont `|health_score_now - health_score_at_last_seen| ≥ 5 pts`.
+
+**Codes d'erreur** : `401`, `500`
+
+---
+
+## Ingestion d'usage
+
+### track-usage (POST)
+
+Ingère des événements d'usage produit depuis les systèmes du client (SDK, webhooks).
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/track-usage` |
+| **Méthode** | `POST` |
+| **Auth** | `X-Sentio-Webhook-Secret: <secret>` — secret configuré dans Sentio (Intégrations → Usage Webhook) |
+
+> Pas de JWT : cet endpoint est appelé depuis les systèmes produit du client, pas depuis le navigateur.
+
+**Body**
+```json
+{
+  "stripe_customer_id": "cus_xxx",
+  "account_id": "uuid",
+  "event_type": "login",
+  "feature_name": "export",
+  "event_count": 1,
+  "event_date": "2026-05-17",
+  "source": "api"
+}
+```
+
+`stripe_customer_id` OU `account_id` — au moins l'un.  
+`event_type` : `login | feature_used | api_call | export | report_viewed`  
+`source` : `api | webhook | manual` (défaut : `api`)  
+`event_date` : format `YYYY-MM-DD` (défaut : aujourd'hui)
+
+**Response 201**
+```json
+{
+  "success": true,
+  "account_id": "uuid",
+  "event_type": "login",
+  "event_date": "2026-05-17",
+  "event_count": 1
+}
+```
+
+**Codes d'erreur**
+
+| Code | Cas |
+|------|-----|
+| `400` | Payload invalide (event_type inconnu, event_count < 1, date invalide) |
+| `401` | Header `X-Sentio-Webhook-Secret` absent ou secret invalide / inactif |
+| `404` | Compte introuvable dans l'organisation |
+| `500` | Erreur serveur |
+
+---
+
 ## Headers requis sur tous les appels
 
 ```
 Authorization: Bearer <supabase_access_token>
 Content-Type: application/json
 ```
+
+> Exception : `track-usage` utilise `X-Sentio-Webhook-Secret` à la place de `Authorization`.
