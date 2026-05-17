@@ -22,7 +22,6 @@ import {
 } from '../_shared/insight-rules.ts'
 
 // ── Constants ────────────────────────────────────────────────
-const LOCK_KEY = 'generate-insights'
 const LOCK_TTL_SECONDS = 300
 const BATCH_SIZE = 500
 const MAX_BATCHES = 200
@@ -271,12 +270,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('No active organizations found', 404)
   }
 
-  // Acquire cron lock
-  const lockAcquired = await acquireCronLock(supabase, LOCK_KEY, LOCK_TTL_SECONDS)
-  if (!lockAcquired) {
-    return errorResponse('Insight generation already in progress', 409)
-  }
-
   const results: Array<{
     organization_id: string
     insights_created: number
@@ -288,6 +281,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     for (const org of orgs) {
       const organizationId = org.id
+      // Per-org lock: allows parallel calls from calculate-scores (one per org)
+      const lockKey = `generate-insights:${organizationId}`
+      const lockAcquired = await acquireCronLock(supabase, lockKey, LOCK_TTL_SECONDS)
+      if (!lockAcquired) {
+        results.push({ organization_id: organizationId, insights_created: 0, insights_resolved: 0, accounts_evaluated: 0, errors: 0 })
+        continue
+      }
+
       let insightsCreated = 0
       let insightsResolved = 0
       let accountsEvaluated = 0
@@ -390,6 +391,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
         accounts_evaluated: accountsEvaluated,
         errors,
       })
+
+      try {
+        await releaseCronLock(supabase, lockKey)
+      } catch (err) {
+        console.error(`[generate-insights] Failed to release lock for ${organizationId}: ${err instanceof Error ? err.message : String(err)}`)
+      }
     }
 
     return jsonResponse({
@@ -411,11 +418,5 @@ Deno.serve(async (req: Request): Promise<Response> => {
     )
 
     return errorResponse(`Insight generation failed: ${msg}`, 500)
-  } finally {
-    try {
-      await releaseCronLock(supabase, LOCK_KEY)
-    } catch (err) {
-      console.error(`[generate-insights] Failed to release lock: ${err instanceof Error ? err.message : String(err)}`)
-    }
   }
 })
