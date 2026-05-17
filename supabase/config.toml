@@ -83,9 +83,10 @@ verify_jwt = false
 [functions.account-summary]
 verify_jwt = false
 
-# outbound-webhook-dispatch : appelé par calculate-scores (service_role) ou admin-proxy
+# outbound-webhook-dispatch : appelé par calculate-scores (service_role) uniquement
+# verify_jwt=true : rejette tout appel sans Bearer service_role valide
 [functions.outbound-webhook-dispatch]
-verify_jwt = false
+verify_jwt = true
 
 # outbound-webhook-test : JWT vérifié dans le code (ES256 — test depuis l'UI)
 [functions.outbound-webhook-test]
@@ -104,8 +105,9 @@ verify_jwt = true
 verify_jwt = false
 
 # playbook-executor : appelé par calculate-scores/stripe-webhook (service_role fire-and-forget)
+# verify_jwt=true : rejette tout appel sans Bearer service_role valide
 [functions.playbook-executor]
-verify_jwt = false
+verify_jwt = true
 
 # playbook-test : JWT vérifié dans le code (ES256 — test manuel depuis UI)
 [functions.playbook-test]

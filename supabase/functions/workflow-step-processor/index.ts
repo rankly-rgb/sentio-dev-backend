@@ -216,8 +216,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
               execution_id: exec.id,
               account_id: exec.account_id,
               playbook_id: exec.playbook_id,
-              email_to: orgProfile.email,
-              email_subject: (currentStep.config.email_subject as string) || '',
               email_status: isCompleted ? 'sent' : 'failed',
               step_order: currentStep.step_order,
               error_message: isCompleted ? null : stepResult.message,
