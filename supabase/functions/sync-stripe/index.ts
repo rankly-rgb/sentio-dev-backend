@@ -234,14 +234,17 @@ async function syncSubscriptions(
   const extraParams: Record<string, string> = { status: 'all' }
 
   // Pre-build stripe_customer_id → account.id Map (eliminates N+1 queries)
+  // + snapshot du MRR actuel pour détecter les mouvements
   const { data: subSyncAccounts } = await supabase
     .from('accounts')
-    .select('id, stripe_customer_id')
+    .select('id, stripe_customer_id, mrr_cents')
     .eq('organization_id', organizationId)
 
   const customerToAccount = new Map<string, string>()
+  const prevMrrByAccount = new Map<string, number>()
   for (const a of subSyncAccounts ?? []) {
     if (a.stripe_customer_id) customerToAccount.set(a.stripe_customer_id, a.id)
+    prevMrrByAccount.set(a.id, a.mrr_cents ?? 0)
   }
 
   // Track per-account metadata from active subs for MRR aggregation
@@ -333,6 +336,59 @@ async function syncSubscriptions(
 
   const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id')
   logger.increment('records_failed', acctFail)
+
+  // Phase 3 : générer les mrr_movements par comparaison avant/après
+  // Idempotent grâce à l'index unique (org_id, account_id, movement_date, movement_type) WHERE stripe_event_id IS NULL
+  const today = new Date().toISOString().split('T')[0]
+  const movementRows: Record<string, unknown>[] = []
+
+  for (const acctId of customerToAccount.values()) {
+    const subs = accountSubMeta.get(acctId) ?? []
+    const newMrr = subs.reduce((sum, s) => sum + s.mrrCents, 0)
+    const prevMrr = prevMrrByAccount.get(acctId) ?? 0
+
+    let movementType: string | null = null
+    let amount = 0
+
+    if (prevMrr === 0 && newMrr > 0) {
+      movementType = 'new'; amount = newMrr
+    } else if (newMrr > prevMrr && prevMrr > 0) {
+      movementType = 'expansion'; amount = newMrr - prevMrr
+    } else if (newMrr > 0 && newMrr < prevMrr) {
+      movementType = 'contraction'; amount = newMrr - prevMrr  // valeur négative
+    } else if (newMrr === 0 && prevMrr > 0) {
+      movementType = 'churn'; amount = -prevMrr
+    }
+
+    if (movementType) {
+      movementRows.push({
+        organization_id: organizationId,
+        account_id: acctId,
+        movement_type: movementType,
+        amount_cents: amount,
+        movement_date: today,
+        stripe_event_id: null,
+      })
+    }
+  }
+
+  if (movementRows.length > 0) {
+    const { error: mvtErr } = await supabase
+      .from('mrr_movements')
+      .upsert(movementRows, {
+        onConflict: 'organization_id,account_id,movement_date,movement_type',
+        ignoreDuplicates: true,
+      })
+    if (mvtErr) {
+      console.error(JSON.stringify({
+        level: 'warn',
+        function_name: 'sync-stripe',
+        message: `mrr_movements upsert failed: ${mvtErr.message}`,
+      }))
+    } else {
+      logger.increment('movements_processed', movementRows.length)
+    }
+  }
 }
 
 // ── Sync invoices ─────────────────────────────────────────────
@@ -545,23 +601,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     await logger.complete({ sync_type: syncType, created_after: createdAfter })
 
-    // Déclencher le scoring automatiquement après un sync onboarding
-    if (isOnboarding) {
-      const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
-      const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-      if (supabaseUrl && serviceKey) {
-        fetch(`${supabaseUrl}/functions/v1/calculate-scores`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${serviceKey}` },
-          body: JSON.stringify({ organization_id: organizationId }),
-        }).catch((err) => {
-          console.error(JSON.stringify({
-            level: 'warn',
-            function_name: 'sync-stripe',
-            message: `onboarding score trigger failed: ${err instanceof Error ? err.message : String(err)}`,
-          }))
-        })
-      }
+    // Déclencher le scoring après chaque sync (onboarding ou cron)
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+    const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    if (supabaseUrl && serviceKey) {
+      fetch(`${supabaseUrl}/functions/v1/calculate-scores`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${serviceKey}` },
+        body: JSON.stringify({ organization_id: organizationId }),
+      }).catch((err) => {
+        console.error(JSON.stringify({
+          level: 'warn',
+          function_name: 'sync-stripe',
+          message: `score trigger failed: ${err instanceof Error ? err.message : String(err)}`,
+        }))
+      })
     }
 
     return jsonResponse({

@@ -8,7 +8,8 @@ interface DashboardStats {
   total_mrr_cents: number
   avg_health_score: number | null
   accounts_at_risk: number
-  champions_count: number
+  mrr_at_risk_cents: number
+  expansion_opportunities: number
 }
 
 async function getDashboardStats(organizationId: string): Promise<DashboardStats> {
@@ -20,7 +21,7 @@ async function getDashboardStats(organizationId: string): Promise<DashboardStats
   // Safety limit: prevent OOM on orgs with very large account bases
   const { data: accounts, count } = await supabase
     .from('accounts')
-    .select('mrr_cents, health_score, churn_risk_score', { count: 'exact' })
+    .select('mrr_cents, health_score, churn_risk_score, expansion_score, seat_count, seat_limit', { count: 'exact' })
     .eq('organization_id', organizationId)
     .limit(10000)
 
@@ -39,7 +40,8 @@ async function getDashboardStats(organizationId: string): Promise<DashboardStats
       total_mrr_cents: 0,
       avg_health_score: null,
       accounts_at_risk: 0,
-      champions_count: 0,
+      mrr_at_risk_cents: 0,
+      expansion_opportunities: 0,
     }
   }
 
@@ -50,15 +52,21 @@ async function getDashboardStats(organizationId: string): Promise<DashboardStats
       ? withHealth.reduce((sum, a) => sum + (a.health_score ?? 0), 0) / withHealth.length
       : null
 
-  const atRisk = accounts.filter((a) => (a.churn_risk_score ?? 0) >= 70).length
-  const champions = accounts.filter((a) => (a.health_score ?? 0) >= 80).length
+  // Spec : churn_risk_score > 70
+  const atRiskAccounts = accounts.filter((a) => (a.churn_risk_score ?? 0) > 70)
+  const atRisk = atRiskAccounts.length
+  const mrrAtRisk = atRiskAccounts.reduce((sum, a) => sum + (a.mrr_cents ?? 0), 0)
+
+  // Spec : expansion_score > 75
+  const expansion = accounts.filter((a) => (a.expansion_score ?? 0) > 75).length
 
   return {
     total_accounts: count ?? accounts.length,
     total_mrr_cents: totalMrr,
     avg_health_score: avgHealth ? Math.round(avgHealth) : null,
     accounts_at_risk: atRisk,
-    champions_count: champions,
+    mrr_at_risk_cents: mrrAtRisk,
+    expansion_opportunities: expansion,
   }
 }
 
@@ -112,7 +120,7 @@ export default async function DashboardPage() {
         </div>
 
         {/* KPI Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-6">
           <KpiCard
             label="Comptes actifs"
             value={stats.total_accounts.toString()}
@@ -140,8 +148,20 @@ export default async function DashboardPage() {
           <KpiCard
             label="Comptes à risque"
             value={stats.accounts_at_risk.toString()}
-            description="Churn risk ≥ 70%"
+            description="Churn risk > 70"
             variant={stats.accounts_at_risk > 0 ? 'danger' : 'success'}
+          />
+          <KpiCard
+            label="MRR à risque"
+            value={formatMrr(stats.mrr_at_risk_cents)}
+            description="MRR des comptes churn risk > 70"
+            variant={stats.mrr_at_risk_cents > 0 ? 'danger' : 'success'}
+          />
+          <KpiCard
+            label="Opportunités d'expansion"
+            value={stats.expansion_opportunities.toString()}
+            description="Expansion score > 75"
+            variant={stats.expansion_opportunities > 0 ? 'warning' : 'neutral'}
           />
         </div>
 

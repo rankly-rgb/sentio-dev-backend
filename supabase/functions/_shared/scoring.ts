@@ -103,7 +103,8 @@ export function calcContractScore(account: Account): number {
 
 // ── Calcul Expansion Score ────────────────────────────────────
 export function calcExpansionScore(account: Account, stats: UsageStats): number {
-  let seatUsagePct = 50
+  // 0 quand seat_limit absent : on ne peut pas calculer un taux d'occupation sans plafond
+  let seatUsagePct = 0
   if (account.seat_count !== null && account.seat_limit !== null && account.seat_limit > 0) {
     seatUsagePct = Math.min(100, (account.seat_count / account.seat_limit) * 100)
   }
@@ -135,14 +136,14 @@ export function calcChurnRiskScore(
   account: Account,
 ): number {
   let churnAdditif = 0
-  if (invoiceStatus.has_overdue) churnAdditif += 15
-  if (daysActive === 0) churnAdditif += 20
+  if (invoiceStatus.has_overdue) churnAdditif += 20          // spec : past_due +20
+  if (daysActive === 0) churnAdditif += 10                   // spec : last_login >45j +10 (aucune activité 30j = proxy)
 
   if (account.contract_end_date) {
     const daysUntilRenewal = Math.floor(
       (new Date(account.contract_end_date).getTime() - Date.now()) / 86400000,
     )
-    if (daysUntilRenewal <= 30 && daysUntilRenewal >= 0) churnAdditif += 10
+    if (daysUntilRenewal <= 30 && daysUntilRenewal >= 0) churnAdditif += 15  // spec : +15
     if (daysUntilRenewal < 0) churnAdditif += 25
   }
 

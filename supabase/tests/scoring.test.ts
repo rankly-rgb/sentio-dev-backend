@@ -209,9 +209,9 @@ describe('calcExpansionScore', () => {
     distinct_features: 0, days_active: 0,
   }
 
-  it('returns neutral (30) for no seat data and no features', () => {
-    // seatUsagePct = 50 (neutral), featureCeiling = 0 → (50*0.6 + 0*0.4) = 30
-    expect(calcExpansionScore(baseAccount, baseStats)).toBe(30)
+  it('returns 0 for no seat data and no features', () => {
+    // seatUsagePct = 0 (inconnu sans seat_limit), featureCeiling = 0 → (0*0.6 + 0*0.4) = 0
+    expect(calcExpansionScore(baseAccount, baseStats)).toBe(0)
   })
 
   it('returns 100 for full seats and max features', () => {
@@ -220,11 +220,11 @@ describe('calcExpansionScore', () => {
     expect(calcExpansionScore(acct, stats)).toBe(100)
   })
 
-  it('uses neutral seat score when no limit', () => {
+  it('uses 0 for seat score when no seat_limit', () => {
     const acct = { ...baseAccount, seat_count: 5, seat_limit: null }
     const stats = { ...baseStats, distinct_features: 5 }
-    // neutral 50 * 0.6 + 50 * 0.4 = 30 + 20 = 50
-    expect(calcExpansionScore(acct, stats)).toBe(50)
+    // seatUsagePct = 0 (seat_limit absent), featureCeiling = 50 → 0*0.6 + 50*0.4 = 20
+    expect(calcExpansionScore(acct, stats)).toBe(20)
   })
 })
 
@@ -261,15 +261,15 @@ describe('calcChurnRiskScore', () => {
     expect(risk).toBe(20)
   })
 
-  it('adds 15 for overdue invoices', () => {
+  it('adds 20 for overdue invoices (spec: past_due +20)', () => {
     const overdue: InvoiceStatus = { has_overdue: true, overdue_count: 1 }
     const risk = calcChurnRiskScore(80, overdue, 10, baseAccount)
-    expect(risk).toBe(35) // 100 - 80 + 15 = 35
+    expect(risk).toBe(40) // 100 - 80 + 20 = 40
   })
 
-  it('adds 20 for zero activity', () => {
+  it('adds 10 for zero activity (spec: last_login >45j +10)', () => {
     const risk = calcChurnRiskScore(80, noOverdue, 0, baseAccount)
-    expect(risk).toBe(40) // 100 - 80 + 20 = 40
+    expect(risk).toBe(30) // 100 - 80 + 10 = 30
   })
 
   it('adds 25 for expired contract', () => {
