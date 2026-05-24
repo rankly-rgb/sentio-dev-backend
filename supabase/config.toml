@@ -143,3 +143,22 @@ verify_jwt = false
 
 [functions.update-organization-locale]
 verify_jwt = false
+
+# Onboarding Flow — connexion Stripe & HubSpot
+[functions.verify-stripe-token]
+verify_jwt = false
+
+[functions.get-sync-status]
+verify_jwt = false
+
+[functions.get-top-churn-risks]
+verify_jwt = false
+
+[functions.hubspot-connect]
+verify_jwt = false
+
+[functions.stripe-oauth-initiate]
+verify_jwt = false
+
+[functions.stripe-oauth-callback]
+verify_jwt = false
