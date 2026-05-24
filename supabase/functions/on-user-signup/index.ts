@@ -140,7 +140,7 @@ export function buildWelcomeEmailEN(orgName: string, trialEndsAt: string | null)
     <li style="margin-bottom:12px"><strong>Connect HubSpot</strong> (optional) — enrich your engagement data.</li>
     <li style="margin-bottom:12px"><strong>Discover your aha moment</strong> — identify at-risk accounts in real time.</li>
   </ol>
-  <a href="https://app.sentio.ai/dashboard/onboarding"
+  <a href="https://app.sentioapp.io/onboarding/promise"
      style="display:inline-block;margin-top:24px;padding:12px 24px;background:#0f172a;color:#fff;text-decoration:none;border-radius:6px;font-weight:600">
     Go to dashboard
   </a>
@@ -166,7 +166,7 @@ export function buildWelcomeEmail(orgName: string, trialEndsAt: string | null): 
     <li style="margin-bottom:12px"><strong>Connectez HubSpot</strong> (optionnel) — enrichissez les données d'engagement.</li>
     <li style="margin-bottom:12px"><strong>Découvrez votre aha moment</strong> — identifiez vos comptes à risque en temps réel.</li>
   </ol>
-  <a href="https://app.sentio.ai/dashboard/onboarding"
+  <a href="https://app.sentioapp.io/onboarding/promise"
      style="display:inline-block;margin-top:24px;padding:12px 24px;background:#0f172a;color:#fff;text-decoration:none;border-radius:6px;font-weight:600">
     Accéder au tableau de bord
   </a>
