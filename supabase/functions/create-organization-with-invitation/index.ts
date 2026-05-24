@@ -73,62 +73,75 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Utilisateur introuvable', 400)
   }
 
-  // 2. Vérifier qu'aucune organisation n'existe déjà pour cet utilisateur
+  // 2. Vérifier si une organisation existe déjà (créée par le trigger SQL on_auth_user_created)
   const { data: existingProfile } = await supabase
     .from('profiles_')
     .select('organization_id')
     .eq('auth_user_id', user_id)
     .maybeSingle()
 
-  if (existingProfile?.organization_id) {
-    return errorResponse('Une organisation existe déjà pour cet utilisateur', 409)
-  }
-
   const today = new Date().toISOString().split('T')[0]
-
   const resolvedLocale = (locale === 'en') ? 'en' : 'fr'
+  const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()
 
-  // 3. Créer l'organisation (onboarding_step = 'promise')
-  const { data: org, error: orgErr } = await supabase
-    .from('organizations')
-    .insert({
-      name: company_name.trim(),
-      onboarding_step: 'promise',
-      onboarding_completed: false,
-      plan_type: 'free',
-      trial_ends_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
-      locale: resolvedLocale,
-    })
-    .select('id')
-    .single()
+  let orgId: string
 
-  if (orgErr || !org) {
-    console.error(JSON.stringify({ level: 'error', function_name: 'create-organization-with-invitation', message: orgErr?.message ?? 'org insert failed' }))
-    return errorResponse('Erreur création organisation', 500)
+  if (existingProfile?.organization_id) {
+    // Org créée automatiquement par le trigger SQL — la mettre à jour avec les données du formulaire
+    orgId = existingProfile.organization_id
+    const { error: updateErr } = await supabase
+      .from('organizations')
+      .update({
+        name: company_name.trim(),
+        onboarding_step: 'promise',
+        onboarding_completed: false,
+        locale: resolvedLocale,
+        trial_ends_at: trialEndsAt,
+      })
+      .eq('id', orgId)
+
+    if (updateErr) {
+      console.error(JSON.stringify({ level: 'error', function_name: 'create-organization-with-invitation', message: updateErr.message }))
+      return errorResponse('Erreur mise à jour organisation', 500)
+    }
+  } else {
+    // Pas de trigger actif — créer l'organisation from scratch
+    const { data: org, error: orgErr } = await supabase
+      .from('organizations')
+      .insert({
+        name: company_name.trim(),
+        onboarding_step: 'promise',
+        onboarding_completed: false,
+        plan_type: 'free',
+        trial_ends_at: trialEndsAt,
+        locale: resolvedLocale,
+      })
+      .select('id')
+      .single()
+
+    if (orgErr || !org) {
+      console.error(JSON.stringify({ level: 'error', function_name: 'create-organization-with-invitation', message: orgErr?.message ?? 'org insert failed' }))
+      return errorResponse('Erreur création organisation', 500)
+    }
+
+    orgId = org.id
+
+    // Créer le profil owner
+    const { error: profileErr } = await supabase
+      .from('profiles_')
+      .insert({ organization_id: orgId, auth_user_id: user_id, role: 'admin' })
+
+    if (profileErr) {
+      console.error(JSON.stringify({ level: 'error', function_name: 'create-organization-with-invitation', message: profileErr.message }))
+      await supabase.from('organizations').delete().eq('id', orgId)
+      return errorResponse('Erreur création profil', 500)
+    }
   }
 
-  const orgId = org.id
+  // 4. Créer les préférences par défaut (idempotent — ignore conflict)
+  await supabase.from('org_preferences').upsert({ organization_id: orgId }, { onConflict: 'organization_id', ignoreDuplicates: true })
 
-  // 4. Créer le profil owner (Zero-PII : pas d'email)
-  const { error: profileErr } = await supabase
-    .from('profiles_')
-    .insert({
-      organization_id: orgId,
-      auth_user_id: user_id,
-      role: 'admin', // 'admin' = owner dans le schéma existant
-    })
-
-  if (profileErr) {
-    console.error(JSON.stringify({ level: 'error', function_name: 'create-organization-with-invitation', message: profileErr.message }))
-    // Rollback org
-    await supabase.from('organizations').delete().eq('id', orgId)
-    return errorResponse('Erreur création profil', 500)
-  }
-
-  // 5. Créer les préférences par défaut
-  await supabase.from('org_preferences').insert({ organization_id: orgId })
-
-  // 6. Insérer les 4 comptes démo
+  // 5. Insérer les 4 comptes démo
   const { data: demoAccounts, error: demoErr } = await supabase
     .from('accounts')
     .insert(
@@ -146,7 +159,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Non bloquant — l'org est créée
   }
 
-  // 7. Insérer les score_history des comptes démo
+  // 6. Insérer les score_history des comptes démo
   if (demoAccounts?.length) {
     const scoreRows = demoAccounts.map((acc) => {
       const demo = DEMO_ACCOUNTS.find(d => d.company_name === acc.company_name)!

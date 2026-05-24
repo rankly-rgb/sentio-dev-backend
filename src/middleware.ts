@@ -3,14 +3,16 @@ import { NextResponse, type NextRequest } from 'next/server'
 
 const PROTECTED_ROUTES = ['/dashboard', '/api/sync-stripe']
 const AUTH_ROUTES = ['/auth/login', '/auth/callback']
+const ONBOARDING_ROUTES = ['/onboarding']
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
-  // Skip static assets and non-protected routes
   const isProtected = PROTECTED_ROUTES.some((r) => pathname.startsWith(r))
   const isAuth = AUTH_ROUTES.some((r) => pathname.startsWith(r))
-  if (!isProtected && !isAuth) return NextResponse.next()
+  const isOnboarding = ONBOARDING_ROUTES.some((r) => pathname.startsWith(r))
+
+  if (!isProtected && !isAuth && !isOnboarding) return NextResponse.next()
 
   let supabaseResponse = NextResponse.next({ request })
 
@@ -33,15 +35,12 @@ export async function middleware(request: NextRequest) {
     },
   )
 
-  // Refresh session token — this keeps long sessions alive
   let user = null
   try {
-    // TEMP DEBUG — measure auth latency
     const authStart = Date.now()
     const { data } = await supabase.auth.getUser()
     const authDuration = Date.now() - authStart
     user = data.user
-    // TEMP DEBUG — log slow auth (> 2s)
     if (authDuration > 2000) {
       console.error('[SENTIO_DEBUG][middleware-auth]', {
         type: 'slow_auth',
@@ -51,14 +50,12 @@ export async function middleware(request: NextRequest) {
       })
     }
   } catch (err) {
-    // TEMP DEBUG — log auth failure
     console.error('[SENTIO_DEBUG][middleware-auth]', {
       type: 'auth_error',
       message: err instanceof Error ? err.message : String(err),
       pathname,
       timestamp: new Date().toISOString(),
     })
-    // Auth service down — allow non-protected routes, block protected
     if (isProtected) {
       return new Response(
         JSON.stringify({ error: 'Service temporairement indisponible' }),
@@ -68,24 +65,43 @@ export async function middleware(request: NextRequest) {
     return supabaseResponse
   }
 
-  // Redirect unauthenticated users away from protected routes
-  if (isProtected && !user) {
+  // Utilisateur non authentifié sur une route protégée → login
+  if ((isProtected || isOnboarding) && !user) {
     const loginUrl = request.nextUrl.clone()
     loginUrl.pathname = '/auth/login'
     loginUrl.searchParams.set('next', pathname)
     return NextResponse.redirect(loginUrl)
   }
 
-  // Redirect authenticated users away from auth routes
+  // Utilisateur authentifié sur une route auth → dashboard (sauf callback)
   if (isAuth && user && pathname !== '/auth/callback') {
     const dashboardUrl = request.nextUrl.clone()
     dashboardUrl.pathname = '/dashboard'
     return NextResponse.redirect(dashboardUrl)
   }
 
+  // Guard onboarding : si l'utilisateur accède à /dashboard sans avoir terminé l'onboarding
+  if (isProtected && user) {
+    const { data: profile } = await supabase
+      .from('profiles_')
+      .select('organization_id, organizations(onboarding_completed, stripe_connected)')
+      .eq('auth_user_id', user.id)
+      .maybeSingle()
+
+    // @ts-expect-error — Supabase join type
+    const org = profile?.organizations as { onboarding_completed: boolean; stripe_connected: boolean } | null
+
+    // Onboarding non terminé ET Stripe non connecté → forcer l'onboarding
+    if (org && !org.onboarding_completed && !org.stripe_connected) {
+      const onboardingUrl = request.nextUrl.clone()
+      onboardingUrl.pathname = '/onboarding/promise'
+      return NextResponse.redirect(onboardingUrl)
+    }
+  }
+
   return supabaseResponse
 }
 
 export const config = {
-  matcher: ['/dashboard/:path*', '/api/:path*', '/auth/:path*'],
+  matcher: ['/dashboard/:path*', '/api/:path*', '/auth/:path*', '/onboarding/:path*'],
 }
