@@ -91,8 +91,11 @@ export async function middleware(request: NextRequest) {
     // @ts-expect-error — Supabase join type
     const org = profile?.organizations as { onboarding_completed: boolean; stripe_connected: boolean } | null
 
-    // Onboarding non terminé ET Stripe non connecté → forcer l'onboarding
-    if (org && !org.onboarding_completed && !org.stripe_connected) {
+    // Cas 1 : pas de profil — utilisateur tout juste inscrit (trigger pas encore terminé)
+    // Cas 2 : profil existant mais onboarding non terminé et Stripe non connecté
+    const needsOnboarding = !profile || (org !== null && !org.onboarding_completed && !org.stripe_connected)
+
+    if (needsOnboarding) {
       const onboardingUrl = request.nextUrl.clone()
       onboardingUrl.pathname = '/onboarding/promise'
       return NextResponse.redirect(onboardingUrl)
