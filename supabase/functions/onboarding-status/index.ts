@@ -85,32 +85,71 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 // ── GET /onboarding-status ───────────────────────────────────
 
+export type WizardStepStatus = 'completed' | 'active' | 'pending'
+
+export interface WizardStep {
+  id: string
+  label_fr: string
+  label_en: string
+  required: boolean
+  status: WizardStepStatus
+}
+
+export function buildWizardSteps(
+  stripeConnected: boolean,
+  firstScoreCalculated: boolean,
+  ahaMomentSeen: boolean,
+  hubspotConnected: boolean,
+  onboardingCompleted: boolean,
+): WizardStep[] {
+  return [
+    {
+      id: 'stripe',
+      label_fr: 'Connecter Stripe',
+      label_en: 'Connect Stripe',
+      required: true,
+      status: stripeConnected ? 'completed' : 'active',
+    },
+    {
+      id: 'import',
+      label_fr: 'Import des données',
+      label_en: 'Import data',
+      required: true,
+      status: !stripeConnected ? 'pending' : firstScoreCalculated ? 'completed' : 'active',
+    },
+    {
+      id: 'first_win',
+      label_fr: 'Premier insight',
+      label_en: 'First insight',
+      required: true,
+      status: !firstScoreCalculated ? 'pending' : ahaMomentSeen ? 'completed' : 'active',
+    },
+    {
+      id: 'hubspot',
+      label_fr: 'Connecter HubSpot',
+      label_en: 'Connect HubSpot',
+      required: false,
+      status: hubspotConnected || onboardingCompleted ? 'completed' : !ahaMomentSeen ? 'pending' : 'active',
+    },
+  ]
+}
+
 async function handleGetStatus(
   supabase: ReturnType<typeof createServiceClient>,
   orgId: string,
 ): Promise<Response> {
-  const [orgRes, stripeRes, stripeSyncRunningRes, hubspotRes, accountsCountRes, atRiskCountRes] = await Promise.all([
+  // stripe_connected et hubspot_connected lus depuis organizations (source de vérité)
+  // data_syncs utilisé uniquement pour le statut running du sync en cours
+  const [orgRes, stripeSyncRunningRes, accountsCountRes, atRiskCountRes] = await Promise.all([
     supabase.from('organizations')
-      .select('first_score_calculated_at, aha_moment_seen_at, onboarding_completed')
+      .select('stripe_connected, hubspot_connected, first_score_calculated_at, aha_moment_seen_at, onboarding_completed')
       .eq('id', orgId)
       .maybeSingle(),
     supabase.from('data_syncs')
       .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId)
       .eq('sync_source', 'stripe')
-      .eq('sync_status', 'completed')
-      .limit(1),
-    supabase.from('data_syncs')
-      .select('id', { count: 'exact', head: true })
-      .eq('organization_id', orgId)
-      .eq('sync_source', 'stripe')
       .eq('sync_status', 'running')
-      .limit(1),
-    supabase.from('data_syncs')
-      .select('id', { count: 'exact', head: true })
-      .eq('organization_id', orgId)
-      .eq('sync_source', 'hubspot')
-      .eq('sync_status', 'completed')
       .limit(1),
     supabase.from('accounts')
       .select('id', { count: 'exact', head: true })
@@ -127,9 +166,9 @@ async function handleGetStatus(
   }
 
   const org = orgRes.data
-  const stripeConnected = (stripeRes.count ?? 0) > 0
+  const stripeConnected = org?.stripe_connected ?? false
+  const hubspotConnected = org?.hubspot_connected ?? false
   const stripeSyncInProgress = (stripeSyncRunningRes.count ?? 0) > 0
-  const hubspotConnected = (hubspotRes.count ?? 0) > 0
   const accountsCount = accountsCountRes.count ?? 0
   const atRiskCount = atRiskCountRes.count ?? 0
   const onboardingCompleted = org?.onboarding_completed ?? false
@@ -150,6 +189,7 @@ async function handleGetStatus(
   const ahaMomentSeen = org?.aha_moment_seen_at !== null && org?.aha_moment_seen_at !== undefined
 
   const currentStep = determineCurrentStep(stripeConnected, hubspotConnected, ahaMomentSeen, onboardingCompleted)
+  const wizardSteps = buildWizardSteps(stripeConnected, firstScoreCalculated, ahaMomentSeen, hubspotConnected, onboardingCompleted)
 
   let topRiskAccount = null
   if (ahaMomentReady && !ahaMomentSeen) {
@@ -174,6 +214,7 @@ async function handleGetStatus(
       aha_moment_seen: ahaMomentSeen,
       onboarding_completed: onboardingCompleted,
       current_step: currentStep,
+      wizard_steps: wizardSteps,
       first_score_calculated_at: firstScoreAt,
       aha_moment_seen_at: org?.aha_moment_seen_at ?? null,
       accounts_count: accountsCount,
@@ -183,7 +224,7 @@ async function handleGetStatus(
   })
 }
 
-function determineCurrentStep(
+export function determineCurrentStep(
   stripeConnected: boolean,
   hubspotConnected: boolean,
   firstWinSeen: boolean,

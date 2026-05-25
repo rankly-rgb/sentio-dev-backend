@@ -109,6 +109,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return jsonResponse({ success: false, error: 'Erreur mise à jour organisation' })
   }
 
+  // Marquer l'onboarding comme terminé si on n'est pas encore au-delà de l'étape hubspot (idempotent)
+  await supabase
+    .from('organizations')
+    .update({ onboarding_step: 'completed', onboarding_completed: true })
+    .eq('id', orgId)
+    .in('onboarding_step', ['hubspot', 'invested', 'revelation', 'stripe', 'promise'])
+
   // Fire-and-forget : déclencher le sync HubSpot
   const syncUrl = `${Deno.env.get('SUPABASE_URL')}/functions/v1/sync-hubspot`
   const syncPromise = fetch(syncUrl, {

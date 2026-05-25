@@ -2,6 +2,24 @@ import { describe, it, expect } from 'vitest'
 
 // ── Fonctions pures miroir (onboarding-status/index.ts) ───────
 
+type WizardStepStatus = 'completed' | 'active' | 'pending'
+interface WizardStep { id: string; label_fr: string; label_en: string; required: boolean; status: WizardStepStatus }
+
+function buildWizardSteps(
+  stripeConnected: boolean,
+  firstScoreCalculated: boolean,
+  ahaMomentSeen: boolean,
+  hubspotConnected: boolean,
+  onboardingCompleted: boolean,
+): WizardStep[] {
+  return [
+    { id: 'stripe', label_fr: 'Connecter Stripe', label_en: 'Connect Stripe', required: true, status: stripeConnected ? 'completed' : 'active' },
+    { id: 'import', label_fr: 'Import des données', label_en: 'Import data', required: true, status: !stripeConnected ? 'pending' : firstScoreCalculated ? 'completed' : 'active' },
+    { id: 'first_win', label_fr: 'Premier insight', label_en: 'First insight', required: true, status: !firstScoreCalculated ? 'pending' : ahaMomentSeen ? 'completed' : 'active' },
+    { id: 'hubspot', label_fr: 'Connecter HubSpot', label_en: 'Connect HubSpot', required: false, status: hubspotConnected || onboardingCompleted ? 'completed' : !ahaMomentSeen ? 'pending' : 'active' },
+  ]
+}
+
 function determineCurrentStep(
   stripeConnected: boolean,
   hubspotConnected: boolean,
@@ -25,6 +43,61 @@ function validatePatchBody(body: unknown): { valid: boolean; error?: string; fie
   }
   return { valid: true, field: b.field as PatchField }
 }
+
+// ── Tests buildWizardSteps ────────────────────────────────────
+
+describe('onboarding-status: buildWizardSteps', () => {
+  it('état initial : stripe=active, les 3 autres=pending', () => {
+    const steps = buildWizardSteps(false, false, false, false, false)
+    expect(steps[0].status).toBe('active')   // stripe
+    expect(steps[1].status).toBe('pending')  // import
+    expect(steps[2].status).toBe('pending')  // first_win
+    expect(steps[3].status).toBe('pending')  // hubspot
+  })
+
+  it('stripe connecté, import en cours : stripe=completed, import=active', () => {
+    const steps = buildWizardSteps(true, false, false, false, false)
+    expect(steps[0].status).toBe('completed')
+    expect(steps[1].status).toBe('active')
+    expect(steps[2].status).toBe('pending')
+    expect(steps[3].status).toBe('pending')
+  })
+
+  it('import terminé, aha moment pas encore vu', () => {
+    const steps = buildWizardSteps(true, true, false, false, false)
+    expect(steps[0].status).toBe('completed')
+    expect(steps[1].status).toBe('completed')
+    expect(steps[2].status).toBe('active')
+    expect(steps[3].status).toBe('pending')
+  })
+
+  it('aha moment vu, hubspot non connecté → hubspot=active', () => {
+    const steps = buildWizardSteps(true, true, true, false, false)
+    expect(steps[2].status).toBe('completed')
+    expect(steps[3].status).toBe('active')
+  })
+
+  it('tout complété via HubSpot : toutes les étapes=completed', () => {
+    const steps = buildWizardSteps(true, true, true, true, true)
+    expect(steps.every(s => s.status === 'completed')).toBe(true)
+  })
+
+  it('onboarding_completed=true sans HubSpot → hubspot=completed (skip)', () => {
+    const steps = buildWizardSteps(true, true, true, false, true)
+    expect(steps[3].status).toBe('completed')
+  })
+
+  it('stripe est toujours required, hubspot toujours non required', () => {
+    const steps = buildWizardSteps(false, false, false, false, false)
+    expect(steps.find(s => s.id === 'stripe')?.required).toBe(true)
+    expect(steps.find(s => s.id === 'hubspot')?.required).toBe(false)
+  })
+
+  it('retourne exactement 4 étapes dans le bon ordre', () => {
+    const steps = buildWizardSteps(false, false, false, false, false)
+    expect(steps.map(s => s.id)).toEqual(['stripe', 'import', 'first_win', 'hubspot'])
+  })
+})
 
 // ── Tests determineCurrentStep ────────────────────────────────
 

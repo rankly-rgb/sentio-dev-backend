@@ -112,7 +112,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }))
   }
 
-  // Mettre à jour l'organisation
+  // Mettre à jour l'organisation + avancer onboarding_step si encore à 'promise' ou 'stripe'
   const { error: updateErr } = await supabase
     .from('organizations')
     .update({
@@ -125,6 +125,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     console.error(JSON.stringify({ level: 'error', function_name: 'verify-stripe-token', message: updateErr.message }))
     return jsonResponse({ success: false, error: 'Erreur mise à jour organisation' })
   }
+
+  // Avancer l'étape seulement si on n'est pas déjà plus loin (idempotent)
+  await supabase
+    .from('organizations')
+    .update({ onboarding_step: 'revelation', first_revelation_at: new Date().toISOString() })
+    .eq('id', orgId)
+    .in('onboarding_step', ['promise', 'stripe'])
 
   // Fire-and-forget : déclencher le sync initial
   const syncUrl = `${Deno.env.get('SUPABASE_URL')}/functions/v1/sync-stripe`

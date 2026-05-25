@@ -146,6 +146,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Erreur mise à jour organisation', 500)
   }
 
+  // Avancer l'étape seulement si on n'est pas déjà plus loin (idempotent)
+  await supabase
+    .from('organizations')
+    .update({ onboarding_step: 'revelation', first_revelation_at: new Date().toISOString() })
+    .eq('id', orgId)
+    .in('onboarding_step', ['promise', 'stripe'])
+
   // Fire-and-forget : déclencher le sync initial
   const syncUrl = `${Deno.env.get('SUPABASE_URL')}/functions/v1/sync-stripe`
   const syncPromise = fetch(syncUrl, {
