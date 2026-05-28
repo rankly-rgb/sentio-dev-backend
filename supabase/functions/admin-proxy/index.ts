@@ -11,7 +11,7 @@ import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { createLogger } from '../_shared/structured-logger.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 
-const ALLOWED_ACTIONS = ['sync-stripe', 'calculate-scores', 'health-check', 'self-monitor', 'generate-insights'] as const
+const ALLOWED_ACTIONS = ['sync-stripe', 'sync-hubspot', 'calculate-scores', 'health-check', 'self-monitor', 'generate-insights'] as const
 type AllowedAction = typeof ALLOWED_ACTIONS[number]
 
 interface ProxyRequest {
@@ -22,7 +22,7 @@ interface ProxyRequest {
 }
 
 // Actions qui nécessitent un organization_id
-const ACTIONS_REQUIRING_ORG: AllowedAction[] = ['sync-stripe', 'calculate-scores']
+const ACTIONS_REQUIRING_ORG: AllowedAction[] = ['sync-stripe', 'sync-hubspot', 'calculate-scores']
 
 Deno.serve(async (req: Request): Promise<Response> => {
   // 1. CORS
@@ -139,6 +139,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
       targetBody = JSON.stringify({
         organization_id: body.organization_id,
         sync_type: body.sync_type || 'incremental',
+        is_manual: body.is_manual ?? true,
+      })
+    } else if (action === 'sync-hubspot') {
+      targetBody = JSON.stringify({
+        organization_id: body.organization_id,
+        sync_type: body.sync_type || 'full_sync',
         is_manual: body.is_manual ?? true,
       })
     } else if (action === 'calculate-scores') {

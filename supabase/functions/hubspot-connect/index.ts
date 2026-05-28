@@ -98,10 +98,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }))
   }
 
-  // Mettre à jour l'organisation
+  // Mettre à jour l'organisation (clé + flag connexion)
   const { error: updateErr } = await supabase
     .from('organizations')
-    .update({ hubspot_connected: true })
+    .update({ hubspot_connected: true, hubspot_api_key: hubspot_api_key })
     .eq('id', orgId)
 
   if (updateErr) {

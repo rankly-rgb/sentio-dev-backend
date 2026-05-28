@@ -14,6 +14,10 @@ verify_jwt = false
 [functions.sync-stripe]
 verify_jwt = true
 
+# sync-hubspot : déclenché par cron ou fire-and-forget depuis hubspot-connect (service_role)
+[functions.sync-hubspot]
+verify_jwt = true
+
 # calculate-scores : déclenché par cron (service_role)
 [functions.calculate-scores]
 verify_jwt = true
