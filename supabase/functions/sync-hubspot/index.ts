@@ -249,8 +249,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // Cron lock (évite les runs concurrents)
   const lockAcquired = await acquireCronLock(supabase, LOCK_KEY, LOCK_TTL_SECONDS)
   if (!lockAcquired) {
-    logger.warn('Sync already running, skipping')
-    return errorResponse('Sync already running', 409)
+    logger.info('Sync already running, skipping')
+    return jsonResponse({ success: true, message: 'Sync already in progress', synced: 0 })
   }
 
   const results: Array<{
