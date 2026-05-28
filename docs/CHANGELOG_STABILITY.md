@@ -4,6 +4,58 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## HubSpot Playbook Dispatch Audit (2026-05-28)
+
+Audit complet de la fonctionnalité de dispatch playbook vers HubSpot. 8 corrections réparties en P0 (bugs bloquants), P1 (performance) et P2 (robustesse).
+
+### Mapping de la séquence HubSpot
+
+```
+POST /playbook-execute (ou cron playbook-scheduler)
+  └─ dispatchAction() [action-dispatcher.ts]
+       └─ getBatchCompanyContacts(ids[]) → POST /crm/v3/associations/company/contact/batch/read
+       └─ enrollInSequence(contactId, sequenceId, senderId)
+            POST /automation/v4/sequences/{sequenceId}/enrollments
+```
+
+Les contacts enrollés apparaissent dans **HubSpot Sales > Sequences** et sur l'onglet Sequences de chaque fiche Contact. Sentio déclenche uniquement l'enrollment — le contenu et le timing des emails sont définis dans la séquence HubSpot.
+
+### P0 — Bugs critiques corrigés
+
+| Bug | Fichier | Correction |
+|-----|---------|------------|
+| `isTransient` ne détectait que les timeouts, pas les 429 | `hubspot-client.ts` | Détecte maintenant 429/502/503 |
+| `enrollInSequence` + `updateCompanyProperties` retournaient `{ success: false }` sur 429 sans retry | `hubspot-client.ts` | Throw sur 429 à l'intérieur du callback `retryWithBackoff` |
+| `send_email` dans playbook standard retournait `completed` sans rien envoyer | `action-dispatcher.ts` | Retourne `failed` avec message explicite |
+
+### P1 — Performance
+
+| Amélioration | Avant | Après |
+|---|---|---|
+| Récupération contacts HubSpot | 1 appel GET par compte (N+1) | `getBatchCompanyContacts` : POST batch, 100 companies/req, 2 appels max pour 200 comptes |
+| Retry rate-limitées | `waitForToken()` avant `retryWithBackoff` seulement (retries non throttlés) | `waitForToken()` à l'intérieur du callback — chaque tentative est rate-limitée |
+| `has_more` pour segments | Toujours `false` si `segment_id` | Correct : `accountIds.length >= MAX_ACCOUNTS_PER_RUN` |
+
+### P2 — Robustesse
+
+| Amélioration | Détail |
+|---|---|
+| Rate limiter | Réduit de 5 à 3/sec — HubSpot standard = 10/sec, marge de 40 % pour instances Deno concurrentes |
+| KPI TOCTOU | Remplacé read-then-write par `supabase.rpc('increment_playbook_kpis')` — `UPDATE SET col = col + N` atomique |
+| Exécution séquentielle | Boucle `for (account)` → `processAccount` closure + `Promise.allSettled` par chunks de 5 dans `playbook-execute` et `playbook-scheduler` |
+
+### Fichiers modifiés
+
+| Fichier | Changements |
+|---------|-------------|
+| `_shared/hubspot-client.ts` | `isTransient` étendu, `waitForToken` dans callbacks, throw 429, `getBatchCompanyContacts` |
+| `_shared/action-dispatcher.ts` | `contactsCache?: Map<string, string[]>` dans `DispatchContext`, case `send_email` explicite |
+| `playbook-execute/index.ts` | Pre-fetch batch, `processAccount` + chunks parallèles, KPI via RPC, `has_more` corrigé |
+| `playbook-scheduler/index.ts` | Pre-fetch batch, `processAccount` + chunks parallèles, KPI via RPC |
+| `migrations/20260528000001_increment_playbook_kpis.sql` | Fonction `increment_playbook_kpis(p_playbook_id, eligible, targeted, reached)` |
+
+---
+
 ## Onboarding Flow Backend v1 (2026-04-30)
 
 Flux d'onboarding complet côté backend : de l'inscription jusqu'au "aha moment" (voir ses premiers comptes à risque). Enrichissement de `onboarding-status` existant + nouvelle Edge Function `onboarding-first-win`.
