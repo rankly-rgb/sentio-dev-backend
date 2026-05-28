@@ -22,6 +22,7 @@ import {
   VALID_EXECUTION_FREQUENCIES,
 } from '../_shared/playbook-engine.ts'
 import { dispatchAction } from '../_shared/action-dispatcher.ts'
+import { getBatchCompanyContacts } from '../_shared/hubspot-client.ts'
 
 const MAX_ACCOUNTS_PER_PLAYBOOK = 200
 const COOLDOWN_HOURS = 24
@@ -186,7 +187,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         const actions = (playbook.actions as PlaybookAction[]).sort((a, b) => a.order - b.order)
 
-        for (const account of finalAccounts) {
+        // Pre-fetch contacts HubSpot en batch pour éviter N+1
+        let hubspotContactsCache: Map<string, string[]> = new Map()
+        if (actions.some((a) => a.type === 'hubspot_enroll_sequence')) {
+          const companyIds = (finalAccounts as AccountData[])
+            .map((a) => a.hubspot_company_id)
+            .filter((id): id is string => !!id)
+          if (companyIds.length > 0) {
+            hubspotContactsCache = await getBatchCompanyContacts(companyIds)
+          }
+        }
+
+        // Traitement d'un compte — retourne true si completed
+        const processAccount = async (account: Record<string, unknown>): Promise<boolean> => {
           const acc = account as AccountData
 
           const { data: execution, error: execError } = await supabase
@@ -210,11 +223,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
           if (execError || !execution) {
             logger.error('Failed to create execution', { account_id: acc.id, error: execError?.message })
-            errors++
-            continue
+            return false
           }
 
-          // Process actions sequentially (order matters)
           const actionResults: ActionResult[] = []
           let completedSteps = 0
           let failedSteps = 0
@@ -224,6 +235,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
               playbookId,
               executionId: execution.id,
               organizationId: orgId,
+              contactsCache: hubspotContactsCache,
             }, supabase)
             actionResults.push(result)
             if (result.status === 'completed') completedSteps++
@@ -247,24 +259,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
             })
             .eq('id', execution.id)
 
-          if (finalStatus === 'completed') accountsExecuted++
-          else errors++
-
           syncLogger.increment('records_processed')
+          return finalStatus === 'completed'
         }
 
-        // ── Update playbook KPIs + schedule ───────────────
+        // Exécution en chunks parallèles (5 comptes simultanés)
+        const ACCOUNT_CONCURRENCY = 5
+        for (let i = 0; i < finalAccounts.length; i += ACCOUNT_CONCURRENCY) {
+          const chunk = finalAccounts.slice(i, i + ACCOUNT_CONCURRENCY)
+          const chunkResults = await Promise.allSettled(chunk.map(processAccount))
+          for (const r of chunkResults) {
+            if (r.status === 'fulfilled' && r.value) accountsExecuted++
+            else errors++
+          }
+        }
 
-        await supabase
-          .from('playbooks')
-          .update({
-            accounts_eligible: (playbook.accounts_eligible ?? 0) + eligible.length,
-            accounts_targeted: (playbook.accounts_targeted ?? 0) + finalAccounts.length,
-            accounts_reached: (playbook.accounts_reached ?? 0) + accountsExecuted,
-            execution_count: (playbook.execution_count ?? 0) + 1,
-            last_executed_at: new Date().toISOString(),
-          })
-          .eq('id', playbookId)
+        // ── Update playbook KPIs (atomic pour éviter TOCTOU) ─
+
+        await supabase.rpc('increment_playbook_kpis', {
+          p_playbook_id: playbookId,
+          p_accounts_eligible: eligible.length,
+          p_accounts_targeted: finalAccounts.length,
+          p_accounts_reached: accountsExecuted,
+        })
 
         await updateNextSchedule(supabase, playbook)
         await syncLogger.complete({

@@ -20,6 +20,7 @@ import {
 } from '../_shared/playbook-engine.ts'
 import { executeWorkflowStep } from '../_shared/workflow-executor.ts'
 import { dispatchAction } from '../_shared/action-dispatcher.ts'
+import { getBatchCompanyContacts } from '../_shared/hubspot-client.ts'
 
 const MAX_ACCOUNTS_PER_RUN = 200
 
@@ -209,7 +210,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
-  for (const account of finalAccounts) {
+  // Pre-fetch contacts HubSpot en batch pour éviter N+1 (uniquement si des actions le nécessitent)
+  let hubspotContactsCache: Map<string, string[]> = new Map()
+  if (!isWorkflow && actions.some((a) => a.type === 'hubspot_enroll_sequence')) {
+    const companyIds = (finalAccounts as AccountData[])
+      .map((a) => a.hubspot_company_id)
+      .filter((id): id is string => !!id)
+    if (companyIds.length > 0) {
+      hubspotContactsCache = await getBatchCompanyContacts(companyIds)
+    }
+  }
+
+  // Traitement d'un compte — retourne le résultat ou null si le compte est ignoré
+  const processAccount = async (account: Record<string, unknown>): Promise<typeof executionResults[number] | null> => {
     const acc = account as AccountData
     let executionId: string | null = null
 
@@ -219,14 +232,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
         const firstStep = steps[0]
         if (!firstStep) {
           logger.error('Workflow has no steps', { account_id: acc.id })
-          continue
+          return null
         }
 
-        // Calculate next step due date
         const nextStep = steps.length > 1 ? steps[1] : null
         const nextStepDueAt = nextStep ? calculateStepDueDate(nextStep.delay_days) : null
 
-        // Create execution record for workflow
         const { data: execution, error: execError } = await supabase
           .from('playbook_executions')
           .insert({
@@ -250,16 +261,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
           .single()
 
         if (execError || !execution) {
-          logger.error('Failed to create workflow execution', {
-            account_id: acc.id,
-            error: execError?.message,
-          })
-          continue
+          logger.error('Failed to create workflow execution', { account_id: acc.id, error: execError?.message })
+          return null
         }
 
         executionId = execution.id
 
-        // Execute step 1 immediately
         const stepResult = await executeWorkflowStep(firstStep, acc, {
           playbookId: body.playbook_id,
           executionId: execution.id,
@@ -289,21 +296,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
           updatePayload.completed_at = new Date().toISOString()
         }
 
-        await supabase
-          .from('playbook_executions')
-          .update(updatePayload)
-          .eq('id', execution.id)
+        await supabase.from('playbook_executions').update(updatePayload).eq('id', execution.id)
 
-        executionResults.push({
+        return {
           execution_id: execution.id,
           account_id: acc.id,
           status: workflowDone ? (isCompleted ? 'completed' : 'failed') : 'running',
           steps: totalSteps,
           completed: isCompleted ? 1 : 0,
           failed: isCompleted ? 0 : 1,
-        })
+        }
       } else {
-        // ── Standard playbook execution (unchanged) ──
+        // ── Standard playbook execution ──
         const { data: execution, error: execError } = await supabase
           .from('playbook_executions')
           .insert({
@@ -324,16 +328,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
           .single()
 
         if (execError || !execution) {
-          logger.error('Failed to create execution record', {
-            account_id: acc.id,
-            error: execError?.message,
-          })
-          continue
+          logger.error('Failed to create execution record', { account_id: acc.id, error: execError?.message })
+          return null
         }
 
         executionId = execution.id
 
-        // Process actions sequentially (order matters)
         const actionResults: ActionResult[] = []
         let completedSteps = 0
         let failedSteps = 0
@@ -343,19 +343,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
             playbookId: body.playbook_id,
             executionId: execution.id,
             organizationId: body.organization_id,
+            contactsCache: hubspotContactsCache,
           }, supabase)
           actionResults.push(result)
           if (result.status === 'completed') completedSteps++
           else if (result.status === 'failed') failedSteps++
         }
 
-        // Determine final status
         let finalStatus: string
         if (failedSteps === 0) finalStatus = 'completed'
         else if (completedSteps === 0) finalStatus = 'failed'
         else finalStatus = 'partially_completed'
 
-        // Update execution record
         const { error: updateError } = await supabase
           .from('playbook_executions')
           .update({
@@ -369,30 +368,23 @@ Deno.serve(async (req: Request): Promise<Response> => {
           .eq('id', execution.id)
 
         if (updateError) {
-          logger.error('Failed to update execution record', {
-            execution_id: execution.id,
-            error: updateError.message,
-          })
+          logger.error('Failed to update execution record', { execution_id: execution.id, error: updateError.message })
         }
 
-        executionResults.push({
+        return {
           execution_id: execution.id,
           account_id: acc.id,
           status: finalStatus,
           steps: actions.length,
           completed: completedSteps,
           failed: failedSteps,
-        })
+        }
       }
     } catch (err) {
-      // Mark execution as failed if it was created
       if (executionId) {
         await supabase
           .from('playbook_executions')
-          .update({
-            execution_status: 'failed',
-            completed_at: new Date().toISOString(),
-          })
+          .update({ execution_status: 'failed', completed_at: new Date().toISOString() })
           .eq('id', executionId)
       }
       logger.error('Execution failed for account', {
@@ -400,32 +392,40 @@ Deno.serve(async (req: Request): Promise<Response> => {
         execution_id: executionId,
         error: err instanceof Error ? err.message : String(err),
       })
-      executionResults.push({
+      return {
         execution_id: executionId ?? 'unknown',
         account_id: acc.id,
         status: 'failed',
         steps: totalSteps,
         completed: 0,
         failed: totalSteps,
-      })
+      }
     }
   }
 
-  // ── Update playbook KPIs ────────────────────────────────
+  // Exécution en chunks parallèles (5 comptes simultanés)
+  const ACCOUNT_CONCURRENCY = 5
+  for (let i = 0; i < finalAccounts.length; i += ACCOUNT_CONCURRENCY) {
+    const chunk = finalAccounts.slice(i, i + ACCOUNT_CONCURRENCY)
+    const chunkResults = await Promise.allSettled(chunk.map(processAccount))
+    for (const r of chunkResults) {
+      if (r.status === 'fulfilled' && r.value !== null) {
+        executionResults.push(r.value)
+      }
+    }
+  }
+
+  // ── Update playbook KPIs (atomic pour éviter TOCTOU) ───────
 
   const accountsTargeted = finalAccounts.length
   const accountsReached = executionResults.filter((r) => r.status !== 'failed').length
 
-  const { error: kpiError } = await supabase
-    .from('playbooks')
-    .update({
-      accounts_eligible: (playbook.accounts_eligible ?? 0) + eligibleAccounts.length,
-      accounts_targeted: (playbook.accounts_targeted ?? 0) + accountsTargeted,
-      accounts_reached: (playbook.accounts_reached ?? 0) + accountsReached,
-      execution_count: (playbook.execution_count ?? 0) + 1,
-      last_executed_at: new Date().toISOString(),
-    })
-    .eq('id', body.playbook_id)
+  const { error: kpiError } = await supabase.rpc('increment_playbook_kpis', {
+    p_playbook_id: body.playbook_id,
+    p_accounts_eligible: eligibleAccounts.length,
+    p_accounts_targeted: accountsTargeted,
+    p_accounts_reached: accountsReached,
+  })
 
   if (kpiError) {
     logger.error('Failed to update playbook KPIs', { error: kpiError.message })
@@ -446,7 +446,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     failed: failedCount,
   })
 
-  const hasMore = (body.account_ids?.length ?? 0) > MAX_ACCOUNTS_PER_RUN
+  const hasMore = body.account_ids
+    ? body.account_ids.length > MAX_ACCOUNTS_PER_RUN
+    : accountIds.length >= MAX_ACCOUNTS_PER_RUN
 
   return jsonResponse({
     success: true,

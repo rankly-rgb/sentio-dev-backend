@@ -45,7 +45,8 @@ class RateLimiter {
   }
 }
 
-export const hubspotRateLimiter = new RateLimiter(5)
+// 3/sec (vs. HubSpot standard 10/sec) pour laisser de la marge si plusieurs instances Deno tournent en parallèle
+export const hubspotRateLimiter = new RateLimiter(3)
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -71,7 +72,9 @@ function hubspotHeaders(): Record<string, string> {
 }
 
 function isTransient(err: unknown): boolean {
-  return err instanceof Error && err.message.includes('timed out')
+  if (!(err instanceof Error)) return false
+  const msg = err.message
+  return msg.includes('timed out') || msg.includes('429') || msg.includes('503') || msg.includes('502')
 }
 
 // ── API calls ────────────────────────────────────────────────
@@ -81,15 +84,17 @@ function isTransient(err: unknown): boolean {
  * Retourne [] si la company n'existe pas (404).
  */
 export async function getCompanyContacts(companyId: string): Promise<string[]> {
-  await hubspotRateLimiter.waitForToken()
-
   const response = await retryWithBackoff(
-    () =>
-      fetchWithTimeout(
+    async () => {
+      await hubspotRateLimiter.waitForToken()
+      const res = await fetchWithTimeout(
         `${HUBSPOT_BASE_URL}/crm/v3/objects/companies/${companyId}/associations/contacts`,
         { headers: hubspotHeaders() },
         TIMEOUT_MS,
-      ),
+      )
+      if (res.status === 429) throw new Error('HubSpot rate limit (429)')
+      return res
+    },
     { maxRetries: 2, retryOn: isTransient },
   )
 
@@ -103,6 +108,62 @@ export async function getCompanyContacts(companyId: string): Promise<string[]> {
 }
 
 /**
+ * Récupère les contact IDs HubSpot pour un lot de companies en 1-2 appels API.
+ * Utilise POST /crm/v3/associations/company/contact/batch/read (max 100 par requête).
+ * Les companies absentes de la Map retournée n'ont pas pu être récupérées → fallback individuel.
+ */
+export async function getBatchCompanyContacts(
+  companyIds: string[],
+): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>()
+  if (companyIds.length === 0) return result
+
+  const BATCH_SIZE = 100
+
+  for (let i = 0; i < companyIds.length; i += BATCH_SIZE) {
+    const chunk = companyIds.slice(i, i + BATCH_SIZE)
+
+    try {
+      const response = await retryWithBackoff(
+        async () => {
+          await hubspotRateLimiter.waitForToken()
+          const res = await fetchWithTimeout(
+            `${HUBSPOT_BASE_URL}/crm/v3/associations/company/contact/batch/read`,
+            {
+              method: 'POST',
+              headers: hubspotHeaders(),
+              body: JSON.stringify({ inputs: chunk.map((id) => ({ id })) }),
+            },
+            TIMEOUT_MS,
+          )
+          if (res.status === 429) throw new Error('HubSpot rate limit (429)')
+          return res
+        },
+        { maxRetries: 2, retryOn: isTransient },
+      )
+
+      if (!response.ok) continue
+
+      const data = await response.json() as {
+        results: Array<{ from: { id: string }; to: Array<{ id: string }> }>
+      }
+
+      // Toutes les companies du chunk sont marquées (0 contacts par défaut)
+      for (const id of chunk) result.set(id, [])
+
+      // Surcharger avec les contacts réels
+      for (const entry of data.results ?? []) {
+        result.set(entry.from.id, (entry.to ?? []).map((t) => t.id))
+      }
+    } catch {
+      // Chunk échoué — les entrées restent absentes → fallback individuel dans dispatchAction
+    }
+  }
+
+  return result
+}
+
+/**
  * Enrôle un contact dans une séquence HubSpot.
  * senderId = HubSpot user ID de l'expéditeur (requis par l'API).
  */
@@ -111,12 +172,11 @@ export async function enrollInSequence(
   sequenceId: string,
   senderId: string,
 ): Promise<HubSpotResult> {
-  await hubspotRateLimiter.waitForToken()
-
   try {
     const response = await retryWithBackoff(
-      () =>
-        fetchWithTimeout(
+      async () => {
+        await hubspotRateLimiter.waitForToken()
+        const res = await fetchWithTimeout(
           `${HUBSPOT_BASE_URL}/automation/v4/sequences/${sequenceId}/enrollments`,
           {
             method: 'POST',
@@ -124,7 +184,10 @@ export async function enrollInSequence(
             body: JSON.stringify({ contactId, senderId }),
           },
           TIMEOUT_MS,
-        ),
+        )
+        if (res.status === 429) throw new Error('HubSpot rate limit (429)')
+        return res
+      },
       { maxRetries: 2, retryOn: isTransient },
     )
 
@@ -147,12 +210,11 @@ export async function updateCompanyProperties(
   companyId: string,
   properties: Record<string, unknown>,
 ): Promise<HubSpotResult> {
-  await hubspotRateLimiter.waitForToken()
-
   try {
     const response = await retryWithBackoff(
-      () =>
-        fetchWithTimeout(
+      async () => {
+        await hubspotRateLimiter.waitForToken()
+        const res = await fetchWithTimeout(
           `${HUBSPOT_BASE_URL}/crm/v3/objects/companies/${companyId}`,
           {
             method: 'PATCH',
@@ -160,7 +222,10 @@ export async function updateCompanyProperties(
             body: JSON.stringify({ properties }),
           },
           TIMEOUT_MS,
-        ),
+        )
+        if (res.status === 429) throw new Error('HubSpot rate limit (429)')
+        return res
+      },
       { maxRetries: 2, retryOn: isTransient },
     )
 

@@ -18,6 +18,8 @@ interface DispatchContext {
   playbookId: string
   executionId: string
   organizationId: string
+  /** Cache pré-rempli par getBatchCompanyContacts. Absent du Map = fallback individuel. */
+  contactsCache?: Map<string, string[]>
 }
 
 /**
@@ -62,7 +64,11 @@ export async function dispatchAction(
           }
         }
 
-        const contactIds = await getCompanyContacts(account.hubspot_company_id)
+        // Utiliser le cache batch si disponible, sinon fallback individuel
+        const contactIds = context.contactsCache?.has(account.hubspot_company_id)
+          ? context.contactsCache.get(account.hubspot_company_id)!
+          : await getCompanyContacts(account.hubspot_company_id)
+
         if (contactIds.length === 0) {
           return {
             ...base,
@@ -150,6 +156,15 @@ export async function dispatchAction(
             : `Failed to update company: ${result.error ?? `HTTP ${result.status}`}`,
         }
       }
+
+      case 'send_email':
+        // send_email n'est supporté que dans les workflow playbooks (via executeWorkflowStep)
+        // Dans un playbook standard il n'y a pas de contexte CSM email — échouer explicitement
+        return {
+          ...base,
+          status: 'failed',
+          message: 'send_email is only supported in workflow playbooks, not standard playbooks',
+        }
 
       default:
         // Autres types d'actions (V1 : log-only, pas de dispatch externe)
