@@ -14,9 +14,10 @@ verify_jwt = false
 [functions.sync-stripe]
 verify_jwt = true
 
-# sync-hubspot : déclenché par cron ou fire-and-forget depuis hubspot-connect (service_role)
+# sync-hubspot : appelé depuis admin-proxy ou hubspot-connect (service_role Bearer)
+# verify_jwt=false : admin-proxy fait déjà l'auth ES256 en amont
 [functions.sync-hubspot]
-verify_jwt = true
+verify_jwt = false
 
 # calculate-scores : déclenché par cron (service_role)
 [functions.calculate-scores]
