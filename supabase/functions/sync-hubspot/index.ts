@@ -217,28 +217,38 @@ Deno.serve(async (req: Request): Promise<Response> => {
     organization_id: body.organization_id,
   })
 
+  logger.info('sync-hubspot invoked', { organization_id: body.organization_id ?? null, sync_type: body.sync_type ?? null })
+
   // Résoudre la ou les orgs à synchroniser
   let orgsToSync: Array<{ id: string; hubspot_api_key: string }> = []
 
-  if (body.organization_id) {
-    const { data } = await supabase
-      .from('organizations')
-      .select('id, hubspot_api_key')
-      .eq('id', body.organization_id)
-      .not('hubspot_api_key', 'is', null)
-      .maybeSingle()
+  try {
+    if (body.organization_id) {
+      const { data, error } = await supabase
+        .from('organizations')
+        .select('id, hubspot_api_key')
+        .eq('id', body.organization_id)
+        .not('hubspot_api_key', 'is', null)
+        .maybeSingle()
 
-    if (data?.hubspot_api_key) {
-      orgsToSync = [{ id: data.id, hubspot_api_key: data.hubspot_api_key }]
+      if (error) logger.warn('Org query error', { error: error.message })
+      if (data?.hubspot_api_key) {
+        orgsToSync = [{ id: data.id, hubspot_api_key: data.hubspot_api_key }]
+      }
+    } else {
+      const { data, error } = await supabase
+        .from('organizations')
+        .select('id, hubspot_api_key')
+        .not('hubspot_api_key', 'is', null)
+        .eq('hubspot_connected', true)
+
+      if (error) logger.warn('Orgs query error', { error: error.message })
+      orgsToSync = (data ?? []).filter((o) => o.hubspot_api_key)
     }
-  } else {
-    const { data } = await supabase
-      .from('organizations')
-      .select('id, hubspot_api_key')
-      .not('hubspot_api_key', 'is', null)
-      .eq('hubspot_connected', true)
-
-    orgsToSync = (data ?? []).filter((o) => o.hubspot_api_key)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    logger.error('Org resolution failed', { error: msg })
+    return errorResponse(`Failed to resolve organizations: ${msg}`, 500)
   }
 
   if (orgsToSync.length === 0) {
@@ -247,7 +257,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   // Cron lock (évite les runs concurrents)
-  const lockAcquired = await acquireCronLock(supabase, LOCK_KEY, LOCK_TTL_SECONDS)
+  let lockAcquired = false
+  try {
+    lockAcquired = await acquireCronLock(supabase, LOCK_KEY, LOCK_TTL_SECONDS)
+  } catch (err) {
+    logger.warn('Cron lock failed', { error: String(err) })
+    // Continue without lock rather than crashing
+    lockAcquired = true
+  }
   if (!lockAcquired) {
     logger.info('Sync already running, skipping')
     return jsonResponse({ success: true, message: 'Sync already in progress', synced: 0 })
@@ -267,7 +284,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         supabase,
         organizationId: org.id,
         syncSource: 'hubspot',
-        syncType: body.sync_type === 'full_sync' ? 'full' : 'incremental',
+        syncType: body.sync_type === 'full_sync' ? 'full_sync' : 'incremental',
         triggeredBy: body.triggered_by === 'onboarding' ? 'manual' : (body.is_manual ? 'manual' : 'cron'),
       })
       await syncLogger.start()
