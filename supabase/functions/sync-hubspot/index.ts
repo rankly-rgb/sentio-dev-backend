@@ -19,6 +19,7 @@ import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
 import { hubspotRateLimiter } from '../_shared/hubspot-client.ts'
 import { mapHubSpotProperties, type HubSpotCompanyProperties } from '../_shared/hubspot-sync-helpers.ts'
+import { getVaultSecret } from '../_shared/vault.ts'
 
 const HUBSPOT_BASE_URL = 'https://api.hubapi.com'
 const PAGE_SIZE = 100
@@ -106,6 +107,46 @@ async function fetchAllCompanies(apiKey: string): Promise<HubSpotCompany[]> {
   }
 
   return all
+}
+
+// ── Credential resolution ────────────────────────────────────
+
+/**
+ * Résout la clé API HubSpot pour une org.
+ * Priorité :
+ *   1. organization_integrations.vault_access_token_id (Vault, méthode OAuth / api_key)
+ *   2. organizations.hubspot_api_key (colonne directe — connexion via hubspot-connect legacy)
+ *   3. Variable d'env HUBSPOT_API_KEY (fallback global cron uniquement)
+ */
+async function resolveHubSpotApiKey(
+  supabase: SupabaseClient,
+  orgId: string,
+): Promise<string | null> {
+  // 1. organization_integrations (Vault)
+  const { data: integration } = await supabase
+    .from('organization_integrations')
+    .select('vault_access_token_id')
+    .eq('organization_id', orgId)
+    .eq('provider', 'hubspot')
+    .eq('status', 'active')
+    .maybeSingle()
+
+  if (integration?.vault_access_token_id) {
+    const key = await getVaultSecret(supabase, integration.vault_access_token_id)
+    if (key) return key
+  }
+
+  // 2. organizations.hubspot_api_key (connexion legacy via hubspot-connect)
+  const { data: org } = await supabase
+    .from('organizations')
+    .select('hubspot_api_key')
+    .eq('id', orgId)
+    .maybeSingle()
+
+  if (org?.hubspot_api_key) return org.hubspot_api_key
+
+  // 3. Variable d'env globale (cron sans org_id)
+  return Deno.env.get('HUBSPOT_API_KEY') ?? null
 }
 
 // ── Sync logic ───────────────────────────────────────────────
@@ -224,26 +265,43 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   try {
     if (body.organization_id) {
-      const { data, error } = await supabase
-        .from('organizations')
-        .select('id, hubspot_api_key')
-        .eq('id', body.organization_id)
-        .not('hubspot_api_key', 'is', null)
-        .maybeSingle()
-
-      if (error) logger.warn('Org query error', { error: error.message })
-      if (data?.hubspot_api_key) {
-        orgsToSync = [{ id: data.id, hubspot_api_key: data.hubspot_api_key }]
+      const apiKey = await resolveHubSpotApiKey(supabase, body.organization_id)
+      if (apiKey) {
+        orgsToSync = [{ id: body.organization_id, hubspot_api_key: apiKey }]
+      } else {
+        logger.warn('No HubSpot credentials found for org', { organization_id: body.organization_id })
       }
     } else {
-      const { data, error } = await supabase
-        .from('organizations')
-        .select('id, hubspot_api_key')
-        .not('hubspot_api_key', 'is', null)
-        .eq('hubspot_connected', true)
+      // Cron : récupérer toutes les orgs avec HubSpot actif
+      // Priorité : organization_integrations (Vault) puis organizations.hubspot_api_key
+      const [{ data: integratedOrgs }, { data: legacyOrgs }] = await Promise.all([
+        supabase
+          .from('organization_integrations')
+          .select('organization_id, vault_access_token_id')
+          .eq('provider', 'hubspot')
+          .eq('status', 'active')
+          .not('vault_access_token_id', 'is', null),
+        supabase
+          .from('organizations')
+          .select('id, hubspot_api_key')
+          .not('hubspot_api_key', 'is', null)
+          .eq('hubspot_connected', true),
+      ])
 
-      if (error) logger.warn('Orgs query error', { error: error.message })
-      orgsToSync = (data ?? []).filter((o) => o.hubspot_api_key)
+      // Merge : Vault en priorité
+      const seen = new Set<string>()
+      for (const i of integratedOrgs ?? []) {
+        const key = await getVaultSecret(supabase, i.vault_access_token_id)
+        if (key) {
+          seen.add(i.organization_id)
+          orgsToSync.push({ id: i.organization_id, hubspot_api_key: key })
+        }
+      }
+      for (const o of legacyOrgs ?? []) {
+        if (!seen.has(o.id) && o.hubspot_api_key) {
+          orgsToSync.push({ id: o.id, hubspot_api_key: o.hubspot_api_key })
+        }
+      }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
