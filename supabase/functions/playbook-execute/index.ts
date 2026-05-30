@@ -21,6 +21,7 @@ import {
 import { executeWorkflowStep } from '../_shared/workflow-executor.ts'
 import { dispatchAction } from '../_shared/action-dispatcher.ts'
 import { getBatchCompanyContacts } from '../_shared/hubspot-client.ts'
+import { resolveHubSpotApiKey } from '../_shared/vault.ts'
 
 const MAX_ACCOUNTS_PER_RUN = 200
 
@@ -210,6 +211,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
+  // Résoudre la clé HubSpot depuis Vault (nécessaire pour enrollment et update company)
+  let hubspotApiKey: string | null = null
+  const needsHubspot = !isWorkflow && actions.some(
+    (a) => a.type === 'hubspot_enroll_sequence' || a.type === 'hubspot_update_company',
+  )
+  if (needsHubspot) {
+    hubspotApiKey = await resolveHubSpotApiKey(supabase, body.organization_id)
+    if (!hubspotApiKey) {
+      logger.warn('HubSpot API key not found — hubspot actions will fail', { organization_id: body.organization_id })
+    }
+  }
+
   // Pre-fetch contacts HubSpot en batch pour éviter N+1 (uniquement si des actions le nécessitent)
   let hubspotContactsCache: Map<string, string[]> = new Map()
   if (!isWorkflow && actions.some((a) => a.type === 'hubspot_enroll_sequence')) {
@@ -217,7 +230,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .map((a) => a.hubspot_company_id)
       .filter((id): id is string => !!id)
     if (companyIds.length > 0) {
-      hubspotContactsCache = await getBatchCompanyContacts(companyIds)
+      hubspotContactsCache = await getBatchCompanyContacts(companyIds, hubspotApiKey ?? undefined)
     }
   }
 
@@ -344,6 +357,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             executionId: execution.id,
             organizationId: body.organization_id,
             contactsCache: hubspotContactsCache,
+            hubspotApiKey: hubspotApiKey ?? undefined,
           }, supabase)
           actionResults.push(result)
           if (result.status === 'completed') completedSteps++

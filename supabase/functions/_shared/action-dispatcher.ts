@@ -20,6 +20,8 @@ interface DispatchContext {
   organizationId: string
   /** Cache pré-rempli par getBatchCompanyContacts. Absent du Map = fallback individuel. */
   contactsCache?: Map<string, string[]>
+  /** Clé API HubSpot résolue depuis Vault. Fallback sur env HUBSPOT_API_KEY si absent. */
+  hubspotApiKey?: string
 }
 
 /**
@@ -67,7 +69,7 @@ export async function dispatchAction(
         // Utiliser le cache batch si disponible, sinon fallback individuel
         const contactIds = context.contactsCache?.has(account.hubspot_company_id)
           ? context.contactsCache.get(account.hubspot_company_id)!
-          : await getCompanyContacts(account.hubspot_company_id)
+          : await getCompanyContacts(account.hubspot_company_id, context.hubspotApiKey)
 
         if (contactIds.length === 0) {
           return {
@@ -79,7 +81,7 @@ export async function dispatchAction(
 
         const toEnroll = contactIds.slice(0, MAX_CONTACTS_PER_COMPANY)
         const results = await Promise.allSettled(
-          toEnroll.map((cid) => enrollInSequence(cid, sequenceId, senderId)),
+          toEnroll.map((cid) => enrollInSequence(cid, sequenceId, senderId, context.hubspotApiKey)),
         )
 
         const failures = results.filter(
@@ -132,7 +134,7 @@ export async function dispatchAction(
           }
         }
 
-        const result = await updateCompanyProperties(account.hubspot_company_id, properties)
+        const result = await updateCompanyProperties(account.hubspot_company_id, properties, context.hubspotApiKey)
 
         if (!result.success) {
           await writeToDLQ(supabase, {

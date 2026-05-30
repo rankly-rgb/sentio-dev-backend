@@ -80,10 +80,10 @@ describe('dispatchAction — hubspot_enroll_sequence', () => {
 
     expect(result.status).toBe('completed')
     expect(result.message).toContain('2/2')
-    expect(getCompanyContacts).toHaveBeenCalledWith('hs_company_456')
+    expect(getCompanyContacts).toHaveBeenCalledWith('hs_company_456', undefined)
     expect(enrollInSequence).toHaveBeenCalledTimes(2)
-    expect(enrollInSequence).toHaveBeenCalledWith('c1', 'seq-1', 'user-1')
-    expect(enrollInSequence).toHaveBeenCalledWith('c2', 'seq-1', 'user-1')
+    expect(enrollInSequence).toHaveBeenCalledWith('c1', 'seq-1', 'user-1', undefined)
+    expect(enrollInSequence).toHaveBeenCalledWith('c2', 'seq-1', 'user-1', undefined)
   })
 
   it('returns failed when config is missing sequence_id', async () => {
@@ -196,7 +196,7 @@ describe('dispatchAction — hubspot_update_company', () => {
     expect(updateCompanyProperties).toHaveBeenCalledWith('hs_company_456', {
       hs_lead_status: 'at_risk',
       sentio_churn_risk: '72',
-    })
+    }, undefined)
   })
 
   it('returns failed when properties config is missing', async () => {

@@ -23,6 +23,7 @@ import {
 } from '../_shared/playbook-engine.ts'
 import { dispatchAction } from '../_shared/action-dispatcher.ts'
 import { getBatchCompanyContacts } from '../_shared/hubspot-client.ts'
+import { resolveHubSpotApiKey } from '../_shared/vault.ts'
 
 const MAX_ACCOUNTS_PER_PLAYBOOK = 200
 const COOLDOWN_HOURS = 24
@@ -187,6 +188,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         const actions = (playbook.actions as PlaybookAction[]).sort((a, b) => a.order - b.order)
 
+        // Résoudre la clé HubSpot depuis Vault
+        let hubspotApiKey: string | null = null
+        const needsHubspot = actions.some(
+          (a) => a.type === 'hubspot_enroll_sequence' || a.type === 'hubspot_update_company',
+        )
+        if (needsHubspot) {
+          hubspotApiKey = await resolveHubSpotApiKey(supabase, orgId)
+          if (!hubspotApiKey) {
+            logger.warn('HubSpot API key not found — hubspot actions will fail', { organization_id: orgId })
+          }
+        }
+
         // Pre-fetch contacts HubSpot en batch pour éviter N+1
         let hubspotContactsCache: Map<string, string[]> = new Map()
         if (actions.some((a) => a.type === 'hubspot_enroll_sequence')) {
@@ -194,7 +207,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             .map((a) => a.hubspot_company_id)
             .filter((id): id is string => !!id)
           if (companyIds.length > 0) {
-            hubspotContactsCache = await getBatchCompanyContacts(companyIds)
+            hubspotContactsCache = await getBatchCompanyContacts(companyIds, hubspotApiKey ?? undefined)
           }
         }
 
@@ -236,6 +249,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
               executionId: execution.id,
               organizationId: orgId,
               contactsCache: hubspotContactsCache,
+              hubspotApiKey: hubspotApiKey ?? undefined,
             }, supabase)
             actionResults.push(result)
             if (result.status === 'completed') completedSteps++

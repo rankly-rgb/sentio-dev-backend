@@ -58,15 +58,15 @@ export interface HubSpotResult {
 
 // ── Helpers ──────────────────────────────────────────────────
 
-function getApiKey(): string {
-  const key = Deno.env.get('HUBSPOT_API_KEY')
+function getApiKey(override?: string): string {
+  const key = override ?? Deno.env.get('HUBSPOT_API_KEY')
   if (!key) throw new Error('HUBSPOT_API_KEY not configured')
   return key
 }
 
-function hubspotHeaders(): Record<string, string> {
+function hubspotHeaders(apiKey?: string): Record<string, string> {
   return {
-    'Authorization': `Bearer ${getApiKey()}`,
+    'Authorization': `Bearer ${getApiKey(apiKey)}`,
     'Content-Type': 'application/json',
   }
 }
@@ -83,13 +83,13 @@ function isTransient(err: unknown): boolean {
  * Récupère les contact IDs HubSpot associés à une company.
  * Retourne [] si la company n'existe pas (404).
  */
-export async function getCompanyContacts(companyId: string): Promise<string[]> {
+export async function getCompanyContacts(companyId: string, apiKey?: string): Promise<string[]> {
   const response = await retryWithBackoff(
     async () => {
       await hubspotRateLimiter.waitForToken()
       const res = await fetchWithTimeout(
         `${HUBSPOT_BASE_URL}/crm/v3/objects/companies/${companyId}/associations/contacts`,
-        { headers: hubspotHeaders() },
+        { headers: hubspotHeaders(apiKey) },
         TIMEOUT_MS,
       )
       if (res.status === 429) throw new Error('HubSpot rate limit (429)')
@@ -114,6 +114,7 @@ export async function getCompanyContacts(companyId: string): Promise<string[]> {
  */
 export async function getBatchCompanyContacts(
   companyIds: string[],
+  apiKey?: string,
 ): Promise<Map<string, string[]>> {
   const result = new Map<string, string[]>()
   if (companyIds.length === 0) return result
@@ -131,7 +132,7 @@ export async function getBatchCompanyContacts(
             `${HUBSPOT_BASE_URL}/crm/v3/associations/company/contact/batch/read`,
             {
               method: 'POST',
-              headers: hubspotHeaders(),
+              headers: hubspotHeaders(apiKey),
               body: JSON.stringify({ inputs: chunk.map((id) => ({ id })) }),
             },
             TIMEOUT_MS,
@@ -171,6 +172,7 @@ export async function enrollInSequence(
   contactId: string,
   sequenceId: string,
   senderId: string,
+  apiKey?: string,
 ): Promise<HubSpotResult> {
   try {
     const response = await retryWithBackoff(
@@ -180,7 +182,7 @@ export async function enrollInSequence(
           `${HUBSPOT_BASE_URL}/automation/v4/sequences/${sequenceId}/enrollments`,
           {
             method: 'POST',
-            headers: hubspotHeaders(),
+            headers: hubspotHeaders(apiKey),
             body: JSON.stringify({ contactId, senderId }),
           },
           TIMEOUT_MS,
@@ -209,6 +211,7 @@ export async function enrollInSequence(
 export async function updateCompanyProperties(
   companyId: string,
   properties: Record<string, unknown>,
+  apiKey?: string,
 ): Promise<HubSpotResult> {
   try {
     const response = await retryWithBackoff(
@@ -218,7 +221,7 @@ export async function updateCompanyProperties(
           `${HUBSPOT_BASE_URL}/crm/v3/objects/companies/${companyId}`,
           {
             method: 'PATCH',
-            headers: hubspotHeaders(),
+            headers: hubspotHeaders(apiKey),
             body: JSON.stringify({ properties }),
           },
           TIMEOUT_MS,

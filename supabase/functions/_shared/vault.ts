@@ -11,6 +11,44 @@ import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
  * Lit un secret depuis Supabase Vault (vue déchiffrée).
  * Retourne null si le secret n'existe pas.
  */
+/**
+ * Résout la clé API HubSpot pour une org donnée.
+ * Priorité :
+ *   1. organization_integrations.vault_access_token_id  (Vault — OAuth / api_key via integration-oauth)
+ *   2. organizations.hubspot_api_key                    (colonne directe — flow legacy hubspot-connect)
+ *   3. Variable d'env HUBSPOT_API_KEY                   (fallback global — cron sans org_id)
+ */
+export async function resolveHubSpotApiKey(
+  supabase: SupabaseClient,
+  organizationId: string,
+): Promise<string | null> {
+  // 1. Vault via organization_integrations
+  const { data: integration } = await supabase
+    .from('organization_integrations')
+    .select('vault_access_token_id')
+    .eq('organization_id', organizationId)
+    .eq('provider', 'hubspot')
+    .eq('status', 'active')
+    .maybeSingle()
+
+  if (integration?.vault_access_token_id) {
+    const key = await getVaultSecret(supabase, integration.vault_access_token_id)
+    if (key) return key
+  }
+
+  // 2. Colonne directe (connexion legacy via hubspot-connect)
+  const { data: org } = await supabase
+    .from('organizations')
+    .select('hubspot_api_key')
+    .eq('id', organizationId)
+    .maybeSingle()
+
+  if (org?.hubspot_api_key) return org.hubspot_api_key
+
+  // 3. Variable d'env globale
+  return Deno.env.get('HUBSPOT_API_KEY') ?? null
+}
+
 export async function getVaultSecret(
   supabase: SupabaseClient,
   vaultSecretId: string,

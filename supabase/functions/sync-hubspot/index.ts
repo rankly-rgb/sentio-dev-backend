@@ -19,7 +19,7 @@ import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
 import { hubspotRateLimiter } from '../_shared/hubspot-client.ts'
 import { mapHubSpotProperties, type HubSpotCompanyProperties } from '../_shared/hubspot-sync-helpers.ts'
-import { getVaultSecret } from '../_shared/vault.ts'
+import { getVaultSecret, resolveHubSpotApiKey } from '../_shared/vault.ts'
 
 const HUBSPOT_BASE_URL = 'https://api.hubapi.com'
 const PAGE_SIZE = 100
@@ -107,46 +107,6 @@ async function fetchAllCompanies(apiKey: string): Promise<HubSpotCompany[]> {
   }
 
   return all
-}
-
-// ── Credential resolution ────────────────────────────────────
-
-/**
- * Résout la clé API HubSpot pour une org.
- * Priorité :
- *   1. organization_integrations.vault_access_token_id (Vault, méthode OAuth / api_key)
- *   2. organizations.hubspot_api_key (colonne directe — connexion via hubspot-connect legacy)
- *   3. Variable d'env HUBSPOT_API_KEY (fallback global cron uniquement)
- */
-async function resolveHubSpotApiKey(
-  supabase: SupabaseClient,
-  orgId: string,
-): Promise<string | null> {
-  // 1. organization_integrations (Vault)
-  const { data: integration } = await supabase
-    .from('organization_integrations')
-    .select('vault_access_token_id')
-    .eq('organization_id', orgId)
-    .eq('provider', 'hubspot')
-    .eq('status', 'active')
-    .maybeSingle()
-
-  if (integration?.vault_access_token_id) {
-    const key = await getVaultSecret(supabase, integration.vault_access_token_id)
-    if (key) return key
-  }
-
-  // 2. organizations.hubspot_api_key (connexion legacy via hubspot-connect)
-  const { data: org } = await supabase
-    .from('organizations')
-    .select('hubspot_api_key')
-    .eq('id', orgId)
-    .maybeSingle()
-
-  if (org?.hubspot_api_key) return org.hubspot_api_key
-
-  // 3. Variable d'env globale (cron sans org_id)
-  return Deno.env.get('HUBSPOT_API_KEY') ?? null
 }
 
 // ── Sync logic ───────────────────────────────────────────────
