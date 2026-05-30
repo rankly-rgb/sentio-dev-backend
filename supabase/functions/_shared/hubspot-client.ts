@@ -198,9 +198,27 @@ export async function enrollInSequence(
     }
 
     const body = await response.text()
+    console.error(JSON.stringify({
+      level: 'error',
+      module: 'hubspot-client',
+      fn: 'enrollInSequence',
+      status: response.status,
+      sequenceId,
+      contactId,
+      error: body.slice(0, 500),
+    }))
     return { success: false, status: response.status, error: body.slice(0, 200) }
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) }
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(JSON.stringify({
+      level: 'error',
+      module: 'hubspot-client',
+      fn: 'enrollInSequence',
+      sequenceId,
+      contactId,
+      error: msg,
+    }))
+    return { success: false, error: msg }
   }
 }
 
