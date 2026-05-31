@@ -42,11 +42,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (req.method !== 'POST') return errorResponse('Method not allowed', 405)
 
-  // Détecter si l'appel vient du trigger interne (service_role)
-  // Le trigger pg_net s'authentifie avec la service_role_key — pas de profil utilisateur disponible
+  // Détecter si l'appel vient du trigger interne (pg_net depuis PostgreSQL)
+  // On utilise PLAYBOOK_TRIGGER_SECRET (dédié) plutôt que SUPABASE_SERVICE_ROLE_KEY
+  // pour éviter l'ambiguïté entre la valeur auto-injectée et les secrets custom.
   const incomingToken = (req.headers.get('Authorization') ?? '').replace('Bearer ', '')
-  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-  const isInternalTrigger = serviceRoleKey !== '' && incomingToken === serviceRoleKey
+  const triggerSecret = Deno.env.get('PLAYBOOK_TRIGGER_SECRET') ?? ''
+  const isInternalTrigger = triggerSecret !== '' && incomingToken === triggerSecret
 
   let supabase: SupabaseClient
   try {
