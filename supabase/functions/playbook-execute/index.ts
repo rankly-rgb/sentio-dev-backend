@@ -42,14 +42,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (req.method !== 'POST') return errorResponse('Method not allowed', 405)
 
-  // Auth : vérifier le JWT utilisateur (ES256)
-  let auth
-  try {
-    auth = await verifyUserAuth(req)
-  } catch (err) {
-    if (err instanceof AuthError) return errorResponse(err.message, err.status)
-    return errorResponse('Authentication failed', 401)
-  }
+  // Détecter si l'appel vient du trigger interne (service_role)
+  // Le trigger pg_net s'authentifie avec la service_role_key — pas de profil utilisateur disponible
+  const incomingToken = (req.headers.get('Authorization') ?? '').replace('Bearer ', '')
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+  const isInternalTrigger = serviceRoleKey !== '' && incomingToken === serviceRoleKey
 
   let supabase: SupabaseClient
   try {
@@ -67,8 +64,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Invalid JSON body', 400)
   }
 
-  // Always enforce the authenticated user's organization (prevent cross-tenant access)
-  body.organization_id = auth.organizationId
+  if (isInternalTrigger) {
+    // Appel depuis le trigger DB — organization_id vient du body (déjà scopé par le trigger)
+    if (!body.organization_id) {
+      return errorResponse('organization_id required for internal trigger calls', 400)
+    }
+  } else {
+    // Appel utilisateur — vérifier le JWT et enforcer l'org depuis le profil
+    let auth
+    try {
+      auth = await verifyUserAuth(req)
+    } catch (err) {
+      if (err instanceof AuthError) return errorResponse(err.message, err.status)
+      return errorResponse('Authentication failed', 401)
+    }
+    body.organization_id = auth.organizationId
+  }
 
   const correlationId = crypto.randomUUID()
   const logger = createLogger({
