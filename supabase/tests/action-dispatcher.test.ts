@@ -10,6 +10,7 @@ vi.mock('../functions/_shared/hubspot-client', () => ({
   updateCompanyProperties: vi.fn(),
   createTask: vi.fn(),
   associateTaskToCompany: vi.fn(),
+  getCompanyProperties: vi.fn(),
 }))
 
 // ── Mock dlq ─────────────────────────────────────────────────
@@ -23,6 +24,7 @@ import {
   updateCompanyProperties,
   createTask,
   associateTaskToCompany,
+  getCompanyProperties,
 } from '../functions/_shared/hubspot-client'
 import { writeToDLQ } from '../functions/_shared/dlq'
 import { dispatchAction } from '../functions/_shared/action-dispatcher'
@@ -260,21 +262,24 @@ describe('dispatchAction — hubspot_create_task', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(createTask).mockResolvedValue({ success: true, status: 201, taskId: 'task-789' })
-    vi.mocked(associateTaskToCompany).mockResolvedValue({ success: true, status: 204 })
+    vi.mocked(associateTaskToCompany).mockResolvedValue({ success: true, status: 201 })
+    vi.mocked(getCompanyProperties).mockResolvedValue({ hubspot_owner_id: '55001' })
   })
 
-  it('crée la tâche et l\'associe à la company', async () => {
+  it('crée la tâche et l\'associe à la company avec le bon propriétaire', async () => {
     const result = await dispatchAction(taskAction, baseAccount, baseContext, mockSupabase)
 
     expect(result.status).toBe('completed')
+    expect(getCompanyProperties).toHaveBeenCalledWith('hs_company_456', ['hubspot_owner_id'], undefined)
     expect(createTask).toHaveBeenCalledOnce()
-    const [subject, body, priority] = vi.mocked(createTask).mock.calls[0]
+    const [subject, body, priority, , ownerId] = vi.mocked(createTask).mock.calls[0]
     expect(subject).toContain('Acme Corp')
     expect(subject).toContain('Sentio')
     expect(body).toContain('45/100')     // health_score
-    expect(body).toContain('999€')       // mrr_euros = 99900/100
+    expect(body).toContain('999')        // mrr_euros = 99900/100
     expect(body).toContain('Acme Corp')  // display_name
     expect(priority).toBe('HIGH')
+    expect(ownerId).toBe('55001')
     expect(associateTaskToCompany).toHaveBeenCalledWith('task-789', 'hs_company_456', undefined)
   })
 
@@ -287,6 +292,14 @@ describe('dispatchAction — hubspot_create_task', () => {
     )
     expect(result.status).toBe('skipped')
     expect(createTask).not.toHaveBeenCalled()
+    expect(getCompanyProperties).not.toHaveBeenCalled()
+  })
+
+  it('ownerId absent si getCompanyProperties retourne null', async () => {
+    vi.mocked(getCompanyProperties).mockResolvedValue({ hubspot_owner_id: null })
+    await dispatchAction(taskAction, baseAccount, baseContext, mockSupabase)
+    const [,,,,ownerId] = vi.mocked(createTask).mock.calls[0]
+    expect(ownerId).toBeUndefined()
   })
 
   it('retourne failed et écrit en DLQ si createTask échoue', async () => {

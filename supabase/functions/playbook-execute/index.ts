@@ -223,10 +223,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
+  // Résoudre le nom du segment pour l'interpolation dans les actions HubSpot
+  let segmentName: string | undefined
+  if (body.segment_id) {
+    const { data: seg } = await supabase
+      .from('account_segments')
+      .select('segment_name')
+      .eq('id', body.segment_id)
+      .maybeSingle()
+    segmentName = seg?.segment_name ?? undefined
+  }
+
   // Résoudre la clé HubSpot depuis Vault (nécessaire pour enrollment et update company)
   let hubspotApiKey: string | null = null
   const needsHubspot = !isWorkflow && actions.some(
-    (a) => a.type === 'hubspot_enroll_sequence' || a.type === 'hubspot_update_company',
+    (a) => a.type === 'hubspot_enroll_sequence' || a.type === 'hubspot_update_company' || a.type === 'hubspot_create_task',
   )
   if (needsHubspot) {
     hubspotApiKey = await resolveHubSpotApiKey(supabase, body.organization_id)
@@ -369,6 +380,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             executionId: execution.id,
             organizationId: body.organization_id,
             playbookTitle: playbook.title,
+            segmentName,
             contactsCache: hubspotContactsCache,
             hubspotApiKey: hubspotApiKey ?? undefined,
           }, supabase)

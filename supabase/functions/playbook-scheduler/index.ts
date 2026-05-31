@@ -188,10 +188,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         const actions = (playbook.actions as PlaybookAction[]).sort((a, b) => a.order - b.order)
 
+        // Résoudre le nom du segment pour l'interpolation dans les actions HubSpot
+        let segmentName: string | undefined
+        if (playbook.segment_id) {
+          const { data: seg } = await supabase
+            .from('account_segments')
+            .select('segment_name')
+            .eq('id', playbook.segment_id)
+            .maybeSingle()
+          segmentName = seg?.segment_name ?? undefined
+        }
+
         // Résoudre la clé HubSpot depuis Vault
         let hubspotApiKey: string | null = null
         const needsHubspot = actions.some(
-          (a) => a.type === 'hubspot_enroll_sequence' || a.type === 'hubspot_update_company',
+          (a) => a.type === 'hubspot_enroll_sequence' || a.type === 'hubspot_update_company' || a.type === 'hubspot_create_task',
         )
         if (needsHubspot) {
           hubspotApiKey = await resolveHubSpotApiKey(supabase, orgId)
@@ -249,6 +260,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
               executionId: execution.id,
               organizationId: orgId,
               playbookTitle: playbook.title as string | undefined,
+              segmentName,
               contactsCache: hubspotContactsCache,
               hubspotApiKey: hubspotApiKey ?? undefined,
             }, supabase)

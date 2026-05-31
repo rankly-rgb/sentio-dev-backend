@@ -10,6 +10,7 @@ import {
   updateCompanyProperties,
   createTask,
   associateTaskToCompany,
+  getCompanyProperties,
 } from './hubspot-client.ts'
 import { writeToDLQ } from './dlq.ts'
 import type { PlaybookAction, AccountData, ActionResult } from './playbook-engine.ts'
@@ -21,6 +22,7 @@ interface DispatchContext {
   executionId: string
   organizationId: string
   playbookTitle?: string
+  segmentName?: string
   /** Cache pré-rempli par getBatchCompanyContacts. Absent du Map = fallback individuel. */
   contactsCache?: Map<string, string[]>
   /** Clé API HubSpot résolue depuis Vault. Fallback sur env HUBSPOT_API_KEY si absent. */
@@ -182,16 +184,28 @@ export async function dispatchAction(
         const playbookTitle = context.playbookTitle ?? 'Playbook'
         const subject = `Sentio — ${playbookTitle} : ${displayName}`
 
+        // Récupérer le propriétaire HubSpot de la company (non-bloquant si absent)
+        const companyProps = await getCompanyProperties(
+          account.hubspot_company_id,
+          ['hubspot_owner_id'],
+          context.hubspotApiKey,
+        )
+        const ownerId = companyProps.hubspot_owner_id ?? undefined
+
         // Interpolation des variables dans le corps
         const mrrEuros = account.mrr_cents != null ? Math.round(account.mrr_cents / 100) : 0
+        const today = new Date().toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' })
         const body = rawBody
           .replace(/\{\{display_name\}\}/g, displayName)
           .replace(/\{\{health_score\}\}/g, String(account.health_score ?? 'N/A'))
           .replace(/\{\{churn_risk_score\}\}/g, String(account.churn_risk_score ?? 'N/A'))
           .replace(/\{\{mrr_cents\}\}/g, String(account.mrr_cents ?? 0))
           .replace(/\{\{mrr_euros\}\}/g, String(mrrEuros))
+          .replace(/\{\{segment_name\}\}/g, context.segmentName ?? '')
+          .replace(/\{\{today\}\}/g, today)
+          .replace(/\{\{account_id\}\}/g, account.id)
 
-        const taskResult = await createTask(subject, body, priority, context.hubspotApiKey)
+        const taskResult = await createTask(subject, body, priority, context.hubspotApiKey, ownerId)
 
         if (!taskResult.success || !taskResult.taskId) {
           await writeToDLQ(supabase, {

@@ -236,8 +236,19 @@ export async function createTask(
   body: string,
   priority: 'HIGH' | 'MEDIUM' | 'LOW',
   apiKey?: string,
+  ownerId?: string,
 ): Promise<HubSpotTaskResult> {
   try {
+    const properties: Record<string, string> = {
+      hs_task_subject:  subject,
+      hs_task_body:     body,
+      hs_task_status:   'NOT_STARTED',
+      hs_task_priority: priority,
+      hs_task_type:     'TODO',
+      hs_timestamp:     String(Date.now()),
+    }
+    if (ownerId) properties.hs_task_owner_id = ownerId
+
     const response = await retryWithBackoff(
       async () => {
         await hubspotRateLimiter.waitForToken()
@@ -246,16 +257,7 @@ export async function createTask(
           {
             method: 'POST',
             headers: hubspotHeaders(apiKey),
-            body: JSON.stringify({
-              properties: {
-                hs_task_subject:  subject,
-                hs_task_body:     body,
-                hs_task_status:   'NOT_STARTED',
-                hs_task_priority: priority,
-                hs_task_type:     'TODO',
-                hs_timestamp:     String(Date.now()),
-              },
-            }),
+            body: JSON.stringify({ properties }),
           },
           TIMEOUT_MS,
         )
@@ -284,8 +286,8 @@ export async function createTask(
 }
 
 /**
- * Associe une tâche HubSpot à une company.
- * Essaie d'abord l'API v4, puis fallback sur batch v3.
+ * Associe une tâche HubSpot à une company via batch v3.
+ * Testé et validé sur EU1 (POST /crm/v3/associations/tasks/companies/batch/create → 201).
  * Non-bloquant : un échec doit être loggué mais ne doit pas faire échouer l'action.
  */
 export async function associateTaskToCompany(
@@ -294,30 +296,8 @@ export async function associateTaskToCompany(
   apiKey?: string,
 ): Promise<HubSpotResult> {
   await hubspotRateLimiter.waitForToken()
-
-  // Tentative 1 — API v4
   try {
-    const resV4 = await fetchWithTimeout(
-      `${HUBSPOT_BASE_URL}/crm/v4/objects/tasks/${taskId}/associations/companies/${companyId}/task_to_company`,
-      { method: 'PUT', headers: hubspotHeaders(apiKey) },
-      TIMEOUT_MS,
-    )
-    if (resV4.ok || resV4.status === 200 || resV4.status === 201 || resV4.status === 204) {
-      return { success: true, status: resV4.status }
-    }
-    // 404/400 → essaie fallback
-    if (resV4.status !== 404 && resV4.status !== 400) {
-      const b = await resV4.text()
-      return { success: false, status: resV4.status, error: b.slice(0, 200) }
-    }
-  } catch {
-    // Réseau/timeout → essaie fallback
-  }
-
-  // Tentative 2 — batch v3 (endpoint legacy)
-  await hubspotRateLimiter.waitForToken()
-  try {
-    const resV3 = await fetchWithTimeout(
+    const res = await fetchWithTimeout(
       `${HUBSPOT_BASE_URL}/crm/v3/associations/tasks/companies/batch/create`,
       {
         method: 'POST',
@@ -328,11 +308,36 @@ export async function associateTaskToCompany(
       },
       TIMEOUT_MS,
     )
-    if (resV3.ok || resV3.status === 201) return { success: true, status: resV3.status }
-    const b = await resV3.text()
-    return { success: false, status: resV3.status, error: b.slice(0, 200) }
+    if (res.ok || res.status === 201) return { success: true, status: res.status }
+    const b = await res.text()
+    return { success: false, status: res.status, error: b.slice(0, 200) }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * Lit les propriétés d'une company HubSpot.
+ * Retourne un objet { prop: value | null }. Retourne {} si la company n'existe pas.
+ */
+export async function getCompanyProperties(
+  companyId: string,
+  properties: string[],
+  apiKey?: string,
+): Promise<Record<string, string | null>> {
+  try {
+    await hubspotRateLimiter.waitForToken()
+    const res = await fetchWithTimeout(
+      `${HUBSPOT_BASE_URL}/crm/v3/objects/companies/${companyId}?properties=${properties.join(',')}`,
+      { headers: hubspotHeaders(apiKey) },
+      TIMEOUT_MS,
+    )
+    if (res.status === 404) return {}
+    if (!res.ok) return {}
+    const data = await res.json() as { properties: Record<string, string | null> }
+    return data.properties ?? {}
+  } catch {
+    return {}
   }
 }
 
