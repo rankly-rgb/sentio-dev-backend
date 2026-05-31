@@ -8,6 +8,8 @@ import {
   getCompanyContacts,
   enrollInSequence,
   updateCompanyProperties,
+  createTask,
+  associateTaskToCompany,
 } from './hubspot-client.ts'
 import { writeToDLQ } from './dlq.ts'
 import type { PlaybookAction, AccountData, ActionResult } from './playbook-engine.ts'
@@ -18,6 +20,7 @@ interface DispatchContext {
   playbookId: string
   executionId: string
   organizationId: string
+  playbookTitle?: string
   /** Cache pré-rempli par getBatchCompanyContacts. Absent du Map = fallback individuel. */
   contactsCache?: Map<string, string[]>
   /** Clé API HubSpot résolue depuis Vault. Fallback sur env HUBSPOT_API_KEY si absent. */
@@ -156,6 +159,81 @@ export async function dispatchAction(
           message: result.success
             ? `Updated company ${account.hubspot_company_id} properties`
             : `Failed to update company: ${result.error ?? `HTTP ${result.status}`}`,
+        }
+      }
+
+      case 'hubspot_create_task': {
+        if (!account.hubspot_company_id) {
+          return {
+            ...base,
+            status: 'skipped',
+            message: `Account ${account.id} has no hubspot_company_id — skipping task creation`,
+          }
+        }
+
+        const rawBody = (action.config.task_body as string | undefined) ?? ''
+        const priorityRaw = action.config.priority as string | undefined
+        const priority = (['HIGH', 'MEDIUM', 'LOW'].includes(priorityRaw ?? '')
+          ? priorityRaw
+          : 'HIGH') as 'HIGH' | 'MEDIUM' | 'LOW'
+
+        // Sujet : Zero-PII — display_name est un alias Sentio, jamais un nom de personne physique
+        const displayName = account.display_name ?? account.stripe_customer_id ?? account.id
+        const playbookTitle = context.playbookTitle ?? 'Playbook'
+        const subject = `Sentio — ${playbookTitle} : ${displayName}`
+
+        // Interpolation des variables dans le corps
+        const mrrEuros = account.mrr_cents != null ? Math.round(account.mrr_cents / 100) : 0
+        const body = rawBody
+          .replace(/\{\{display_name\}\}/g, displayName)
+          .replace(/\{\{health_score\}\}/g, String(account.health_score ?? 'N/A'))
+          .replace(/\{\{churn_risk_score\}\}/g, String(account.churn_risk_score ?? 'N/A'))
+          .replace(/\{\{mrr_cents\}\}/g, String(account.mrr_cents ?? 0))
+          .replace(/\{\{mrr_euros\}\}/g, String(mrrEuros))
+
+        const taskResult = await createTask(subject, body, priority, context.hubspotApiKey)
+
+        if (!taskResult.success || !taskResult.taskId) {
+          await writeToDLQ(supabase, {
+            organization_id: context.organizationId,
+            provider: 'hubspot',
+            event_type: 'task_creation_failed',
+            payload: {
+              account_id: account.id,
+              company_id: account.hubspot_company_id,
+            },
+            error_message: taskResult.error ?? `HTTP ${taskResult.status}`,
+          })
+          return {
+            ...base,
+            status: 'failed',
+            message: `Failed to create HubSpot task: ${taskResult.error ?? `HTTP ${taskResult.status}`}`,
+          }
+        }
+
+        // Association tâche → company (non-bloquante)
+        const assocResult = await associateTaskToCompany(
+          taskResult.taskId,
+          account.hubspot_company_id,
+          context.hubspotApiKey,
+        )
+        if (!assocResult.success) {
+          console.error(JSON.stringify({
+            level: 'warn',
+            module: 'action-dispatcher',
+            fn: 'hubspot_create_task',
+            message: 'Task created but company association failed (non-blocking)',
+            task_id: taskResult.taskId,
+            company_id: account.hubspot_company_id,
+            error: assocResult.error,
+          }))
+        }
+
+        return {
+          ...base,
+          status: 'completed',
+          message: `HubSpot task ${taskResult.taskId} created for account ${account.id}` +
+            (assocResult.success ? ' (associated to company)' : ' (association failed — non-blocking)'),
         }
       }
 

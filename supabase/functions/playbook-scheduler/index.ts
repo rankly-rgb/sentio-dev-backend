@@ -117,7 +117,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         let accountQuery = supabase
           .from('accounts')
-          .select('id, organization_id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
+          .select('id, organization_id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
           .eq('organization_id', orgId)
 
         // Filter by segment if defined
@@ -248,6 +248,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
               playbookId,
               executionId: execution.id,
               organizationId: orgId,
+              playbookTitle: playbook.title as string | undefined,
               contactsCache: hubspotContactsCache,
               hubspotApiKey: hubspotApiKey ?? undefined,
             }, supabase)

@@ -56,6 +56,10 @@ export interface HubSpotResult {
   error?: string
 }
 
+export interface HubSpotTaskResult extends HubSpotResult {
+  taskId?: string
+}
+
 // ── Helpers ──────────────────────────────────────────────────
 
 function getApiKey(override?: string): string {
@@ -219,6 +223,116 @@ export async function enrollInSequence(
       error: msg,
     }))
     return { success: false, error: msg }
+  }
+}
+
+/**
+ * Crée une tâche CRM HubSpot (type TODO).
+ * Retourne le taskId créé en cas de succès.
+ * Zero-PII : sujet et corps ne contiennent jamais d'email/nom de contact.
+ */
+export async function createTask(
+  subject: string,
+  body: string,
+  priority: 'HIGH' | 'MEDIUM' | 'LOW',
+  apiKey?: string,
+): Promise<HubSpotTaskResult> {
+  try {
+    const response = await retryWithBackoff(
+      async () => {
+        await hubspotRateLimiter.waitForToken()
+        const res = await fetchWithTimeout(
+          `${HUBSPOT_BASE_URL}/crm/v3/objects/tasks`,
+          {
+            method: 'POST',
+            headers: hubspotHeaders(apiKey),
+            body: JSON.stringify({
+              properties: {
+                hs_task_subject:  subject,
+                hs_task_body:     body,
+                hs_task_status:   'NOT_STARTED',
+                hs_task_priority: priority,
+                hs_task_type:     'TODO',
+                hs_timestamp:     String(Date.now()),
+              },
+            }),
+          },
+          TIMEOUT_MS,
+        )
+        if (res.status === 429) throw new Error('HubSpot rate limit (429)')
+        return res
+      },
+      { maxRetries: 2, retryOn: isTransient },
+    )
+
+    if (response.status === 201) {
+      const data = await response.json() as { id: string }
+      return { success: true, status: 201, taskId: data.id }
+    }
+
+    const errBody = await response.text()
+    console.error(JSON.stringify({
+      level: 'error', module: 'hubspot-client', fn: 'createTask',
+      status: response.status, error: errBody.slice(0, 500),
+    }))
+    return { success: false, status: response.status, error: errBody.slice(0, 200) }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(JSON.stringify({ level: 'error', module: 'hubspot-client', fn: 'createTask', error: msg }))
+    return { success: false, error: msg }
+  }
+}
+
+/**
+ * Associe une tâche HubSpot à une company.
+ * Essaie d'abord l'API v4, puis fallback sur batch v3.
+ * Non-bloquant : un échec doit être loggué mais ne doit pas faire échouer l'action.
+ */
+export async function associateTaskToCompany(
+  taskId: string,
+  companyId: string,
+  apiKey?: string,
+): Promise<HubSpotResult> {
+  await hubspotRateLimiter.waitForToken()
+
+  // Tentative 1 — API v4
+  try {
+    const resV4 = await fetchWithTimeout(
+      `${HUBSPOT_BASE_URL}/crm/v4/objects/tasks/${taskId}/associations/companies/${companyId}/task_to_company`,
+      { method: 'PUT', headers: hubspotHeaders(apiKey) },
+      TIMEOUT_MS,
+    )
+    if (resV4.ok || resV4.status === 200 || resV4.status === 201 || resV4.status === 204) {
+      return { success: true, status: resV4.status }
+    }
+    // 404/400 → essaie fallback
+    if (resV4.status !== 404 && resV4.status !== 400) {
+      const b = await resV4.text()
+      return { success: false, status: resV4.status, error: b.slice(0, 200) }
+    }
+  } catch {
+    // Réseau/timeout → essaie fallback
+  }
+
+  // Tentative 2 — batch v3 (endpoint legacy)
+  await hubspotRateLimiter.waitForToken()
+  try {
+    const resV3 = await fetchWithTimeout(
+      `${HUBSPOT_BASE_URL}/crm/v3/associations/tasks/companies/batch/create`,
+      {
+        method: 'POST',
+        headers: hubspotHeaders(apiKey),
+        body: JSON.stringify({
+          inputs: [{ from: { id: taskId }, to: { id: companyId }, type: 'task_to_company' }],
+        }),
+      },
+      TIMEOUT_MS,
+    )
+    if (resV3.ok || resV3.status === 201) return { success: true, status: resV3.status }
+    const b = await resV3.text()
+    return { success: false, status: resV3.status, error: b.slice(0, 200) }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
 }
 

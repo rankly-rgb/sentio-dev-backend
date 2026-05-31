@@ -140,7 +140,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: accounts } = await supabase
     .from('accounts')
-    .select('id, organization_id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
+    .select('id, organization_id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
     .eq('organization_id', body.organization_id)
     .in('id', accountIds)
 
@@ -367,6 +367,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             playbookId: body.playbook_id,
             executionId: execution.id,
             organizationId: body.organization_id,
+            playbookTitle: playbook.title,
             contactsCache: hubspotContactsCache,
             hubspotApiKey: hubspotApiKey ?? undefined,
           }, supabase)

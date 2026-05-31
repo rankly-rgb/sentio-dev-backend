@@ -8,6 +8,8 @@ vi.mock('../functions/_shared/hubspot-client', () => ({
   getCompanyContacts: vi.fn(),
   enrollInSequence: vi.fn(),
   updateCompanyProperties: vi.fn(),
+  createTask: vi.fn(),
+  associateTaskToCompany: vi.fn(),
 }))
 
 // ── Mock dlq ─────────────────────────────────────────────────
@@ -19,6 +21,8 @@ import {
   getCompanyContacts,
   enrollInSequence,
   updateCompanyProperties,
+  createTask,
+  associateTaskToCompany,
 } from '../functions/_shared/hubspot-client'
 import { writeToDLQ } from '../functions/_shared/dlq'
 import { dispatchAction } from '../functions/_shared/action-dispatcher'
@@ -33,6 +37,7 @@ const baseAccount: AccountData = {
   organization_id: 'org-001',
   stripe_customer_id: 'cus_test123',
   hubspot_company_id: 'hs_company_456',
+  display_name: 'Acme Corp',
   health_score: 45,
   churn_risk_score: 72,
   expansion_score: 20,
@@ -238,6 +243,99 @@ describe('dispatchAction — hubspot_update_company', () => {
         organization_id: 'org-001',
       }),
     )
+  })
+})
+
+// ── hubspot_create_task ──────────────────────────────────────
+
+describe('dispatchAction — hubspot_create_task', () => {
+  const taskAction = makeAction({
+    type: 'hubspot_create_task',
+    config: {
+      task_body: 'Score santé : {{health_score}}/100, MRR : {{mrr_euros}}€, compte : {{display_name}}',
+      priority: 'HIGH',
+    },
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(createTask).mockResolvedValue({ success: true, status: 201, taskId: 'task-789' })
+    vi.mocked(associateTaskToCompany).mockResolvedValue({ success: true, status: 204 })
+  })
+
+  it('crée la tâche et l\'associe à la company', async () => {
+    const result = await dispatchAction(taskAction, baseAccount, baseContext, mockSupabase)
+
+    expect(result.status).toBe('completed')
+    expect(createTask).toHaveBeenCalledOnce()
+    const [subject, body, priority] = vi.mocked(createTask).mock.calls[0]
+    expect(subject).toContain('Acme Corp')
+    expect(subject).toContain('Sentio')
+    expect(body).toContain('45/100')     // health_score
+    expect(body).toContain('999€')       // mrr_euros = 99900/100
+    expect(body).toContain('Acme Corp')  // display_name
+    expect(priority).toBe('HIGH')
+    expect(associateTaskToCompany).toHaveBeenCalledWith('task-789', 'hs_company_456', undefined)
+  })
+
+  it('retourne skipped si hubspot_company_id absent', async () => {
+    const result = await dispatchAction(
+      taskAction,
+      { ...baseAccount, hubspot_company_id: null },
+      baseContext,
+      mockSupabase,
+    )
+    expect(result.status).toBe('skipped')
+    expect(createTask).not.toHaveBeenCalled()
+  })
+
+  it('retourne failed et écrit en DLQ si createTask échoue', async () => {
+    vi.mocked(createTask).mockResolvedValue({ success: false, status: 400, error: 'Bad Request' })
+
+    const result = await dispatchAction(taskAction, baseAccount, baseContext, mockSupabase)
+    expect(result.status).toBe('failed')
+    expect(writeToDLQ).toHaveBeenCalledOnce()
+    const dlqArg = vi.mocked(writeToDLQ).mock.calls[0][1]
+    expect(dlqArg.event_type).toBe('task_creation_failed')
+  })
+
+  it('association échouée ne bloque pas — statut reste completed', async () => {
+    vi.mocked(associateTaskToCompany).mockResolvedValue({ success: false, error: 'Association failed' })
+
+    const result = await dispatchAction(taskAction, baseAccount, baseContext, mockSupabase)
+    expect(result.status).toBe('completed')
+    expect(result.message).toContain('non-blocking')
+    expect(writeToDLQ).not.toHaveBeenCalled()
+  })
+
+  it('utilise display_name null → fallback stripe_customer_id dans le sujet', async () => {
+    const accountNoName = { ...baseAccount, display_name: null }
+    await dispatchAction(taskAction, accountNoName, baseContext, mockSupabase)
+
+    const [subject] = vi.mocked(createTask).mock.calls[0]
+    expect(subject).toContain('cus_test123')
+  })
+
+  it('priorité inconnue → défaut HIGH', async () => {
+    const action = makeAction({
+      type: 'hubspot_create_task',
+      config: { task_body: 'test', priority: 'URGENT' },
+    })
+    await dispatchAction(action, baseAccount, baseContext, mockSupabase)
+    const [,, priority] = vi.mocked(createTask).mock.calls[0]
+    expect(priority).toBe('HIGH')
+  })
+
+  it('DLQ payload ne contient pas d\'email/téléphone/IP — Zero-PII', async () => {
+    vi.mocked(createTask).mockResolvedValue({ success: false, status: 500, error: 'error' })
+
+    await dispatchAction(taskAction, baseAccount, baseContext, mockSupabase)
+    const dlqArg = vi.mocked(writeToDLQ).mock.calls[0][1]
+    const payload = JSON.stringify(dlqArg.payload)
+    expect(payload).not.toContain('@')
+    expect(payload).not.toContain('email')
+    expect(payload).not.toContain('phone')
+    expect(payload).not.toContain('ip')
   })
 })
 

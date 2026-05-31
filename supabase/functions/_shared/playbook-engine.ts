@@ -30,6 +30,7 @@ export const VALID_ACTION_TYPES = [
   'send_email',
   'hubspot_enroll_sequence',
   'hubspot_update_company',
+  'hubspot_create_task',
 ] as const
 
 export type PlaybookActionType = typeof VALID_ACTION_TYPES[number]
@@ -78,6 +79,7 @@ export interface AccountData {
   organization_id: string
   stripe_customer_id: string | null
   hubspot_company_id: string | null
+  display_name: string | null
   health_score: number | null
   churn_risk_score: number | null
   expansion_score: number | null
