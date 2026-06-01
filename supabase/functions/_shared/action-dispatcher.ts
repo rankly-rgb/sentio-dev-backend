@@ -182,15 +182,15 @@ export async function dispatchAction(
         // Sujet : urgence visuelle + nom lisible + MRR — Zero-PII (display_name = nom d'entreprise)
         const mrrEuros = account.mrr_cents != null ? Math.round(account.mrr_cents / 100) : 0
         const urgency =
-          (account.churn_risk_score ?? 0) >= 70 ? '[Churn imminent]' :
-          (account.churn_risk_score ?? 0) >= 40 ? '[Risque modéré]' :
-          '[Opportunité]'
+          (account.churn_risk_score ?? 0) >= 70 ? 'URGENT' :
+          (account.churn_risk_score ?? 0) >= 40 ? 'Risque modéré' :
+          'Opportunité'
         // displayName : pour interpolation {{display_name}} dans le corps
         // accountLabel : pour le sujet (fallback court avec slice pour lisibilité)
         const displayName = account.display_name ?? account.stripe_customer_id ?? account.id
         const accountLabel = account.display_name
           ?? `Client ${(account.stripe_customer_id ?? '').slice(-6)}`
-        const subject = `${urgency} — ${accountLabel} (${mrrEuros}€/mois)`
+        const subject = `Sentio [${urgency}] — ${accountLabel} (${mrrEuros}€/mois)`
 
         // Récupérer le propriétaire HubSpot de la company (non-bloquant si absent)
         const companyProps = await getCompanyProperties(
