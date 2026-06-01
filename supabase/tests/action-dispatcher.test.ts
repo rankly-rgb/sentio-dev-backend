@@ -273,8 +273,10 @@ describe('dispatchAction — hubspot_create_task', () => {
     expect(getCompanyProperties).toHaveBeenCalledWith('hs_company_456', ['hubspot_owner_id'], undefined)
     expect(createTask).toHaveBeenCalledOnce()
     const [subject, body, priority, , ownerId] = vi.mocked(createTask).mock.calls[0]
+    // Nouveau format : "🟡 Risque modéré — Acme Corp (999€/mois)" (churn_risk=72 ≥ 70 → 🔴)
     expect(subject).toContain('Acme Corp')
-    expect(subject).toContain('Sentio')
+    expect(subject).toContain('🔴 Churn imminent')  // churn_risk_score=72 >= 70
+    expect(subject).toContain('999€/mois')           // mrr = 99900 cents = 999€
     expect(body).toContain('45/100')     // health_score
     expect(body).toContain('999')        // mrr_euros = 99900/100
     expect(body).toContain('Acme Corp')  // display_name
@@ -321,12 +323,33 @@ describe('dispatchAction — hubspot_create_task', () => {
     expect(writeToDLQ).not.toHaveBeenCalled()
   })
 
-  it('utilise display_name null → fallback stripe_customer_id dans le sujet', async () => {
+  it('display_name null → fallback Client + 6 derniers chars stripe_customer_id', async () => {
     const accountNoName = { ...baseAccount, display_name: null }
     await dispatchAction(taskAction, accountNoName, baseContext, mockSupabase)
 
     const [subject] = vi.mocked(createTask).mock.calls[0]
-    expect(subject).toContain('cus_test123')
+    expect(subject).toContain('Client est123')  // slice(-6) de 'cus_test123' = 'est123'
+  })
+
+  it('churn_risk_score >= 70 → urgence 🔴', async () => {
+    const acc = { ...baseAccount, churn_risk_score: 75 }
+    await dispatchAction(taskAction, acc, baseContext, mockSupabase)
+    const [subject] = vi.mocked(createTask).mock.calls[0]
+    expect(subject).toContain('🔴 Churn imminent')
+  })
+
+  it('churn_risk_score entre 40 et 69 → urgence 🟡', async () => {
+    const acc = { ...baseAccount, churn_risk_score: 55 }
+    await dispatchAction(taskAction, acc, baseContext, mockSupabase)
+    const [subject] = vi.mocked(createTask).mock.calls[0]
+    expect(subject).toContain('🟡 Risque modéré')
+  })
+
+  it('churn_risk_score < 40 → urgence 🟢', async () => {
+    const acc = { ...baseAccount, churn_risk_score: 20 }
+    await dispatchAction(taskAction, acc, baseContext, mockSupabase)
+    const [subject] = vi.mocked(createTask).mock.calls[0]
+    expect(subject).toContain('🟢 Opportunité')
   })
 
   it('priorité inconnue → défaut HIGH', async () => {

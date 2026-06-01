@@ -179,10 +179,18 @@ export async function dispatchAction(
           ? priorityRaw
           : 'HIGH') as 'HIGH' | 'MEDIUM' | 'LOW'
 
-        // Sujet : Zero-PII — display_name est un alias Sentio, jamais un nom de personne physique
+        // Sujet : urgence visuelle + nom lisible + MRR — Zero-PII (display_name = nom d'entreprise)
+        const mrrEuros = account.mrr_cents != null ? Math.round(account.mrr_cents / 100) : 0
+        const urgency =
+          (account.churn_risk_score ?? 0) >= 70 ? '🔴 Churn imminent' :
+          (account.churn_risk_score ?? 0) >= 40 ? '🟡 Risque modéré' :
+          '🟢 Opportunité'
+        // displayName : pour interpolation {{display_name}} dans le corps
+        // accountLabel : pour le sujet (fallback court avec slice pour lisibilité)
         const displayName = account.display_name ?? account.stripe_customer_id ?? account.id
-        const playbookTitle = context.playbookTitle ?? 'Playbook'
-        const subject = `Sentio — ${playbookTitle} : ${displayName}`
+        const accountLabel = account.display_name
+          ?? `Client ${(account.stripe_customer_id ?? '').slice(-6)}`
+        const subject = `${urgency} — ${accountLabel} (${mrrEuros}€/mois)`
 
         // Récupérer le propriétaire HubSpot de la company (non-bloquant si absent)
         const companyProps = await getCompanyProperties(
@@ -193,7 +201,6 @@ export async function dispatchAction(
         const ownerId = companyProps.hubspot_owner_id ?? undefined
 
         // Interpolation des variables dans le corps
-        const mrrEuros = account.mrr_cents != null ? Math.round(account.mrr_cents / 100) : 0
         const today = new Date().toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' })
         const body = rawBody
           .replace(/\{\{display_name\}\}/g, displayName)
