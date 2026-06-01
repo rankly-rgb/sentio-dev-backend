@@ -11,7 +11,7 @@ import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { createLogger } from '../_shared/structured-logger.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 
-const ALLOWED_ACTIONS = ['sync-stripe', 'sync-hubspot', 'calculate-scores', 'health-check', 'self-monitor', 'generate-insights'] as const
+const ALLOWED_ACTIONS = ['sync-stripe', 'sync-hubspot', 'calculate-scores', 'health-check', 'self-monitor', 'generate-insights', 'dlq-hubspot', 'playbook-executions'] as const
 type AllowedAction = typeof ALLOWED_ACTIONS[number]
 
 interface ProxyRequest {
@@ -19,6 +19,7 @@ interface ProxyRequest {
   organization_id?: string
   sync_type?: 'incremental' | 'full_sync'
   is_manual?: boolean
+  playbook_id?: string
 }
 
 // Actions qui nécessitent un organization_id
@@ -99,6 +100,38 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const action = body.action as AllowedAction
+
+  // ── Actions locales (pas de proxy vers une autre Edge Function) ──
+
+  if (action === 'dlq-hubspot') {
+    const { data, error } = await supabase
+      .from('webhook_dead_letter')
+      .select('id, created_at, event_type, error_message, payload, retry_count')
+      .eq('organization_id', userOrgId)
+      .eq('provider', 'hubspot')
+      .order('created_at', { ascending: false })
+      .limit(20)
+
+    if (error) return errorResponse(`DLQ query failed: ${error.message}`, 500)
+    return jsonResponse({ data: data ?? [] })
+  }
+
+  if (action === 'playbook-executions') {
+    const query = supabase
+      .from('playbook_executions')
+      .select('id, playbook_id, account_id, execution_status, actions_completed, failed_steps, completed_steps, started_at, completed_at')
+      .eq('organization_id', userOrgId)
+      .order('started_at', { ascending: false })
+      .limit(10)
+
+    if (body.playbook_id) {
+      query.eq('playbook_id', body.playbook_id)
+    }
+
+    const { data, error } = await query
+    if (error) return errorResponse(`Query failed: ${error.message}`, 500)
+    return jsonResponse({ data: data ?? [] })
+  }
 
   // 8. Vérifier org_id pour les actions qui le nécessitent
   if (ACTIONS_REQUIRING_ORG.includes(action)) {

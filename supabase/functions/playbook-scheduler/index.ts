@@ -23,6 +23,7 @@ import {
 } from '../_shared/playbook-engine.ts'
 import { dispatchAction } from '../_shared/action-dispatcher.ts'
 import { getBatchCompanyContacts } from '../_shared/hubspot-client.ts'
+import { resolveHubSpotApiKey } from '../_shared/vault.ts'
 
 const MAX_ACCOUNTS_PER_PLAYBOOK = 200
 const COOLDOWN_HOURS = 24
@@ -116,7 +117,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         let accountQuery = supabase
           .from('accounts')
-          .select('id, organization_id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
+          .select('id, organization_id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
           .eq('organization_id', orgId)
 
         // Filter by segment if defined
@@ -187,6 +188,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         const actions = (playbook.actions as PlaybookAction[]).sort((a, b) => a.order - b.order)
 
+        // Résoudre le nom du segment pour l'interpolation dans les actions HubSpot
+        let segmentName: string | undefined
+        if (playbook.segment_id) {
+          const { data: seg } = await supabase
+            .from('account_segments')
+            .select('segment_name')
+            .eq('id', playbook.segment_id)
+            .maybeSingle()
+          segmentName = seg?.segment_name ?? undefined
+        }
+
+        // Résoudre la clé HubSpot depuis Vault
+        let hubspotApiKey: string | null = null
+        const needsHubspot = actions.some(
+          (a) => a.type === 'hubspot_enroll_sequence' || a.type === 'hubspot_update_company' || a.type === 'hubspot_create_task',
+        )
+        if (needsHubspot) {
+          hubspotApiKey = await resolveHubSpotApiKey(supabase, orgId)
+          if (!hubspotApiKey) {
+            logger.warn('HubSpot API key not found — hubspot actions will fail', { organization_id: orgId })
+          }
+        }
+
         // Pre-fetch contacts HubSpot en batch pour éviter N+1
         let hubspotContactsCache: Map<string, string[]> = new Map()
         if (actions.some((a) => a.type === 'hubspot_enroll_sequence')) {
@@ -194,7 +218,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             .map((a) => a.hubspot_company_id)
             .filter((id): id is string => !!id)
           if (companyIds.length > 0) {
-            hubspotContactsCache = await getBatchCompanyContacts(companyIds)
+            hubspotContactsCache = await getBatchCompanyContacts(companyIds, hubspotApiKey ?? undefined)
           }
         }
 
@@ -235,7 +259,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
               playbookId,
               executionId: execution.id,
               organizationId: orgId,
+              playbookTitle: playbook.title as string | undefined,
+              segmentName,
               contactsCache: hubspotContactsCache,
+              hubspotApiKey: hubspotApiKey ?? undefined,
             }, supabase)
             actionResults.push(result)
             if (result.status === 'completed') completedSteps++

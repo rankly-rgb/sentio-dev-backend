@@ -18,7 +18,16 @@ import { createLogger } from '../_shared/structured-logger.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
 import { hubspotRateLimiter } from '../_shared/hubspot-client.ts'
-import { mapHubSpotProperties, type HubSpotCompanyProperties } from '../_shared/hubspot-sync-helpers.ts'
+import {
+  mapHubSpotProperties,
+  buildStripeIdMap,
+  buildHubspotIdMap,
+  matchCompanyToAccount,
+  computeReversePushList,
+  batchArray,
+  type HubSpotCompanyProperties,
+} from '../_shared/hubspot-sync-helpers.ts'
+import { getVaultSecret, resolveHubSpotApiKey } from '../_shared/vault.ts'
 
 const HUBSPOT_BASE_URL = 'https://api.hubapi.com'
 const PAGE_SIZE = 100
@@ -33,6 +42,7 @@ const HUBSPOT_PROPERTIES = [
   'hs_ticket_count',
   'hs_last_meeting_booked',
   'notes_last_contacted',
+  'id_stripe',   // propriété custom Sentio pour l'auto-matching stripe_customer_id
 ].join(',')
 
 // ── Types ────────────────────────────────────────────────────
@@ -108,6 +118,100 @@ async function fetchAllCompanies(apiKey: string): Promise<HubSpotCompany[]> {
   return all
 }
 
+// ── Auto-matching helpers ────────────────────────────────────
+
+/**
+ * Crée la propriété custom 'id_stripe' sur les companies HubSpot (idempotente).
+ * Cette propriété reçoit le stripe_customer_id lors du reverse-push,
+ * et permet l'auto-matching automatique lors des futures syncs.
+ * Non-bloquant : 409 (déjà existante) et erreurs de scope sont silencieuses.
+ */
+async function ensureIdStripeProperty(apiKey: string): Promise<void> {
+  try {
+    const check = await fetchWithTimeout(
+      `${HUBSPOT_BASE_URL}/crm/v3/properties/companies/id_stripe`,
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' } },
+      8000,
+    )
+    if (check.ok) return
+  } catch { /* try to create anyway */ }
+
+  try {
+    await fetchWithTimeout(
+      `${HUBSPOT_BASE_URL}/crm/v3/properties/companies`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'id_stripe',
+          label: 'Stripe Customer ID',
+          type: 'string',
+          fieldType: 'text',
+          groupName: 'companyinformation',
+          description: 'Identifiant Stripe (cus_xxx) pour le matching automatique Sentio AI',
+        }),
+      },
+      8000,
+    )
+  } catch {
+    // Scope manquant ou propriété déjà existante — non-bloquant
+  }
+}
+
+/**
+ * Pousse le stripe_customer_id Sentio vers la propriété 'id_stripe' de la company HubSpot.
+ * Permet aux futures syncs de retrouver le lien automatiquement.
+ * Non-bloquant, best-effort.
+ */
+async function reversePushStripeIds(
+  supabase: SupabaseClient,
+  orgId: string,
+  apiKey: string,
+  logger: ReturnType<typeof createLogger>,
+): Promise<void> {
+  const { data: linked } = await supabase
+    .from('accounts')
+    .select('id, hubspot_company_id, stripe_customer_id')
+    .eq('organization_id', orgId)
+    .not('hubspot_company_id', 'is', null)
+    .not('stripe_customer_id', 'is', null)
+    .limit(1000)
+
+  if (!linked?.length) return
+
+  // Filtrer : seulement les vrais IDs HubSpot numériques
+  const eligible = linked.filter(a => /^[0-9]+$/.test(a.hubspot_company_id ?? ''))
+  const pushList = computeReversePushList(
+    eligible.map(a => ({ hubspot_company_id: a.hubspot_company_id!, account_id: a.id })),
+    eligible.map(a => ({ id: a.id, stripe_customer_id: a.stripe_customer_id })),
+  )
+
+  if (pushList.length === 0) return
+
+  let pushed = 0
+  for (const batch of batchArray(pushList, 100)) {
+    try {
+      await hubspotRateLimiter.waitForToken()
+      const res = await fetchWithTimeout(
+        `${HUBSPOT_BASE_URL}/crm/v3/objects/companies/batch/update`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            inputs: batch.map(p => ({ id: p.hubspot_company_id, properties: { id_stripe: p.stripe_customer_id } })),
+          }),
+        },
+        10000,
+      )
+      if (res.ok) pushed += batch.length
+    } catch (err) {
+      logger.warn('reverse-push id_stripe batch failed', { error: String(err), organization_id: orgId })
+    }
+  }
+
+  if (pushed > 0) logger.info('Reverse-pushed id_stripe to HubSpot', { count: pushed, organization_id: orgId })
+}
+
 // ── Sync logic ───────────────────────────────────────────────
 
 async function syncOrgHubSpot(
@@ -115,36 +219,60 @@ async function syncOrgHubSpot(
   orgId: string,
   apiKey: string,
   logger: ReturnType<typeof createLogger>,
-): Promise<{ companiesFound: number; accountsMatched: number; accountsUpdated: number }> {
+): Promise<{ companiesFound: number; accountsMatched: number; accountsUpdated: number; autoLinked: number }> {
 
-  // 1. Charger la map hubspot_company_id → account_id pour cette org
-  const { data: accounts } = await supabase
+  // 1. S'assurer que la propriété id_stripe existe dans HubSpot (idempotent)
+  await ensureIdStripeProperty(apiKey)
+
+  // 2. Charger tous les comptes de l'org (liés et non-liés) pour le matching
+  const { data: allAccounts } = await supabase
     .from('accounts')
-    .select('id, hubspot_company_id')
+    .select('id, hubspot_company_id, stripe_customer_id')
     .eq('organization_id', orgId)
-    .not('hubspot_company_id', 'is', null)
+    .limit(10000)
 
-  const accountMap = new Map<string, string>()
-  for (const acc of accounts ?? []) {
-    if (acc.hubspot_company_id) accountMap.set(acc.hubspot_company_id, acc.id)
+  const accountMap   = buildHubspotIdMap(allAccounts ?? [])   // hsId → accountId (déjà liés)
+  const stripeMap    = buildStripeIdMap(allAccounts ?? [])     // stripeId → accountId (auto-match)
+
+  if (accountMap.size === 0 && stripeMap.size === 0) {
+    logger.info('No accounts for this org — skipping', { organization_id: orgId })
+    return { companiesFound: 0, accountsMatched: 0, accountsUpdated: 0, autoLinked: 0 }
   }
 
-  if (accountMap.size === 0) {
-    logger.info('No accounts with hubspot_company_id — skipping', { organization_id: orgId })
-    return { companiesFound: 0, accountsMatched: 0, accountsUpdated: 0 }
-  }
-
-  // 2. Paginer les companies HubSpot
+  // 3. Paginer les companies HubSpot (inclut id_stripe pour l'auto-matching)
   const companies = await fetchAllCompanies(apiKey)
   logger.info('HubSpot companies fetched', { count: companies.length, organization_id: orgId })
 
-  // 3. Préparer les upserts pour les companies qui matchent un account Sentio
+  // 4. Préparer les upserts — auto-matching via id_stripe si pas encore lié
   const now = new Date().toISOString()
   const rows: Record<string, unknown>[] = []
+  let autoLinked = 0
 
   for (const company of companies) {
-    const accountId = accountMap.get(company.id)
+    const accountId = matchCompanyToAccount(company, stripeMap, accountMap)
     if (!accountId) continue
+
+    // Auto-linking : mettre à jour accounts.hubspot_company_id si nouveau lien
+    if (!accountMap.has(company.id)) {
+      const { error: linkErr } = await supabase
+        .from('accounts')
+        .update({ hubspot_company_id: company.id })
+        .eq('id', accountId)
+        .eq('organization_id', orgId)
+
+      if (!linkErr) {
+        accountMap.set(company.id, accountId)
+        autoLinked++
+        logger.info('Auto-linked account', {
+          hubspot_company_id: company.id,
+          account_id: accountId,
+          organization_id: orgId,
+        })
+      } else {
+        logger.error('Auto-link failed', { error: linkErr.message, organization_id: orgId })
+        continue
+      }
+    }
 
     const mapped = mapHubSpotProperties(company.properties)
     rows.push({
@@ -158,7 +286,7 @@ async function syncOrgHubSpot(
 
   const accountsMatched = rows.length
 
-  // 4. Upsert par batch
+  // 5. Upsert par batch dans hubspot_companies
   let accountsUpdated = 0
   for (let i = 0; i < rows.length; i += DB_BATCH_SIZE) {
     const batch = rows.slice(i, i + DB_BATCH_SIZE)
@@ -173,7 +301,7 @@ async function syncOrgHubSpot(
     }
   }
 
-  // 5. Mettre à jour last_hubspot_sync_at sur les accounts matchés
+  // 6. Mettre à jour last_hubspot_sync_at
   const accountIds = rows.map((r) => r.account_id as string)
   if (accountIds.length > 0) {
     await supabase
@@ -183,7 +311,11 @@ async function syncOrgHubSpot(
       .in('id', accountIds)
   }
 
-  return { companiesFound: companies.length, accountsMatched, accountsUpdated }
+  // 7. Reverse-push : écrire stripe_customer_id sur les companies HubSpot nouvellement liées
+  //    Permet l'auto-matching automatique lors des futures syncs (non-bloquant)
+  await reversePushStripeIds(supabase, orgId, apiKey, logger)
+
+  return { companiesFound: companies.length, accountsMatched, accountsUpdated, autoLinked }
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
@@ -224,26 +356,43 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   try {
     if (body.organization_id) {
-      const { data, error } = await supabase
-        .from('organizations')
-        .select('id, hubspot_api_key')
-        .eq('id', body.organization_id)
-        .not('hubspot_api_key', 'is', null)
-        .maybeSingle()
-
-      if (error) logger.warn('Org query error', { error: error.message })
-      if (data?.hubspot_api_key) {
-        orgsToSync = [{ id: data.id, hubspot_api_key: data.hubspot_api_key }]
+      const apiKey = await resolveHubSpotApiKey(supabase, body.organization_id)
+      if (apiKey) {
+        orgsToSync = [{ id: body.organization_id, hubspot_api_key: apiKey }]
+      } else {
+        logger.warn('No HubSpot credentials found for org', { organization_id: body.organization_id })
       }
     } else {
-      const { data, error } = await supabase
-        .from('organizations')
-        .select('id, hubspot_api_key')
-        .not('hubspot_api_key', 'is', null)
-        .eq('hubspot_connected', true)
+      // Cron : récupérer toutes les orgs avec HubSpot actif
+      // Priorité : organization_integrations (Vault) puis organizations.hubspot_api_key
+      const [{ data: integratedOrgs }, { data: legacyOrgs }] = await Promise.all([
+        supabase
+          .from('organization_integrations')
+          .select('organization_id, vault_access_token_id')
+          .eq('provider', 'hubspot')
+          .eq('status', 'active')
+          .not('vault_access_token_id', 'is', null),
+        supabase
+          .from('organizations')
+          .select('id, hubspot_api_key')
+          .not('hubspot_api_key', 'is', null)
+          .eq('hubspot_connected', true),
+      ])
 
-      if (error) logger.warn('Orgs query error', { error: error.message })
-      orgsToSync = (data ?? []).filter((o) => o.hubspot_api_key)
+      // Merge : Vault en priorité
+      const seen = new Set<string>()
+      for (const i of integratedOrgs ?? []) {
+        const key = await getVaultSecret(supabase, i.vault_access_token_id)
+        if (key) {
+          seen.add(i.organization_id)
+          orgsToSync.push({ id: i.organization_id, hubspot_api_key: key })
+        }
+      }
+      for (const o of legacyOrgs ?? []) {
+        if (!seen.has(o.id) && o.hubspot_api_key) {
+          orgsToSync.push({ id: o.id, hubspot_api_key: o.hubspot_api_key })
+        }
+      }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -275,6 +424,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     companies_found: number
     accounts_matched: number
     accounts_updated: number
+    auto_linked: number
     error?: string
   }> = []
 
@@ -290,7 +440,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       await syncLogger.start()
 
       try {
-        const { companiesFound, accountsMatched, accountsUpdated } = await syncOrgHubSpot(
+        const { companiesFound, accountsMatched, accountsUpdated, autoLinked } = await syncOrgHubSpot(
           supabase,
           org.id,
           org.hubspot_api_key,
@@ -298,22 +448,23 @@ Deno.serve(async (req: Request): Promise<Response> => {
         )
 
         syncLogger.increment('records_processed', accountsUpdated)
-        await syncLogger.complete({ companies_found: companiesFound, accounts_matched: accountsMatched })
+        await syncLogger.complete({ companies_found: companiesFound, accounts_matched: accountsMatched, auto_linked: autoLinked })
 
         results.push({
           organization_id: org.id,
           companies_found: companiesFound,
           accounts_matched: accountsMatched,
           accounts_updated: accountsUpdated,
+          auto_linked: autoLinked,
         })
 
-        logger.info('Org sync complete', { organization_id: org.id, accountsUpdated })
+        logger.info('Org sync complete', { organization_id: org.id, accountsUpdated, autoLinked })
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         logger.error('Org sync failed', { organization_id: org.id, error: msg })
         await syncLogger.fail(msg)
         await alertSlack(`sync-hubspot: org ${org.id} failed — ${msg}`, { level: 'warning' })
-        results.push({ organization_id: org.id, companies_found: 0, accounts_matched: 0, accounts_updated: 0, error: msg })
+        results.push({ organization_id: org.id, companies_found: 0, accounts_matched: 0, accounts_updated: 0, auto_linked: 0, error: msg })
       }
     }
 

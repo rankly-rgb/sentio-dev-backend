@@ -38,6 +38,7 @@ interface StripeListResponse<T> {
 interface StripeCustomer {
   id: string
   object: 'customer'
+  name?: string | null
   metadata?: Record<string, string>
   created: number
 }
@@ -209,11 +210,16 @@ async function syncCustomers(
   const rows: Record<string, unknown>[] = []
 
   for await (const customer of paginateStripe<StripeCustomer>('/customers', apiKey, extraParams, logger)) {
-    rows.push({
+    const row: Record<string, unknown> = {
       organization_id: organizationId,
       stripe_customer_id: customer.id,
       last_stripe_sync_at: syncedAt,
-    })
+    }
+    // customer.name est un nom d'entreprise (personne morale) en contexte B2B — Zero-PII compatible.
+    // Si null, on ne l'inclut pas pour que l'upsert ne soit pas converti en UPDATE implicite
+    // qui écraserait un display_name renseigné manuellement.
+    if (customer.name) row.display_name = customer.name
+    rows.push(row)
   }
 
   const { processed, failed } = await batchUpsert(supabase, 'accounts', rows, 'organization_id,stripe_customer_id')

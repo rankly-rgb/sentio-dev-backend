@@ -21,6 +21,7 @@ import {
 import { executeWorkflowStep } from '../_shared/workflow-executor.ts'
 import { dispatchAction } from '../_shared/action-dispatcher.ts'
 import { getBatchCompanyContacts } from '../_shared/hubspot-client.ts'
+import { resolveHubSpotApiKey } from '../_shared/vault.ts'
 
 const MAX_ACCOUNTS_PER_RUN = 200
 
@@ -41,14 +42,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (req.method !== 'POST') return errorResponse('Method not allowed', 405)
 
-  // Auth : vérifier le JWT utilisateur (ES256)
-  let auth
-  try {
-    auth = await verifyUserAuth(req)
-  } catch (err) {
-    if (err instanceof AuthError) return errorResponse(err.message, err.status)
-    return errorResponse('Authentication failed', 401)
-  }
+  // Détecter si l'appel vient du trigger interne (pg_net depuis PostgreSQL)
+  // On utilise PLAYBOOK_TRIGGER_SECRET (dédié) plutôt que SUPABASE_SERVICE_ROLE_KEY
+  // pour éviter l'ambiguïté entre la valeur auto-injectée et les secrets custom.
+  const incomingToken = (req.headers.get('Authorization') ?? '').replace('Bearer ', '')
+  const triggerSecret = Deno.env.get('PLAYBOOK_TRIGGER_SECRET') ?? ''
+  const isInternalTrigger = triggerSecret !== '' && incomingToken === triggerSecret
 
   let supabase: SupabaseClient
   try {
@@ -66,8 +65,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Invalid JSON body', 400)
   }
 
-  // Always enforce the authenticated user's organization (prevent cross-tenant access)
-  body.organization_id = auth.organizationId
+  if (isInternalTrigger) {
+    // Appel depuis le trigger DB — organization_id vient du body (déjà scopé par le trigger)
+    if (!body.organization_id) {
+      return errorResponse('organization_id required for internal trigger calls', 400)
+    }
+  } else {
+    // Appel utilisateur — vérifier le JWT et enforcer l'org depuis le profil
+    let auth
+    try {
+      auth = await verifyUserAuth(req)
+    } catch (err) {
+      if (err instanceof AuthError) return errorResponse(err.message, err.status)
+      return errorResponse('Authentication failed', 401)
+    }
+    body.organization_id = auth.organizationId
+  }
 
   const correlationId = crypto.randomUUID()
   const logger = createLogger({
@@ -128,7 +141,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { data: accounts } = await supabase
     .from('accounts')
-    .select('id, organization_id, stripe_customer_id, hubspot_company_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
+    .select('id, organization_id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
     .eq('organization_id', body.organization_id)
     .in('id', accountIds)
 
@@ -210,6 +223,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
+  // Résoudre le nom du segment pour l'interpolation dans les actions HubSpot
+  let segmentName: string | undefined
+  if (body.segment_id) {
+    const { data: seg } = await supabase
+      .from('account_segments')
+      .select('segment_name')
+      .eq('id', body.segment_id)
+      .maybeSingle()
+    segmentName = seg?.segment_name ?? undefined
+  }
+
+  // Résoudre la clé HubSpot depuis Vault (nécessaire pour enrollment et update company)
+  let hubspotApiKey: string | null = null
+  const needsHubspot = !isWorkflow && actions.some(
+    (a) => a.type === 'hubspot_enroll_sequence' || a.type === 'hubspot_update_company' || a.type === 'hubspot_create_task',
+  )
+  if (needsHubspot) {
+    hubspotApiKey = await resolveHubSpotApiKey(supabase, body.organization_id)
+    if (!hubspotApiKey) {
+      logger.warn('HubSpot API key not found — hubspot actions will fail', { organization_id: body.organization_id })
+    }
+  }
+
   // Pre-fetch contacts HubSpot en batch pour éviter N+1 (uniquement si des actions le nécessitent)
   let hubspotContactsCache: Map<string, string[]> = new Map()
   if (!isWorkflow && actions.some((a) => a.type === 'hubspot_enroll_sequence')) {
@@ -217,7 +253,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .map((a) => a.hubspot_company_id)
       .filter((id): id is string => !!id)
     if (companyIds.length > 0) {
-      hubspotContactsCache = await getBatchCompanyContacts(companyIds)
+      hubspotContactsCache = await getBatchCompanyContacts(companyIds, hubspotApiKey ?? undefined)
     }
   }
 
@@ -343,7 +379,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
             playbookId: body.playbook_id,
             executionId: execution.id,
             organizationId: body.organization_id,
+            playbookTitle: playbook.title,
+            segmentName,
             contactsCache: hubspotContactsCache,
+            hubspotApiKey: hubspotApiKey ?? undefined,
           }, supabase)
           actionResults.push(result)
           if (result.status === 'completed') completedSteps++

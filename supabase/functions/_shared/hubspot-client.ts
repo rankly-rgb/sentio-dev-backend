@@ -56,17 +56,21 @@ export interface HubSpotResult {
   error?: string
 }
 
+export interface HubSpotTaskResult extends HubSpotResult {
+  taskId?: string
+}
+
 // ── Helpers ──────────────────────────────────────────────────
 
-function getApiKey(): string {
-  const key = Deno.env.get('HUBSPOT_API_KEY')
+function getApiKey(override?: string): string {
+  const key = override ?? Deno.env.get('HUBSPOT_API_KEY')
   if (!key) throw new Error('HUBSPOT_API_KEY not configured')
   return key
 }
 
-function hubspotHeaders(): Record<string, string> {
+function hubspotHeaders(apiKey?: string): Record<string, string> {
   return {
-    'Authorization': `Bearer ${getApiKey()}`,
+    'Authorization': `Bearer ${getApiKey(apiKey)}`,
     'Content-Type': 'application/json',
   }
 }
@@ -83,13 +87,13 @@ function isTransient(err: unknown): boolean {
  * Récupère les contact IDs HubSpot associés à une company.
  * Retourne [] si la company n'existe pas (404).
  */
-export async function getCompanyContacts(companyId: string): Promise<string[]> {
+export async function getCompanyContacts(companyId: string, apiKey?: string): Promise<string[]> {
   const response = await retryWithBackoff(
     async () => {
       await hubspotRateLimiter.waitForToken()
       const res = await fetchWithTimeout(
         `${HUBSPOT_BASE_URL}/crm/v3/objects/companies/${companyId}/associations/contacts`,
-        { headers: hubspotHeaders() },
+        { headers: hubspotHeaders(apiKey) },
         TIMEOUT_MS,
       )
       if (res.status === 429) throw new Error('HubSpot rate limit (429)')
@@ -114,6 +118,7 @@ export async function getCompanyContacts(companyId: string): Promise<string[]> {
  */
 export async function getBatchCompanyContacts(
   companyIds: string[],
+  apiKey?: string,
 ): Promise<Map<string, string[]>> {
   const result = new Map<string, string[]>()
   if (companyIds.length === 0) return result
@@ -131,7 +136,7 @@ export async function getBatchCompanyContacts(
             `${HUBSPOT_BASE_URL}/crm/v3/associations/company/contact/batch/read`,
             {
               method: 'POST',
-              headers: hubspotHeaders(),
+              headers: hubspotHeaders(apiKey),
               body: JSON.stringify({ inputs: chunk.map((id) => ({ id })) }),
             },
             TIMEOUT_MS,
@@ -171,6 +176,7 @@ export async function enrollInSequence(
   contactId: string,
   sequenceId: string,
   senderId: string,
+  apiKey?: string,
 ): Promise<HubSpotResult> {
   try {
     const response = await retryWithBackoff(
@@ -180,7 +186,7 @@ export async function enrollInSequence(
           `${HUBSPOT_BASE_URL}/automation/v4/sequences/${sequenceId}/enrollments`,
           {
             method: 'POST',
-            headers: hubspotHeaders(),
+            headers: hubspotHeaders(apiKey),
             body: JSON.stringify({ contactId, senderId }),
           },
           TIMEOUT_MS,
@@ -196,9 +202,142 @@ export async function enrollInSequence(
     }
 
     const body = await response.text()
+    console.error(JSON.stringify({
+      level: 'error',
+      module: 'hubspot-client',
+      fn: 'enrollInSequence',
+      status: response.status,
+      sequenceId,
+      contactId,
+      error: body.slice(0, 500),
+    }))
     return { success: false, status: response.status, error: body.slice(0, 200) }
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(JSON.stringify({
+      level: 'error',
+      module: 'hubspot-client',
+      fn: 'enrollInSequence',
+      sequenceId,
+      contactId,
+      error: msg,
+    }))
+    return { success: false, error: msg }
+  }
+}
+
+/**
+ * Crée une tâche CRM HubSpot (type TODO).
+ * Retourne le taskId créé en cas de succès.
+ * Zero-PII : sujet et corps ne contiennent jamais d'email/nom de contact.
+ */
+export async function createTask(
+  subject: string,
+  body: string,
+  priority: 'HIGH' | 'MEDIUM' | 'LOW',
+  apiKey?: string,
+  ownerId?: string,
+): Promise<HubSpotTaskResult> {
+  try {
+    const properties: Record<string, string> = {
+      hs_task_subject:  subject,
+      hs_task_body:     body,
+      hs_task_status:   'NOT_STARTED',
+      hs_task_priority: priority,
+      hs_task_type:     'TODO',
+      hs_timestamp:     String(Date.now()),
+    }
+    if (ownerId) properties.hs_task_owner_id = ownerId
+
+    const response = await retryWithBackoff(
+      async () => {
+        await hubspotRateLimiter.waitForToken()
+        const res = await fetchWithTimeout(
+          `${HUBSPOT_BASE_URL}/crm/v3/objects/tasks`,
+          {
+            method: 'POST',
+            headers: hubspotHeaders(apiKey),
+            body: JSON.stringify({ properties }),
+          },
+          TIMEOUT_MS,
+        )
+        if (res.status === 429) throw new Error('HubSpot rate limit (429)')
+        return res
+      },
+      { maxRetries: 2, retryOn: isTransient },
+    )
+
+    if (response.status === 201) {
+      const data = await response.json() as { id: string }
+      return { success: true, status: 201, taskId: data.id }
+    }
+
+    const errBody = await response.text()
+    console.error(JSON.stringify({
+      level: 'error', module: 'hubspot-client', fn: 'createTask',
+      status: response.status, error: errBody.slice(0, 500),
+    }))
+    return { success: false, status: response.status, error: errBody.slice(0, 200) }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(JSON.stringify({ level: 'error', module: 'hubspot-client', fn: 'createTask', error: msg }))
+    return { success: false, error: msg }
+  }
+}
+
+/**
+ * Associe une tâche HubSpot à une company via batch v3.
+ * Testé et validé sur EU1 (POST /crm/v3/associations/tasks/companies/batch/create → 201).
+ * Non-bloquant : un échec doit être loggué mais ne doit pas faire échouer l'action.
+ */
+export async function associateTaskToCompany(
+  taskId: string,
+  companyId: string,
+  apiKey?: string,
+): Promise<HubSpotResult> {
+  await hubspotRateLimiter.waitForToken()
+  try {
+    const res = await fetchWithTimeout(
+      `${HUBSPOT_BASE_URL}/crm/v3/associations/tasks/companies/batch/create`,
+      {
+        method: 'POST',
+        headers: hubspotHeaders(apiKey),
+        body: JSON.stringify({
+          inputs: [{ from: { id: taskId }, to: { id: companyId }, type: 'task_to_company' }],
+        }),
+      },
+      TIMEOUT_MS,
+    )
+    if (res.ok || res.status === 201) return { success: true, status: res.status }
+    const b = await res.text()
+    return { success: false, status: res.status, error: b.slice(0, 200) }
+  } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * Lit les propriétés d'une company HubSpot.
+ * Retourne un objet { prop: value | null }. Retourne {} si la company n'existe pas.
+ */
+export async function getCompanyProperties(
+  companyId: string,
+  properties: string[],
+  apiKey?: string,
+): Promise<Record<string, string | null>> {
+  try {
+    await hubspotRateLimiter.waitForToken()
+    const res = await fetchWithTimeout(
+      `${HUBSPOT_BASE_URL}/crm/v3/objects/companies/${companyId}?properties=${properties.join(',')}`,
+      { headers: hubspotHeaders(apiKey) },
+      TIMEOUT_MS,
+    )
+    if (res.status === 404) return {}
+    if (!res.ok) return {}
+    const data = await res.json() as { properties: Record<string, string | null> }
+    return data.properties ?? {}
+  } catch {
+    return {}
   }
 }
 
@@ -209,6 +348,7 @@ export async function enrollInSequence(
 export async function updateCompanyProperties(
   companyId: string,
   properties: Record<string, unknown>,
+  apiKey?: string,
 ): Promise<HubSpotResult> {
   try {
     const response = await retryWithBackoff(
@@ -218,7 +358,7 @@ export async function updateCompanyProperties(
           `${HUBSPOT_BASE_URL}/crm/v3/objects/companies/${companyId}`,
           {
             method: 'PATCH',
-            headers: hubspotHeaders(),
+            headers: hubspotHeaders(apiKey),
             body: JSON.stringify({ properties }),
           },
           TIMEOUT_MS,

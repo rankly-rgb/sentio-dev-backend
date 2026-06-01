@@ -4,6 +4,11 @@ import {
   parseHubSpotDate,
   parsePositiveInt,
   mapHubSpotProperties,
+  buildStripeIdMap,
+  buildHubspotIdMap,
+  matchCompanyToAccount,
+  computeReversePushList,
+  batchArray,
 } from '../functions/_shared/hubspot-sync-helpers.ts'
 
 // ── normalizeLifecycleStage ──────────────────────────────────
@@ -166,5 +171,120 @@ describe('mapHubSpotProperties', () => {
     expect(result.open_deal_count).toBe(0)
     expect(result.open_ticket_count).toBe(0)
     expect(result.lifecycle_stage).toBeNull()
+  })
+})
+
+// ── buildStripeIdMap ─────────────────────────────────────────
+
+describe('buildStripeIdMap', () => {
+  it('maps stripe_customer_id to account_id', () => {
+    const accounts = [
+      { id: 'acc-1', stripe_customer_id: 'cus_abc', hubspot_company_id: null },
+      { id: 'acc-2', stripe_customer_id: 'cus_def', hubspot_company_id: 'hs-1' },
+    ]
+    const map = buildStripeIdMap(accounts)
+    expect(map.get('cus_abc')).toBe('acc-1')
+    expect(map.get('cus_def')).toBe('acc-2')
+    expect(map.size).toBe(2)
+  })
+
+  it('ignores accounts without stripe_customer_id', () => {
+    const accounts = [
+      { id: 'acc-1', stripe_customer_id: null, hubspot_company_id: null },
+      { id: 'acc-2', stripe_customer_id: 'cus_abc', hubspot_company_id: null },
+    ]
+    expect(buildStripeIdMap(accounts).size).toBe(1)
+  })
+})
+
+// ── buildHubspotIdMap ────────────────────────────────────────
+
+describe('buildHubspotIdMap', () => {
+  it('maps hubspot_company_id to account_id', () => {
+    const accounts = [
+      { id: 'acc-1', hubspot_company_id: 'hs-1', stripe_customer_id: null },
+      { id: 'acc-2', hubspot_company_id: null, stripe_customer_id: 'cus_abc' },
+    ]
+    const map = buildHubspotIdMap(accounts)
+    expect(map.get('hs-1')).toBe('acc-1')
+    expect(map.size).toBe(1)
+  })
+})
+
+// ── matchCompanyToAccount ────────────────────────────────────
+
+describe('matchCompanyToAccount', () => {
+  const stripeMap = new Map([['cus_abc', 'acc-1'], ['cus_def', 'acc-2']])
+  const linkedMap = new Map([['hs-existing', 'acc-3']])
+
+  it('retourne null si aucun match', () => {
+    const company = { id: 'hs-new', properties: {} }
+    expect(matchCompanyToAccount(company, stripeMap, linkedMap)).toBeNull()
+  })
+
+  it('match via lien existant (hubspot_company_id)', () => {
+    const company = { id: 'hs-existing', properties: {} }
+    expect(matchCompanyToAccount(company, stripeMap, linkedMap)).toBe('acc-3')
+  })
+
+  it('match via id_stripe', () => {
+    const company = { id: 'hs-new', properties: { id_stripe: 'cus_abc' } }
+    expect(matchCompanyToAccount(company, stripeMap, linkedMap)).toBe('acc-1')
+  })
+
+  it('trim whitespace dans id_stripe', () => {
+    const company = { id: 'hs-new', properties: { id_stripe: '  cus_def  ' } }
+    expect(matchCompanyToAccount(company, stripeMap, linkedMap)).toBe('acc-2')
+  })
+
+  it('id_stripe vide → null', () => {
+    const company = { id: 'hs-new', properties: { id_stripe: '' } }
+    expect(matchCompanyToAccount(company, stripeMap, linkedMap)).toBeNull()
+  })
+
+  it('prioritise le lien existant sur id_stripe', () => {
+    const company = { id: 'hs-existing', properties: { id_stripe: 'cus_abc' } }
+    expect(matchCompanyToAccount(company, stripeMap, linkedMap)).toBe('acc-3')
+  })
+})
+
+// ── computeReversePushList ───────────────────────────────────
+
+describe('computeReversePushList', () => {
+  it('retourne les paires hubspot_company_id / stripe_customer_id', () => {
+    const linked = [
+      { hubspot_company_id: 'hs-1', account_id: 'acc-1' },
+      { hubspot_company_id: 'hs-2', account_id: 'acc-2' },
+    ]
+    const accounts = [
+      { id: 'acc-1', stripe_customer_id: 'cus_abc' },
+      { id: 'acc-2', stripe_customer_id: null },
+    ]
+    const result = computeReversePushList(linked, accounts)
+    expect(result).toHaveLength(1)
+    expect(result[0]).toEqual({ hubspot_company_id: 'hs-1', stripe_customer_id: 'cus_abc' })
+  })
+
+  it('retourne [] si aucun stripe_customer_id', () => {
+    const linked = [{ hubspot_company_id: 'hs-1', account_id: 'acc-1' }]
+    const accounts = [{ id: 'acc-1', stripe_customer_id: null }]
+    expect(computeReversePushList(linked, accounts)).toHaveLength(0)
+  })
+})
+
+// ── batchArray ───────────────────────────────────────────────
+
+describe('batchArray', () => {
+  it('découpe en lots de taille donnée', () => {
+    const items = [1, 2, 3, 4, 5]
+    expect(batchArray(items, 2)).toEqual([[1, 2], [3, 4], [5]])
+  })
+
+  it('retourne [] si tableau vide', () => {
+    expect(batchArray([], 10)).toEqual([])
+  })
+
+  it('retourne un seul lot si taille >= longueur', () => {
+    expect(batchArray([1, 2, 3], 10)).toEqual([[1, 2, 3]])
   })
 })
