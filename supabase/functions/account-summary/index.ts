@@ -29,7 +29,7 @@ import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 
 const SUMMARY_TTL_MS = 24 * 60 * 60 * 1000
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
-const MODEL = 'claude-haiku-4-5'
+const MODEL = 'claude-haiku-4-5-20251001'
 const FUNCTION_VERSION = '1.3.0'
 
 // ── Entrypoint ───────────────────────────────────────────────

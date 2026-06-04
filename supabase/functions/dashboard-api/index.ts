@@ -501,9 +501,9 @@ async function handleBenchmarks(
     nrr = 100 // pas d'historique = neutre
   }
 
-  // Churn rate revenue = MRR churné / MRR de départ × 100
+  // Churn rate revenue = MRR churné / MRR de départ × 100 (plafonné à 100%)
   const churnRate = startingMrr > 0
-    ? Math.round((churn12m / startingMrr) * 1000) / 10
+    ? Math.min(100, Math.round((churn12m / startingMrr) * 1000) / 10)
     : 0
 
   // Croissance MRR = mouvements nets / MRR de départ × 100

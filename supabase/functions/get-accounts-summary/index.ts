@@ -80,11 +80,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const dangerThreshold = prefs?.danger_threshold ?? 40
   const atRiskThreshold = prefs?.at_risk_threshold ?? 60
 
-  // Récupérer tous les comptes de l'org
+  // Récupérer uniquement les comptes actifs (mrr_cents > 0) — les comptes churned
+  // ne doivent pas gonfler le compteur "accounts_at_risk" du dashboard.
   const { data: accounts, error: accErr } = await supabase
     .from('accounts')
     .select('id, company_name, mrr_cents, is_demo')
     .eq('organization_id', orgId)
+    .gt('mrr_cents', 0)
 
   if (accErr) {
     console.error(JSON.stringify({ level: 'error', function_name: 'get-accounts-summary', message: accErr.message }))
