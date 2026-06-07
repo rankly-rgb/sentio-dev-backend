@@ -156,12 +156,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .limit(20)
 
       if (acctError) {
-        console.error(JSON.stringify({
-          level: 'error',
-          function_name: 'churn-alert',
-          org_id: org.id,
-          message: acctError.message,
-        }))
+        const msg = `accounts query error: ${acctError.message}`
+        console.error(JSON.stringify({ level: 'error', function_name: 'churn-alert', org_id: org.id, message: msg }))
         results.errors++
         continue
       }
@@ -190,21 +186,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
         }))
       } else {
         results.errors++
-        console.error(JSON.stringify({
-          level: 'error',
-          function_name: 'churn-alert',
-          org_id: org.id,
-          message: emailResult.error,
-        }))
+        console.error(JSON.stringify({ level: 'error', function_name: 'churn-alert', org_id: org.id, message: emailResult.error }))
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      console.error(JSON.stringify({
-        level: 'error',
-        function_name: 'churn-alert',
-        org_id: org.id,
-        message: msg,
-      }))
+      console.error(JSON.stringify({ level: 'error', function_name: 'churn-alert', org_id: org.id, message: msg }))
       results.errors++
     }
   }
