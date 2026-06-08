@@ -168,6 +168,10 @@ verify_jwt = false
 [functions.stripe-oauth-callback]
 verify_jwt = false
 
+# export-csv : JWT vérifié dans le code (ES256 — export comptes + transit PII Stripe)
+[functions.export-csv]
+verify_jwt = false
+
 # churn-alert : cron quotidien 06:00 UTC — alerte si comptes churn_risk >= 70 mis à jour dans les 24h
 [functions.churn-alert]
 verify_jwt = false

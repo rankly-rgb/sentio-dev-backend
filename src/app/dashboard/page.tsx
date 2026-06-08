@@ -2,6 +2,7 @@ import { Suspense } from 'react'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { RefreshDataButton } from '@/components/RefreshDataButton'
+import { ExportCsvButton } from '@/components/ExportCsvButton'
 
 interface DashboardStats {
   total_accounts: number
@@ -162,6 +163,29 @@ export default async function DashboardPage() {
             value={stats.expansion_opportunities.toString()}
             description="Expansion score > 75"
             variant={stats.expansion_opportunities > 0 ? 'warning' : 'neutral'}
+          />
+        </div>
+
+        {/* Export */}
+        <div className="bg-white rounded-xl border border-slate-200 p-6">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="font-semibold text-slate-900">Export des comptes</h3>
+              <p className="text-sm text-slate-500 mt-0.5">Comptes triés par risque churn décroissant</p>
+            </div>
+          </div>
+          <ExportCsvButton label="↓ Export CSV" />
+        </div>
+
+        {/* Export comptes critiques */}
+        <div className="bg-white rounded-xl border border-red-100 p-6">
+          <div className="mb-3">
+            <h3 className="font-semibold text-slate-900">Comptes en danger critique</h3>
+            <p className="text-sm text-slate-500 mt-0.5">Churn risk ≥ 70 — prêts pour une séquence de rétention</p>
+          </div>
+          <ExportCsvButton
+            label="↓ Export comptes critiques"
+            minChurnRisk={70}
           />
         </div>
 
