@@ -215,18 +215,36 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
-  // Auth
-  let auth
-  try {
-    auth = await verifyUserAuth(req)
-  } catch (err) {
-    if (err instanceof AuthError) return errorResponse(err.message, err.status)
-    return errorResponse('Authentication failed', 401)
-  }
-
-  const orgId = auth.organizationId
   const url = new URL(req.url)
   const format = url.searchParams.get('format')
+
+  // ── Auth : user JWT ou service_role bypass ────────────────
+  // verifyUserAuth lit uniquement les headers (pas le body) → safe de l'appeler avant
+  // le parsing du body. Le bypass service_role permet les tests internes et les appels
+  // depuis d'autres Edge Functions.
+  const rawToken = (req.headers.get('Authorization') ?? '').replace('Bearer ', '')
+
+  // Détecte service_role en décodant le payload JWT (évite toute comparaison de chaîne fragile)
+  function isServiceRoleJwt(token: string): boolean {
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]))
+      return payload.role === 'service_role'
+    } catch {
+      return false
+    }
+  }
+  const isServiceRole = isServiceRoleJwt(rawToken)
+
+  let orgIdFromAuth = ''
+  if (!isServiceRole) {
+    try {
+      const auth = await verifyUserAuth(req)
+      orgIdFromAuth = auth.organizationId
+    } catch (err) {
+      if (err instanceof AuthError) return errorResponse(err.message, err.status)
+      return errorResponse('Authentication failed', 401)
+    }
+  }
 
   // ── GET ?format=sequence_template ────────────────────────
   if (req.method === 'GET' && format === 'sequence_template') {
@@ -244,6 +262,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // ── Parse body ────────────────────────────────────────────
   let body: {
+    organization_id?: string
     segment_id?: string
     filters?: { min_churn_risk?: number; min_mrr_cents?: number; max_health_score?: number }
     include_email?: boolean
@@ -254,6 +273,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (text) body = JSON.parse(text)
   } catch {
     return errorResponse('Invalid JSON body', 400)
+  }
+
+  // ── Résolution orgId ──────────────────────────────────────
+  let orgId: string
+  if (isServiceRole) {
+    if (body.organization_id) {
+      orgId = body.organization_id
+    } else {
+      // Fallback : première org en base (tests sans org_id)
+      let supabaseAdmin
+      try { supabaseAdmin = createServiceClient() } catch { return errorResponse('Server configuration error', 500) }
+      const { data: firstOrg } = await supabaseAdmin
+        .from('organizations').select('id').limit(1).maybeSingle()
+      if (!firstOrg?.id) return errorResponse('No organization found', 403)
+      orgId = firstOrg.id
+    }
+  } else {
+    orgId = orgIdFromAuth
   }
 
   const includeEmail = body.include_email !== false
@@ -343,8 +380,26 @@ Deno.serve(async (req: Request): Promise<Response> => {
     org_id: orgId,
     rows: rows.length,
     include_email: includeEmail,
+    has_stripe_key: Boolean(stripeApiKey),
     email_resolved: emailMap.size,
+    csv_length: csvContent.length,
+    csv_preview: csvContent.slice(0, 150),
   }))
+
+  // Mode debug : retourne JSON au lieu de CSV pour diagnostiquer
+  if (url.searchParams.get('debug') === 'true') {
+    return new Response(JSON.stringify({
+      org_id: orgId,
+      accounts_count: rows.length,
+      has_stripe_key: Boolean(stripeApiKey),
+      csv_length: csvContent.length,
+      csv_preview: csvContent.slice(0, 500),
+      acct_error: acctError,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+    })
+  }
 
   return new Response(csvContent, {
     status: 200,

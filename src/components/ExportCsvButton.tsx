@@ -19,7 +19,13 @@ export function ExportCsvButton({ segmentId, minChurnRisk, label = '↓ Export C
 
     try {
       const supabase = createSupabaseBrowserClient()
+      // getUser() valide le token côté serveur (contrairement à getSession qui lit le cache local)
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error('Session expirée — veuillez vous reconnecter')
+
       const { data: { session } } = await supabase.auth.getSession()
+      const token = session?.access_token
+      if (!token) throw new Error('Session expirée — veuillez vous reconnecter')
 
       const body: Record<string, unknown> = {
         include_email: true,
@@ -33,14 +39,17 @@ export function ExportCsvButton({ segmentId, minChurnRisk, label = '↓ Export C
         {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${session?.access_token}`,
+            Authorization: `Bearer ${token}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
         },
       )
 
-      if (!resp.ok) throw new Error(`Export failed: ${resp.status}`)
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '')
+        throw new Error(`Export failed (${resp.status})${errText ? ': ' + errText.slice(0, 100) : ''}`)
+      }
 
       const blob = await resp.blob()
       const url = URL.createObjectURL(blob)
@@ -64,13 +73,18 @@ export function ExportCsvButton({ segmentId, minChurnRisk, label = '↓ Export C
     try {
       const supabase = createSupabaseBrowserClient()
       const { data: { session } } = await supabase.auth.getSession()
+      const token = session?.access_token
+      if (!token) {
+        setError('Session expirée — veuillez vous reconnecter')
+        return
+      }
 
       const url = new URL(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/export-csv`)
       url.searchParams.set('format', 'sequence_template')
       if (segmentId) url.searchParams.set('segment_id', segmentId)
 
       const resp = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${session?.access_token}` },
+        headers: { Authorization: `Bearer ${token}` },
       })
 
       if (!resp.ok) throw new Error(`Download failed: ${resp.status}`)
