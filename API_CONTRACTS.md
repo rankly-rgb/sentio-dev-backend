@@ -740,6 +740,56 @@ Suggestion déterministe du playbook le plus pertinent à activer, basée sur l'
 
 ---
 
+### playbook-templates (GET)
+
+Retourne la liste des templates de playbooks disponibles en V1.
+Pas de filtre organization — les templates sont définis dans le code (constantes TypeScript).
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/playbook-templates` |
+| **Méthode** | `GET` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**Query params** : `locale` (optionnel, `'fr'` | `'en'`, défaut `'fr'`)
+
+**Response 200**
+```json
+{
+  "data": {
+    "templates": [
+      {
+        "id": "churn-critical-alert",
+        "title": "Alerte churn critique",
+        "description": "Envoie une alerte email immédiate...",
+        "playbook_type": "automated",
+        "template_category": "churn_prevention",
+        "priority": "critical",
+        "is_automated": true,
+        "trigger_conditions": { "health_score_below": 40, "evaluation": "daily" },
+        "actions": [{ "type": "send_email", "order": 1, "config": { "email_subject": "...", "email_body_html": "..." } }]
+      }
+    ],
+    "locale": "fr",
+    "total": 6
+  }
+}
+```
+
+**Codes d'erreur** : `401` (JWT absent ou invalide), `405` (méthode non autorisée)
+
+**Templates V1 disponibles** : `churn-critical-alert`, `churn-progressive-decline`, `renewal-upcoming`, `payment-recovery`, `expansion-opportunity`, `reactivation-churned`
+
+**Utilisé par** : frontend modal "New playbook" — sélection de template
+
+**Créer un playbook depuis un template** :
+```
+POST /playbook-crud { "from_template_id": "churn-critical-alert", "title": "Mon alerte custom" }
+→ 201 { "id": "uuid", "title": "Mon alerte custom", "actions": [...], "organization_id": "..." }
+```
+
+---
+
 ### outbound-webhook-test (POST)
 
 Envoie un payload de test vers une destination outbound configurée (sans attendre un vrai événement).

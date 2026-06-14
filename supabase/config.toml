@@ -80,6 +80,10 @@ verify_jwt = false
 [functions.playbooks-suggested]
 verify_jwt = false
 
+# playbook-templates : JWT vérifié dans le code (ES256) — templates constants, pas de DB
+[functions.playbook-templates]
+verify_jwt = false
+
 # session-ping : JWT vérifié dans le code (ES256 — chantier 7)
 [functions.session-ping]
 verify_jwt = false

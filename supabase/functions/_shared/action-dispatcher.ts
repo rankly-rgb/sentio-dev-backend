@@ -1,21 +1,12 @@
 // ============================================================
 // Action Dispatcher — dispatch réel des actions playbook
-// Remplace executeAction() (log-only) pour les actions externes
+// V1 : send_email (Resend) + export_csv (déclaratif) + log-only
+// V2 : réactiver HubSpot (cases commentés ci-dessous)
 // ============================================================
 
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
-import {
-  getCompanyContacts,
-  enrollInSequence,
-  updateCompanyProperties,
-  createTask,
-  associateTaskToCompany,
-  getCompanyProperties,
-} from './hubspot-client.ts'
 import { writeToDLQ } from './dlq.ts'
 import type { PlaybookAction, AccountData, ActionResult } from './playbook-engine.ts'
-
-const MAX_CONTACTS_PER_COMPANY = 5
 
 interface DispatchContext {
   playbookId: string
@@ -23,19 +14,22 @@ interface DispatchContext {
   organizationId: string
   playbookTitle?: string
   segmentName?: string
-  /** Cache pré-rempli par getBatchCompanyContacts. Absent du Map = fallback individuel. */
+  /** Email de notification de l'org — requis pour l'action send_email. */
+  organization_notification_email?: string
+  /** Nombre de comptes ciblés — utilisé par export_csv pour le message. */
+  accounts_targeted?: number
+  /** V2 — HubSpot : cache contacts pré-rempli par getBatchCompanyContacts. */
   contactsCache?: Map<string, string[]>
-  /** Clé API HubSpot résolue depuis Vault. Fallback sur env HUBSPOT_API_KEY si absent. */
+  /** V2 — HubSpot : clé API résolue depuis Vault. */
   hubspotApiKey?: string
 }
 
 /**
  * Dispatch une action playbook vers le système externe approprié.
- * - hubspot_enroll_sequence : enrôle les contacts HubSpot de la company dans une séquence
- * - hubspot_update_company  : met à jour des propriétés HubSpot de la company
- * - autres types            : log-only (V1, pas de dispatch externe)
- *
- * Écrit en DLQ sur échec non-retry-able.
+ * V1 :
+ *   - send_email     : alerte email via Resend (organization_notification_email requis)
+ *   - export_csv     : marqueur déclaratif — téléchargement géré côté frontend
+ *   - log_note / flag_for_review / autres : log-only
  */
 export async function dispatchAction(
   action: PlaybookAction,
@@ -51,224 +45,63 @@ export async function dispatchAction(
 
   try {
     switch (action.type) {
-      case 'hubspot_enroll_sequence': {
-        const sequenceId = action.config.sequence_id as string | undefined
-        const senderId = action.config.sender_id as string | undefined
+      /* V2 — réactiver quand HubSpot sera réintégré
+      case 'hubspot_enroll_sequence': { ... }
+      case 'hubspot_update_company': { ... }
+      case 'hubspot_create_task': { ... }
+      */
 
-        if (!sequenceId || !senderId) {
-          return {
-            ...base,
-            status: 'failed',
-            message: 'hubspot_enroll_sequence requires sequence_id and sender_id in config',
-          }
+      case 'send_email': {
+        const emailSubject = action.config.email_subject as string | undefined
+        const emailBodyHtml = action.config.email_body_html as string | undefined
+        const resendApiKey = Deno.env.get('RESEND_API_KEY')
+        const notificationEmail = context.organization_notification_email
+
+        if (!resendApiKey) {
+          return { ...base, status: 'failed', message: 'RESEND_API_KEY not configured' }
+        }
+        if (!notificationEmail) {
+          return { ...base, status: 'failed', message: 'No notification_email configured for this organization' }
+        }
+        if (!emailSubject || !emailBodyHtml) {
+          return { ...base, status: 'failed', message: 'send_email requires email_subject and email_body_html in config' }
         }
 
-        if (!account.hubspot_company_id) {
-          return {
-            ...base,
-            status: 'skipped',
-            message: `Account ${account.id} has no hubspot_company_id — skipping enrollment`,
-          }
+        const res = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${resendApiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: 'Sentio AI <alerts@sentioapp.io>',
+            to: [notificationEmail],
+            subject: emailSubject,
+            html: emailBodyHtml,
+          }),
+        })
+
+        if (!res.ok) {
+          const errText = await res.text()
+          return { ...base, status: 'failed', message: `Resend error ${res.status}: ${errText.slice(0, 200)}` }
         }
 
-        // Utiliser le cache batch si disponible, sinon fallback individuel
-        const contactIds = context.contactsCache?.has(account.hubspot_company_id)
-          ? context.contactsCache.get(account.hubspot_company_id)!
-          : await getCompanyContacts(account.hubspot_company_id, context.hubspotApiKey)
-
-        if (contactIds.length === 0) {
-          return {
-            ...base,
-            status: 'skipped',
-            message: `No HubSpot contacts found for company ${account.hubspot_company_id}`,
-          }
-        }
-
-        const toEnroll = contactIds.slice(0, MAX_CONTACTS_PER_COMPANY)
-        const results = await Promise.allSettled(
-          toEnroll.map((cid) => enrollInSequence(cid, sequenceId, senderId, context.hubspotApiKey)),
-        )
-
-        const failures = results.filter(
-          (r) => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success),
-        )
-        const enrolledCount = toEnroll.length - failures.length
-
-        if (failures.length > 0) {
-          const firstErr = failures[0].status === 'rejected'
-            ? String(failures[0].reason)
-            : (failures[0].value as ActionResult & { error?: string }).error ?? 'unknown'
-
-          await writeToDLQ(supabase, {
-            organization_id: context.organizationId,
-            provider: 'hubspot',
-            event_type: 'sequence_enrollment_failed',
-            payload: {
-              account_id: account.id,
-              company_id: account.hubspot_company_id,
-              sequence_id: sequenceId,
-              contact_ids: toEnroll,
-            },
-            error_message: `${failures.length}/${toEnroll.length} contacts failed — ${firstErr}`,
-          })
-        }
-
-        return {
-          ...base,
-          status: enrolledCount > 0 ? 'completed' : 'failed',
-          message: `Enrolled ${enrolledCount}/${toEnroll.length} contacts in sequence ${sequenceId}`,
-        }
+        return { ...base, status: 'completed', message: `Email sent to ${notificationEmail}` }
       }
 
-      case 'hubspot_update_company': {
-        const properties = action.config.properties as Record<string, unknown> | undefined
-
-        if (!properties || Object.keys(properties).length === 0) {
-          return {
-            ...base,
-            status: 'failed',
-            message: 'hubspot_update_company requires a non-empty properties object in config',
-          }
-        }
-
-        if (!account.hubspot_company_id) {
-          return {
-            ...base,
-            status: 'skipped',
-            message: `Account ${account.id} has no hubspot_company_id — skipping update`,
-          }
-        }
-
-        const result = await updateCompanyProperties(account.hubspot_company_id, properties, context.hubspotApiKey)
-
-        if (!result.success) {
-          await writeToDLQ(supabase, {
-            organization_id: context.organizationId,
-            provider: 'hubspot',
-            event_type: 'company_update_failed',
-            payload: {
-              account_id: account.id,
-              company_id: account.hubspot_company_id,
-              properties,
-            },
-            error_message: result.error ?? `HTTP ${result.status}`,
-          })
-        }
-
-        return {
-          ...base,
-          status: result.success ? 'completed' : 'failed',
-          message: result.success
-            ? `Updated company ${account.hubspot_company_id} properties`
-            : `Failed to update company: ${result.error ?? `HTTP ${result.status}`}`,
-        }
-      }
-
-      case 'hubspot_create_task': {
-        if (!account.hubspot_company_id) {
-          return {
-            ...base,
-            status: 'skipped',
-            message: `Account ${account.id} has no hubspot_company_id — skipping task creation`,
-          }
-        }
-
-        const rawBody = (action.config.task_body as string | undefined) ?? ''
-        const priorityRaw = action.config.priority as string | undefined
-        const priority = (['HIGH', 'MEDIUM', 'LOW'].includes(priorityRaw ?? '')
-          ? priorityRaw
-          : 'HIGH') as 'HIGH' | 'MEDIUM' | 'LOW'
-
-        // Sujet : urgence visuelle + nom lisible + MRR — Zero-PII (display_name = nom d'entreprise)
-        const mrrEuros = account.mrr_cents != null ? Math.round(account.mrr_cents / 100) : 0
-        const urgency =
-          (account.churn_risk_score ?? 0) >= 70 ? 'URGENT' :
-          (account.churn_risk_score ?? 0) >= 40 ? 'Risque modéré' :
-          'Opportunité'
-        // displayName : pour interpolation {{display_name}} dans le corps
-        // accountLabel : pour le sujet (fallback court avec slice pour lisibilité)
-        const displayName = account.display_name ?? account.stripe_customer_id ?? account.id
-        const accountLabel = account.display_name
-          ?? `Client ${(account.stripe_customer_id ?? '').slice(-6)}`
-        const subject = `Sentio [${urgency}] — ${accountLabel} (${mrrEuros}€/mois)`
-
-        // Récupérer le propriétaire HubSpot de la company (non-bloquant si absent)
-        const companyProps = await getCompanyProperties(
-          account.hubspot_company_id,
-          ['hubspot_owner_id'],
-          context.hubspotApiKey,
-        )
-        const ownerId = companyProps.hubspot_owner_id ?? undefined
-
-        // Interpolation des variables dans le corps
-        const today = new Date().toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' })
-        const body = rawBody
-          .replace(/\{\{display_name\}\}/g, displayName)
-          .replace(/\{\{health_score\}\}/g, String(account.health_score ?? 'N/A'))
-          .replace(/\{\{churn_risk_score\}\}/g, String(account.churn_risk_score ?? 'N/A'))
-          .replace(/\{\{mrr_cents\}\}/g, String(account.mrr_cents ?? 0))
-          .replace(/\{\{mrr_euros\}\}/g, String(mrrEuros))
-          .replace(/\{\{segment_name\}\}/g, context.segmentName ?? '')
-          .replace(/\{\{today\}\}/g, today)
-          .replace(/\{\{account_id\}\}/g, account.id)
-
-        const taskResult = await createTask(subject, body, priority, context.hubspotApiKey, ownerId)
-
-        if (!taskResult.success || !taskResult.taskId) {
-          await writeToDLQ(supabase, {
-            organization_id: context.organizationId,
-            provider: 'hubspot',
-            event_type: 'task_creation_failed',
-            payload: {
-              account_id: account.id,
-              company_id: account.hubspot_company_id,
-            },
-            error_message: taskResult.error ?? `HTTP ${taskResult.status}`,
-          })
-          return {
-            ...base,
-            status: 'failed',
-            message: `Failed to create HubSpot task: ${taskResult.error ?? `HTTP ${taskResult.status}`}`,
-          }
-        }
-
-        // Association tâche → company (non-bloquante)
-        const assocResult = await associateTaskToCompany(
-          taskResult.taskId,
-          account.hubspot_company_id,
-          context.hubspotApiKey,
-        )
-        if (!assocResult.success) {
-          console.error(JSON.stringify({
-            level: 'warn',
-            module: 'action-dispatcher',
-            fn: 'hubspot_create_task',
-            message: 'Task created but company association failed (non-blocking)',
-            task_id: taskResult.taskId,
-            company_id: account.hubspot_company_id,
-            error: assocResult.error,
-          }))
-        }
-
+      case 'export_csv': {
+        // En V1, export_csv est déclaratif : marque l'exécution comme réussie et
+        // signale au frontend qu'un export est disponible via l'endpoint CSV existant.
+        // Transit PII : les emails sont résolus depuis Stripe côté frontend, jamais stockés.
         return {
           ...base,
           status: 'completed',
-          message: `HubSpot task ${taskResult.taskId} created for account ${account.id}` +
-            (assocResult.success ? ' (associated to company)' : ' (association failed — non-blocking)'),
+          message: `Export CSV disponible pour ${context.accounts_targeted ?? 0} compte(s) ciblé(s)`,
         }
       }
 
-      case 'send_email':
-        // send_email n'est supporté que dans les workflow playbooks (via executeWorkflowStep)
-        // Dans un playbook standard il n'y a pas de contexte CSM email — échouer explicitement
-        return {
-          ...base,
-          status: 'failed',
-          message: 'send_email is only supported in workflow playbooks, not standard playbooks',
-        }
-
       default:
-        // Autres types d'actions (V1 : log-only, pas de dispatch externe)
+        // Autres types d'actions (log_note, flag_for_review, etc.) : log-only
         return {
           ...base,
           status: 'completed',
@@ -282,7 +115,7 @@ export async function dispatchAction(
 
     await writeToDLQ(supabase, {
       organization_id: context.organizationId,
-      provider: 'hubspot',
+      provider: 'outbound',
       event_type: 'action_dispatch_error',
       payload: {
         account_id: account.id,

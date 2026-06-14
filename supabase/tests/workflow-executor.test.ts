@@ -261,9 +261,9 @@ describe('validateWorkflowSteps', () => {
     const step: WorkflowStep = {
       step_order: 1,
       delay_days: 0,
-      action_type: 'create_task',
-      title: 'Create task',
-      config: { title: 'Follow-up task' },
+      action_type: 'log_note',
+      title: 'Log note',
+      config: { note: 'Follow-up noted' },
     }
     const result = validateWorkflowSteps([step])
     expect(result).toHaveLength(1)
