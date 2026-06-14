@@ -657,6 +657,11 @@ Exécute un playbook manuellement sur des comptes ou un segment.
 `account_ids` OU `segment_id` — au moins l'un. Max 200 comptes par run.  
 `cooldown_hours` : ignore les comptes déjà exécutés dans ce délai (défaut : pas de cooldown).
 
+**Action send_email**  
+Requiert que l'organisation ait `notification_email` configuré dans la table `organizations`.
+L'email est résolu en mémoire au moment de l'exécution, non stocké.
+Si absent : action retourne `status: 'failed'` avec message explicite dans `playbook_executions.result`.
+
 **Response 200**
 ```json
 { "executed": 3, "skipped": 1, "failed": 0 }

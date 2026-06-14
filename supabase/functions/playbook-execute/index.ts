@@ -257,6 +257,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
+  // Récupérer l'email de notification de l'organisation (requis pour l'action send_email)
+  const { data: orgNotifData } = await supabase
+    .from('organizations')
+    .select('notification_email')
+    .eq('id', body.organization_id)
+    .maybeSingle()
+
+  const organizationNotificationEmail: string | null = orgNotifData?.notification_email ?? null
+  if (!organizationNotificationEmail) {
+    logger.warn('notification_email non configuré pour cette organisation', { organization_id: body.organization_id })
+  }
+
   // Traitement d'un compte — retourne le résultat ou null si le compte est ignoré
   const processAccount = async (account: Record<string, unknown>): Promise<typeof executionResults[number] | null> => {
     const acc = account as AccountData
@@ -381,6 +393,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
             organizationId: body.organization_id,
             playbookTitle: playbook.title,
             segmentName,
+            organization_notification_email: organizationNotificationEmail ?? undefined,
+            accounts_targeted: finalAccounts.length,
             contactsCache: hubspotContactsCache,
             hubspotApiKey: hubspotApiKey ?? undefined,
           }, supabase)
