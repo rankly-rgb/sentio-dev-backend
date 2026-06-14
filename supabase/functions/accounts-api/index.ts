@@ -107,6 +107,7 @@ async function handleList(
     .from('accounts')
     .select(
       'id, stripe_customer_id, display_name, plan_tier, billing_interval, mrr_cents, ' +
+      'seat_count, seat_limit, ' +
       'health_score, churn_risk_score, expansion_score, product_usage_score, ' +
       'financial_score, engagement_score, contract_score, ' +
       'contract_end_date, scores_calculated_at, created_at, updated_at',

@@ -150,6 +150,9 @@ verify_jwt = false
 verify_jwt = false
 
 # Onboarding Flow — connexion Stripe & HubSpot
+[functions.stripe-product-mappings-api]
+verify_jwt = false
+
 [functions.verify-stripe-token]
 verify_jwt = false
 
