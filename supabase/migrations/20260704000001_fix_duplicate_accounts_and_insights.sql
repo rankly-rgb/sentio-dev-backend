@@ -363,12 +363,27 @@ WHERE id IN (
 -- calendar day, regardless of status.
 --
 -- Note: column `detected_at` does not exist in this schema.
---       Using DATE(created_at) as the equivalent expression.
+--       Using created_at::date (UTC) as the equivalent expression.
+--
+-- DATE(timestamptz) is STABLE (timezone-sensitive) — PostgreSQL requires
+-- IMMUTABLE for index expressions. We wrap the cast in an IMMUTABLE helper
+-- that pins the conversion to UTC, making it safe for index use.
 --
 -- The old partial index idx_ai_insights_active_dedup is kept as-is
--- (for backward compatibility with existing queries that may filter
--- on status='active'); the new index provides the full deduplication.
+-- (for backward compatibility with existing queries that filter status='active');
+-- the new index provides full day-level deduplication across all statuses.
 -- ──────────────────────────────────────────────────────────────
+
+-- IMMUTABLE helper: convert timestamptz → UTC date for index use
+CREATE OR REPLACE FUNCTION public.timestamptz_to_utc_date(ts TIMESTAMPTZ)
+RETURNS DATE LANGUAGE SQL IMMUTABLE PARALLEL SAFE
+AS $$ SELECT ($1 AT TIME ZONE 'UTC')::date $$;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_insights_org_account_type_day
-  ON public.ai_insights (organization_id, account_id, insight_type, DATE(created_at))
+  ON public.ai_insights (
+    organization_id,
+    account_id,
+    insight_type,
+    public.timestamptz_to_utc_date(created_at)
+  )
   WHERE account_id IS NOT NULL;
