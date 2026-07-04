@@ -143,6 +143,10 @@ verify_jwt = false
 [functions.get-accounts-summary]
 verify_jwt = false
 
+# get-today-status : JWT vérifié dans le code (ES256 — statut portefeuille Today)
+[functions.get-today-status]
+verify_jwt = false
+
 [functions.save-org-preferences]
 verify_jwt = false
 
