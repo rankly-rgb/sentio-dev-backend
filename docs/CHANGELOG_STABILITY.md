@@ -4,6 +4,40 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Accounts — priority_label calculé (2026-07-05)
+
+Audit préalable : aucune vue SQL n'existait sur `accounts` (aucun fichier sous `supabase/views/`), et `accounts-api` (seul endpoint de liste de comptes — il n'y a pas de fonction `get-accounts`) sélectionnait directement la table `accounts` sans label de priorité calculé.
+
+**Changements :**
+- Migration `20260705000002_accounts_priority_label_view.sql` : vue `accounts_with_priority` (`WITH (security_invoker = true)` pour que la RLS de `accounts` s'applique à tout appelant, y compris hors service_role) — ajoute `priority_label` via `CASE` SQL, non stocké.
+- `accounts-api/index.ts` : `handleList` sélectionne désormais depuis `accounts_with_priority` au lieu de `accounts`, ajoute `priority_label` à la liste de colonnes retournées. `handleGetOne` et `handlePatch` inchangés (écriture sur `accounts` directement).
+
+**Règles `priority_label`** (priorité décroissante, exclusif) :
+1. `critique` — `churn_risk_score >= 80` OU `health_score <= 30`
+2. `surveillance` — `churn_risk_score >= 50` OU `health_score <= 55`
+3. `nouveau` — `created_at` < 90 jours ET `churn_risk_score < 50`
+4. `stable` — défaut
+
+**Tests** : pas de nouveau test Vitest — la logique vit entièrement en SQL (`CASE` dans la vue), même convention que `list_deduplicated_insights` (voir entrée du 2026-07-05 ci-dessous).
+
+---
+
+## AI Insights — Pagination & Dedup v1 (2026-07-05)
+
+Audit préalable sur `insights-crud` (aucune fonction `get-insights` n'existe — c'est `insights-crud` qui expose la liste). L'endpoint utilisait déjà une pagination (`page`/`per_page`), mais celle-ci divergeait du contrat documenté dans `API_CONTRACTS.md` (`limit`/`offset`). Le tri par défaut était `created_at DESC` (pas de priorisation), et aucune déduplication n'était appliquée : un compte pouvait accumuler plusieurs insights actifs-puis-résolus du même `insight_type` sur des jours différents, qui s'affichaient comme des doublons visuels une fois tous les statuts inclus dans le filtre.
+
+**Contexte DB important** : la migration `20260704000001_fix_duplicate_accounts_and_insights.sql` a déjà posé un index unique `idx_ai_insights_org_account_type_day` interdisant plus d'une ligne par `(organization_id, account_id, insight_type, jour UTC)`, tous statuts confondus — donc les doublons stricts ne peuvent plus être insérés depuis cette date. Le `DISTINCT ON` ajouté ici est un filet de sécurité pour les lignes antérieures à cette contrainte, pas le mécanisme principal.
+
+**Changements :**
+- Migration `20260705000001_insights_dedup_rpc.sql` : fonctions SQL `list_deduplicated_insights` / `count_deduplicated_insights` — `DISTINCT ON (account_id, insight_type, created_at::date UTC)` puis tri `priority DESC → mrr_impact_cents DESC → created_at DESC`. Pas de colonne `detected_at` dans ce schéma (comme déjà noté dans la migration du 2026-07-04) — `created_at` utilisé à la place.
+- `insights-crud/index.ts` : `handleList` remplace `page`/`per_page` par `limit`/`offset` (défaut 20, max 100) et appelle les deux RPC au lieu d'une query builder directe. Le tri n'est plus paramétrable par `?sort=` (nécessaire pour rendre le `DISTINCT ON` cohérent avec l'`ORDER BY` côté SQL) — aucun frontend ne consommait cet endpoint (vérifié : zéro référence à `insights-crud` sous `/src`), donc pas de rupture réelle.
+- Réponse : `{ insights, total_count, critical_count }` remplace `{ data, pagination }`. `critical_count` = insights `active`+`critical` de l'org, indépendant des filtres de la requête — c'est ce champ (pas `total_count`) qui doit alimenter le badge de nav.
+- `API_CONTRACTS.md` et `docs/PROMPT_FRONTEND_INSIGHTS_V1.md` mis à jour pour refléter le nouveau contrat (ces docs décrivaient un frontend pas encore construit).
+
+**Tests** : `supabase/tests/insights-crud.test.ts` — 16 tests sur `parseLimit`, `parseOffset`, `parseCsvFilter` (parsing/validation purs ; la déduplication et le tri vivent en SQL et ne sont pas testables via Vitest).
+
+---
+
 ## Today Portfolio Status v1 (2026-07-04)
 
 Nouvelle Edge Function `get-today-status` : statut global du portefeuille pour la future page "Aujourd'hui". Fonctionnalité entièrement nouvelle — un audit préalable a confirmé qu'aucune page "Today" ni logique de statut global n'existait sur `main` (le seul champ proche, `health_trend` dans `dashboard-api`, est un delta de tendance KPI, pas un statut qualitatif). Une branche non mergée (`feat/export-playbook-accounts`) contient des helpers `today-actions-helpers.ts` avec une granularité par compte (P0/P1/P2), différente de ce statut agrégé.

@@ -3,7 +3,7 @@
 // API REST pour la consultation et gestion des insights IA
 //
 // Routes :
-//   GET  ?organization_id=X          — Liste paginée (filtres)
+//   GET  ?limit=N&offset=M           — Liste dédupliquée, triée priority/mrr/created_at DESC
 //   GET  ?id=X                       — Détail d'un insight
 //   GET  ?stats=true&organization_id=X — Compteurs agrégés
 //   PATCH ?id=X                      — Transition de statut
@@ -21,10 +21,6 @@ import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 const VALID_INSIGHT_TYPES = ['churn_prediction', 'expansion_opportunity', 'renewal_alert', 'payment_risk', 'usage_drop', 'account_health_summary'] as const
 const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'] as const
 const VALID_STATUSES = ['active', 'acknowledged', 'resolved', 'dismissed'] as const
-const VALID_SORT_FIELDS = ['created_at', 'priority', 'confidence_score', 'mrr_impact_cents'] as const
-
-// Priority ordering for sort
-const PRIORITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 }
 
 // ── Status transition rules ─────────────────────────────────
 const VALID_TRANSITIONS: Record<string, string[]> = {
@@ -32,6 +28,26 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   acknowledged: ['resolved', 'dismissed'],
   resolved: [],
   dismissed: [],
+}
+
+// ── Query parsing (pure, exported for tests) ─────────────────
+
+export function parseLimit(raw: string | null): number {
+  const n = parseInt(raw ?? '20', 10)
+  if (!Number.isFinite(n) || n < 1) return 20
+  return Math.min(100, n)
+}
+
+export function parseOffset(raw: string | null): number {
+  const n = parseInt(raw ?? '0', 10)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return n
+}
+
+export function parseCsvFilter<T extends string>(raw: string | null, valid: readonly T[]): T[] | null {
+  if (!raw) return null
+  const values = raw.split(',').filter((v): v is T => (valid as readonly string[]).includes(v))
+  return values.length > 0 ? values : null
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
@@ -76,92 +92,61 @@ Deno.serve(async (req: Request): Promise<Response> => {
 })
 
 // ── GET list ─────────────────────────────────────────────────
+//
+// Default sort: priority DESC (critical first), mrr_impact DESC, created_at DESC.
+// Dedup: at most 1 row per (account_id, insight_type, created_at UTC day) — see
+// list_deduplicated_insights / count_deduplicated_insights (migration 20260705000001).
 
 async function handleList(supabase: SupabaseClient, url: URL, orgId: string): Promise<Response> {
-  const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10))
-  const perPage = Math.min(100, Math.max(1, parseInt(url.searchParams.get('per_page') ?? '20', 10)))
-  const offset = (page - 1) * perPage
+  const limit = parseLimit(url.searchParams.get('limit'))
+  const offset = parseOffset(url.searchParams.get('offset'))
 
-  // Filters
-  const insightType = url.searchParams.get('insight_type')
-  const priority = url.searchParams.get('priority')
-  const status = url.searchParams.get('status') ?? 'active'
+  const insightType = parseCsvFilter(url.searchParams.get('insight_type'), VALID_INSIGHT_TYPES)
+  const priority = parseCsvFilter(url.searchParams.get('priority'), VALID_PRIORITIES)
+  const status = parseCsvFilter(url.searchParams.get('status'), VALID_STATUSES) ?? ['active']
   const accountId = url.searchParams.get('account_id')
-  const sort = url.searchParams.get('sort') ?? 'created_at'
 
-  // Build query
-  let query = supabase
-    .from('ai_insights')
-    .select('*', { count: 'exact' })
-    .eq('organization_id', orgId)
+  const [listResult, countResult, criticalResult] = await Promise.all([
+    supabase.rpc('list_deduplicated_insights', {
+      p_organization_id: orgId,
+      p_status: status,
+      p_insight_type: insightType,
+      p_priority: priority,
+      p_account_id: accountId,
+      p_limit: limit,
+      p_offset: offset,
+    }),
+    supabase.rpc('count_deduplicated_insights', {
+      p_organization_id: orgId,
+      p_status: status,
+      p_insight_type: insightType,
+      p_priority: priority,
+      p_account_id: accountId,
+    }),
+    // critical_count feeds the nav badge: always active + critical, ignores current filters
+    supabase.rpc('count_deduplicated_insights', {
+      p_organization_id: orgId,
+      p_status: ['active'],
+      p_insight_type: null,
+      p_priority: ['critical'],
+      p_account_id: null,
+    }),
+  ])
 
-  // Apply filters
-  if (status) {
-    const statuses = status.split(',').filter((s) => VALID_STATUSES.includes(s as typeof VALID_STATUSES[number]))
-    if (statuses.length === 1) {
-      query = query.eq('status', statuses[0])
-    } else if (statuses.length > 1) {
-      query = query.in('status', statuses)
-    }
-  }
-
-  if (insightType) {
-    const types = insightType.split(',').filter((t) => VALID_INSIGHT_TYPES.includes(t as typeof VALID_INSIGHT_TYPES[number]))
-    if (types.length === 1) {
-      query = query.eq('insight_type', types[0])
-    } else if (types.length > 1) {
-      query = query.in('insight_type', types)
-    }
-  }
-
-  if (priority) {
-    const priorities = priority.split(',').filter((p) => VALID_PRIORITIES.includes(p as typeof VALID_PRIORITIES[number]))
-    if (priorities.length === 1) {
-      query = query.eq('priority', priorities[0])
-    } else if (priorities.length > 1) {
-      query = query.in('priority', priorities)
-    }
-  }
-
-  if (accountId) {
-    query = query.eq('account_id', accountId)
-  }
-
-  // Sort
-  if (sort === 'priority') {
-    // Priority sort: critical > high > medium > low, then by created_at desc
-    query = query.order('priority', { ascending: true }).order('created_at', { ascending: false })
-  } else if (sort === 'confidence_score') {
-    query = query.order('confidence_score', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false })
-  } else if (sort === 'mrr_impact_cents') {
-    query = query.order('mrr_impact_cents', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false })
-  } else {
-    query = query.order('created_at', { ascending: false })
-  }
-
-  // Pagination
-  query = query.range(offset, offset + perPage - 1)
-
-  const { data, error, count } = await query
-
-  if (error) {
+  if (listResult.error || countResult.error || criticalResult.error) {
     console.error(JSON.stringify({
       level: 'error',
       function_name: 'insights-crud',
       organization_id: orgId,
-      message: `list query failed: ${error.message}`,
+      message: `list query failed: ${listResult.error?.message ?? countResult.error?.message ?? criticalResult.error?.message}`,
     }))
     return errorResponse('Failed to fetch insights', 500)
   }
 
   return jsonResponse({
-    data: data ?? [],
-    pagination: {
-      page,
-      per_page: perPage,
-      total: count ?? 0,
-      total_pages: Math.ceil((count ?? 0) / perPage),
-    },
+    insights: listResult.data ?? [],
+    total_count: countResult.data ?? 0,
+    critical_count: criticalResult.data ?? 0,
   })
 }
 

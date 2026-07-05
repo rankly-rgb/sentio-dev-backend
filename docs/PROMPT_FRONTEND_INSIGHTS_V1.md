@@ -24,18 +24,19 @@ GET /functions/v1/insights-crud
 **Query params :**
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `insight_type` | string (csv) | — | Filtre par type(s) : `churn_prediction`, `expansion_opportunity`, `renewal_alert`, `payment_risk`, `usage_drop` |
+| `insight_type` | string (csv) | — | Filtre par type(s) : `churn_prediction`, `expansion_opportunity`, `renewal_alert`, `payment_risk`, `usage_drop`, `account_health_summary` |
 | `priority` | string (csv) | — | Filtre par priorité(s) : `low`, `medium`, `high`, `critical` |
 | `status` | string (csv) | `active` | Filtre par statut(s) : `active`, `acknowledged`, `resolved`, `dismissed` |
 | `account_id` | uuid | — | Insights d'un compte spécifique |
-| `sort` | string | `created_at` | Tri : `created_at`, `priority`, `confidence_score`, `mrr_impact_cents` |
-| `page` | number | `1` | Page |
-| `per_page` | number | `20` | Résultats par page (max 100) |
+| `limit` | number | `20` | Nombre de résultats (max 100) |
+| `offset` | number | `0` | Décalage pour la pagination |
+
+Tri fixe (non paramétrable) : `priority DESC` (critical d'abord) → `mrr_impact_cents DESC` → `created_at DESC`. La liste est dédupliquée : au plus 1 insight par `(account_id, insight_type, jour UTC)`.
 
 **Réponse :**
 ```json
 {
-  "data": [
+  "insights": [
     {
       "id": "uuid",
       "organization_id": "uuid",
@@ -58,14 +59,12 @@ GET /functions/v1/insights-crud
       "updated_at": "2026-03-05T10:00:00Z"
     }
   ],
-  "pagination": {
-    "page": 1,
-    "per_page": 20,
-    "total": 42,
-    "total_pages": 3
-  }
+  "total_count": 42,
+  "critical_count": 3
 }
 ```
+
+`critical_count` = insights `active` + `priority=critical` de l'org, indépendant des filtres appliqués — c'est cette valeur (pas `total_count`) qui doit alimenter le badge de navigation.
 
 #### 2. Détail d'un insight
 ```
@@ -262,14 +261,14 @@ interface UseInsightsOptions {
   priority?: string
   status?: string
   accountId?: string
-  sort?: string
-  page?: number
-  perPage?: number
+  limit?: number
+  offset?: number
 }
 
 interface UseInsightsReturn {
   insights: Insight[]
-  pagination: Pagination
+  totalCount: number
+  criticalCount: number
   isLoading: boolean
   error: string | null
   refetch: () => void
@@ -342,7 +341,7 @@ const { data, error } = await supabase.functions.invoke('insights-crud', {
 
 // Alternative recommandée : fetch direct
 const response = await fetch(
-  `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/insights-crud?status=active&sort=priority&page=1&per_page=20`,
+  `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/insights-crud?status=active&limit=20&offset=0`,
   {
     headers: {
       'Authorization': `Bearer ${session.access_token}`,
