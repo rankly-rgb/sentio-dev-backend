@@ -595,16 +595,23 @@ Données agrégées pour la page "Aujourd'hui".
 | **URL** | `.../functions/v1/insights-crud` |
 | **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
 
-**GET** — Liste paginée avec filtres
+**GET** — Liste dédupliquée avec filtres
 
-Query params : `type` (churn_prediction | expansion_opportunity | renewal_alert | payment_risk | usage_drop), `priority` (low | medium | high | critical), `status` (active | acknowledged | resolved | dismissed), `sort` (created_at | priority | confidence_score | mrr_impact_cents), `order` (asc | desc), `limit` (défaut 20), `offset`
+Query params : `insight_type` (churn_prediction | expansion_opportunity | renewal_alert | payment_risk | usage_drop | account_health_summary, CSV), `priority` (low | medium | high | critical, CSV), `status` (active | acknowledged | resolved | dismissed, CSV, défaut `active`), `account_id`, `limit` (défaut 20, max 100), `offset` (défaut 0)
+
+Tri fixe (non paramétrable) : `priority DESC` (critical d'abord) → `mrr_impact_cents DESC` → `created_at DESC`.
+
+Déduplication : au plus 1 ligne par `(account_id, insight_type, created_at::date UTC)` — filet de sécurité en complément de l'index unique DB `idx_ai_insights_org_account_type_day`.
 
 ```json
 {
-  "data": [ { "...insight_fields": {} } ],
-  "pagination": { "total": 42, "limit": 20, "offset": 0 }
+  "insights": [ { "...insight_fields": {} } ],
+  "total_count": 42,
+  "critical_count": 3
 }
 ```
+
+`critical_count` = insights `active` + `priority=critical` de l'org, indépendant des filtres appliqués (alimente le badge de navigation).
 
 **GET** `?id=<uuid>` — Détail d'un insight
 
