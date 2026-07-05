@@ -27,37 +27,6 @@ interface AtRiskAccount {
   top_risk_reason: string
 }
 
-// ── Traductions miroir (subset utilisé dans buildRiskReason) ─────
-
-type Lang = 'fr' | 'en'
-
-const TRANSLATIONS: Record<Lang, Record<string, string>> = {
-  fr: {
-    'risk.overdue_invoice': 'Invoice impayée depuis {{days}} jour(s)',
-    'risk.no_usage_days': 'Aucune connexion depuis {{days}} jours',
-    'risk.no_usage_long': 'Aucune connexion depuis plus de 30 jours',
-    'risk.financial_degraded': 'Santé financière dégradée',
-    'risk.low_health': 'Score de santé faible',
-  },
-  en: {
-    'risk.overdue_invoice': 'Overdue invoice for {{days}} day(s)',
-    'risk.no_usage_days': 'No activity for {{days}} days',
-    'risk.no_usage_long': 'No activity for over 30 days',
-    'risk.financial_degraded': 'Degraded financial health',
-    'risk.low_health': 'Low health score',
-  },
-}
-
-function t(lang: Lang, key: string, params?: Record<string, string | number>): string {
-  let str = TRANSLATIONS[lang]?.[key] ?? TRANSLATIONS['fr'][key] ?? key
-  if (params) {
-    for (const [k, v] of Object.entries(params)) {
-      str = str.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v))
-    }
-  }
-  return str
-}
-
 // ── Logique pure miroir ───────────────────────────────────────
 
 function buildRiskReason(
@@ -65,13 +34,12 @@ function buildRiskReason(
   overdueByAccount: Map<string, InvoiceRow>,
   lastUsageByAccount: Map<string, string>,
   today: number,
-  lang: Lang = 'fr',
 ): string {
   const overdueInvoice = overdueByAccount.get(account.id)
   if (overdueInvoice?.due_date) {
     const dueDaysAgo = Math.floor((today - new Date(overdueInvoice.due_date).getTime()) / (1000 * 60 * 60 * 24))
     if (dueDaysAgo > 0) {
-      return t(lang, 'risk.overdue_invoice', { days: dueDaysAgo })
+      return `Overdue invoice for ${dueDaysAgo} day(s)`
     }
   }
 
@@ -79,17 +47,17 @@ function buildRiskReason(
   if (lastUsageAt) {
     const daysSinceUsage = Math.floor((today - new Date(lastUsageAt).getTime()) / (1000 * 60 * 60 * 24))
     if (daysSinceUsage >= 30) {
-      return t(lang, 'risk.no_usage_days', { days: daysSinceUsage })
+      return `No activity for ${daysSinceUsage} days`
     }
   } else {
-    return t(lang, 'risk.no_usage_long')
+    return 'No activity for over 30 days'
   }
 
   if ((account.financial_score ?? 100) < 30) {
-    return t(lang, 'risk.financial_degraded')
+    return 'Degraded financial health'
   }
 
-  return t(lang, 'risk.low_health')
+  return 'Low health score'
 }
 
 function calcMrrAtRisk(accounts: AccountRow[]): number {
@@ -143,89 +111,54 @@ function makeAccount(overrides: Partial<AccountRow> = {}): AccountRow {
 
 // ── Tests buildRiskReason ────────────────────────────────────
 
-describe('onboarding-first-win: buildRiskReason (FR)', () => {
-  it('retourne le message facture impayée en FR', () => {
+describe('onboarding-first-win: buildRiskReason', () => {
+  it('returns the overdue invoice message', () => {
     const account = makeAccount({ id: 'a1' })
     const overdue = new Map<string, InvoiceRow>([
       ['a1', { account_id: 'a1', due_date: '2026-04-10', status: 'open' }],
     ])
-    const reason = buildRiskReason(account, overdue, new Map(), TODAY, 'fr')
-    expect(reason).toContain('Invoice impayée depuis')
-    expect(reason).toContain('jour')
-  })
-
-  it('retourne "Aucune connexion depuis plus de 30 jours" en FR si aucun usage', () => {
-    const account = makeAccount({ id: 'a1' })
-    expect(buildRiskReason(account, new Map(), new Map(), TODAY, 'fr')).toBe(
-      'Aucune connexion depuis plus de 30 jours',
-    )
-  })
-
-  it('retourne "Santé financière dégradée" en FR', () => {
-    const account = makeAccount({ id: 'a1', financial_score: 15 })
-    const recent = new Date(TODAY - 5 * 24 * 60 * 60 * 1000).toISOString()
-    expect(buildRiskReason(account, new Map(), new Map([['a1', recent]]), TODAY, 'fr')).toBe(
-      'Santé financière dégradée',
-    )
-  })
-
-  it('retourne "Score de santé faible" en FR en dernier recours', () => {
-    const account = makeAccount({ id: 'a1', financial_score: 60 })
-    const recent = new Date(TODAY - 10 * 24 * 60 * 60 * 1000).toISOString()
-    expect(buildRiskReason(account, new Map(), new Map([['a1', recent]]), TODAY, 'fr')).toBe(
-      'Score de santé faible',
-    )
-  })
-
-  it("priorité : facture impayée prime sur absence d'usage (FR)", () => {
-    const account = makeAccount({ id: 'a1' })
-    const overdue = new Map<string, InvoiceRow>([
-      ['a1', { account_id: 'a1', due_date: '2026-04-01', status: 'open' }],
-    ])
-    expect(buildRiskReason(account, overdue, new Map(), TODAY, 'fr')).toContain('Invoice impayée')
-  })
-})
-
-describe('onboarding-first-win: buildRiskReason (EN)', () => {
-  it('retourne le message facture impayée en EN', () => {
-    const account = makeAccount({ id: 'a1' })
-    const overdue = new Map<string, InvoiceRow>([
-      ['a1', { account_id: 'a1', due_date: '2026-04-10', status: 'open' }],
-    ])
-    const reason = buildRiskReason(account, overdue, new Map(), TODAY, 'en')
+    const reason = buildRiskReason(account, overdue, new Map(), TODAY)
     expect(reason).toContain('Overdue invoice for')
     expect(reason).toContain('day')
   })
 
-  it('retourne "No activity for over 30 days" en EN si aucun usage', () => {
+  it('returns "No activity for over 30 days" when there is no usage', () => {
     const account = makeAccount({ id: 'a1' })
-    expect(buildRiskReason(account, new Map(), new Map(), TODAY, 'en')).toBe(
+    expect(buildRiskReason(account, new Map(), new Map(), TODAY)).toBe(
       'No activity for over 30 days',
     )
   })
 
-  it('retourne "Degraded financial health" en EN', () => {
+  it('returns "Degraded financial health"', () => {
     const account = makeAccount({ id: 'a1', financial_score: 15 })
     const recent = new Date(TODAY - 5 * 24 * 60 * 60 * 1000).toISOString()
-    expect(buildRiskReason(account, new Map(), new Map([['a1', recent]]), TODAY, 'en')).toBe(
+    expect(buildRiskReason(account, new Map(), new Map([['a1', recent]]), TODAY)).toBe(
       'Degraded financial health',
     )
   })
 
-  it('retourne "Low health score" en EN en dernier recours', () => {
+  it('returns "Low health score" as the last resort', () => {
     const account = makeAccount({ id: 'a1', financial_score: 60 })
     const recent = new Date(TODAY - 10 * 24 * 60 * 60 * 1000).toISOString()
-    expect(buildRiskReason(account, new Map(), new Map([['a1', recent]]), TODAY, 'en')).toBe(
+    expect(buildRiskReason(account, new Map(), new Map([['a1', recent]]), TODAY)).toBe(
       'Low health score',
     )
   })
 
-  it('retourne "No activity for X days" en EN si usage > 30j', () => {
+  it('returns "No activity for X days" when usage is older than 30 days', () => {
     const account = makeAccount({ id: 'a1' })
     const longAgo = new Date(TODAY - 45 * 24 * 60 * 60 * 1000).toISOString()
-    const reason = buildRiskReason(account, new Map(), new Map([['a1', longAgo]]), TODAY, 'en')
+    const reason = buildRiskReason(account, new Map(), new Map([['a1', longAgo]]), TODAY)
     expect(reason).toContain('No activity for')
     expect(reason).toContain('days')
+  })
+
+  it('prioritizes overdue invoice over missing usage', () => {
+    const account = makeAccount({ id: 'a1' })
+    const overdue = new Map<string, InvoiceRow>([
+      ['a1', { account_id: 'a1', due_date: '2026-04-01', status: 'open' }],
+    ])
+    expect(buildRiskReason(account, overdue, new Map(), TODAY)).toContain('Overdue invoice')
   })
 })
 

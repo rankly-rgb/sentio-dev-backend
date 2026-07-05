@@ -7,11 +7,11 @@ type Provider = typeof VALID_PROVIDERS[number]
 
 function validateApiKey(provider: Provider, apiKey: unknown): string | null {
   if (!apiKey || typeof apiKey !== 'string' || apiKey.trim().length === 0) {
-    return 'api_key ne peut pas être vide'
+    return 'api_key cannot be empty'
   }
   if (provider === 'stripe') {
     if (!apiKey.startsWith('sk_live_') && !apiKey.startsWith('sk_test_')) {
-      return 'La clé Stripe doit commencer par sk_live_ ou sk_test_'
+      return 'The Stripe key must start with sk_live_ or sk_test_'
     }
   }
   return null
@@ -21,7 +21,7 @@ function validatePostBody(body: unknown): { valid: boolean; error?: string; prov
   if (typeof body !== 'object' || body === null) return { valid: false, error: 'Invalid JSON body' }
   const b = body as Record<string, unknown>
   if (!b.provider || !VALID_PROVIDERS.includes(b.provider as Provider)) {
-    return { valid: false, error: `provider doit être l'un de : ${VALID_PROVIDERS.join(', ')}` }
+    return { valid: false, error: `provider must be one of: ${VALID_PROVIDERS.join(', ')}` }
   }
   const err = validateApiKey(b.provider as Provider, b.api_key)
   if (err) return { valid: false, error: err }

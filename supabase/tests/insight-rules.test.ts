@@ -339,9 +339,8 @@ describe('evaluateInsightRules', () => {
     expect(result[0].description).toContain('€')
   })
 
-  it('titles are in French', () => {
+  it('titles are in English', () => {
     const result = evaluateInsightRules({ ...baseInput, churn_risk_score: 80 })
-    // French title should contain accented characters or French words
-    expect(result[0].title).toMatch(/[éèêëàâùûôîïç]|churn|risque|détecté/i)
+    expect(result[0].title).toMatch(/churn|risk|detected/i)
   })
 })

@@ -52,7 +52,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function mrrEur(cents: number): string {
-  return (cents / 100).toLocaleString('fr-FR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+  return (cents / 100).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
 }
 
 function daysUntil(dateStr: string): number {
@@ -73,12 +73,12 @@ export function evaluateChurnPrediction(input: InsightInput): InsightCandidate |
   return {
     insight_type: 'churn_prediction',
     title: isCritical
-      ? 'Risque de churn critique détecté'
-      : 'Risque de churn élevé détecté',
-    description: `Ce compte présente un risque de churn de ${input.churn_risk_score}% avec un score de santé de ${input.health_score}%. MRR à risque : ${mrrEur(input.mrr_cents)} €.`,
+      ? 'Critical churn risk detected'
+      : 'High churn risk detected',
+    description: `This account has a churn risk of ${input.churn_risk_score}% with a health score of ${input.health_score}%. MRR at risk: €${mrrEur(input.mrr_cents)}.`,
     recommended_action: isCritical
-      ? 'Intervention immédiate du CSM requise. Planifier un appel de rétention dans les 48h.'
-      : 'Planifier un point de suivi avec le client dans la semaine.',
+      ? 'Immediate CSM intervention required. Schedule a retention call within 48h.'
+      : 'Schedule a follow-up with the customer within the week.',
     priority,
     confidence_score: confidence,
     mrr_impact_cents: input.mrr_cents,
@@ -102,12 +102,12 @@ export function evaluateExpansionOpportunity(input: InsightInput): InsightCandid
   return {
     insight_type: 'expansion_opportunity',
     title: isHigh
-      ? 'Forte opportunité d\'expansion identifiée'
-      : 'Opportunité d\'expansion détectée',
-    description: `Score d'expansion de ${input.expansion_score}% avec une bonne santé (${input.health_score}%). Potentiel d'expansion estimé : ${mrrEur(estimatedExpansion)} €/mois.`,
+      ? 'Strong expansion opportunity identified'
+      : 'Expansion opportunity detected',
+    description: `Expansion score of ${input.expansion_score}% with good health (${input.health_score}%). Estimated expansion potential: €${mrrEur(estimatedExpansion)}/month.`,
     recommended_action: isHigh
-      ? 'Proposer un upgrade de plan ou des sièges supplémentaires lors du prochain point.'
-      : 'Surveiller l\'évolution et préparer une proposition d\'upsell.',
+      ? 'Propose a plan upgrade or additional seats at the next check-in.'
+      : 'Monitor progress and prepare an upsell proposal.',
     priority,
     confidence_score: confidence,
     mrr_impact_cents: estimatedExpansion,
@@ -134,18 +134,18 @@ export function evaluateRenewalAlert(input: InsightInput): InsightCandidate | nu
   return {
     insight_type: 'renewal_alert',
     title: isExpired
-      ? `Contrat expiré depuis ${Math.abs(days)} jours`
+      ? `Contract expired ${Math.abs(days)} days ago`
       : isCritical
-        ? 'Renouvellement imminent (< 30 jours)'
-        : 'Renouvellement à prévoir (< 60 jours)',
+        ? 'Renewal imminent (< 30 days)'
+        : 'Renewal upcoming (< 60 days)',
     description: isExpired
-      ? `Le contrat a expiré il y a ${Math.abs(days)} jours. MRR du compte : ${mrrEur(input.mrr_cents)} €. Score de santé : ${input.health_score}%.`
-      : `Le contrat expire dans ${days} jours. MRR du compte : ${mrrEur(input.mrr_cents)} €. Score de santé : ${input.health_score}%.`,
+      ? `The contract expired ${Math.abs(days)} days ago. Account MRR: €${mrrEur(input.mrr_cents)}. Health score: ${input.health_score}%.`
+      : `The contract expires in ${days} days. Account MRR: €${mrrEur(input.mrr_cents)}. Health score: ${input.health_score}%.`,
     recommended_action: isExpired
-      ? 'Contrat expiré — traiter en urgence. Contacter le décideur immédiatement pour régularisation.'
+      ? 'Contract expired — handle as urgent. Contact the decision-maker immediately to resolve.'
       : isCritical
-        ? 'Initier le processus de renouvellement immédiatement. Contacter le décideur.'
-        : 'Préparer la proposition de renouvellement et planifier un point commercial.',
+        ? 'Start the renewal process immediately. Contact the decision-maker.'
+        : 'Prepare the renewal proposal and schedule a business review.',
     priority,
     confidence_score: confidence,
     mrr_impact_cents: input.mrr_cents,
@@ -168,12 +168,12 @@ export function evaluatePaymentRisk(input: InsightInput): InsightCandidate | nul
   return {
     insight_type: 'payment_risk',
     title: isCritical
-      ? 'Impayé critique (> 30 jours)'
-      : 'Retard de paiement détecté (> 15 jours)',
-    description: `Facture(s) impayée(s) depuis ${input.overdue_days} jours. MRR à risque : ${mrrEur(input.mrr_cents)} €.`,
+      ? 'Critical overdue payment (> 30 days)'
+      : 'Late payment detected (> 15 days)',
+    description: `Invoice(s) overdue for ${input.overdue_days} days. MRR at risk: €${mrrEur(input.mrr_cents)}.`,
     recommended_action: isCritical
-      ? 'Escalader au service financier. Envoyer une relance formelle et envisager la suspension.'
-      : 'Envoyer un rappel de paiement au client et vérifier les coordonnées bancaires.',
+      ? 'Escalate to finance. Send a formal reminder and consider suspension.'
+      : 'Send a payment reminder to the customer and verify billing details.',
     priority,
     confidence_score: confidence,
     mrr_impact_cents: input.mrr_cents,
@@ -199,12 +199,12 @@ export function evaluateUsageDrop(input: InsightInput): InsightCandidate | null 
   return {
     insight_type: 'usage_drop',
     title: isSevere
-      ? 'Chute d\'usage sévère détectée (> 50%)'
-      : 'Baisse d\'usage significative détectée (> 30%)',
-    description: `L'usage a chuté de ${dropPct}% sur les 14 derniers jours (score ${input.usage_score_previous} → ${input.usage_score_current}). MRR du compte : ${mrrEur(input.mrr_cents)} €.`,
+      ? 'Severe usage drop detected (> 50%)'
+      : 'Significant usage decline detected (> 30%)',
+    description: `Usage dropped by ${dropPct}% over the last 14 days (score ${input.usage_score_previous} → ${input.usage_score_current}). Account MRR: €${mrrEur(input.mrr_cents)}.`,
     recommended_action: isSevere
-      ? 'Contacter le client en urgence pour comprendre la raison de la chute d\'usage.'
-      : 'Surveiller l\'évolution sur la prochaine semaine et planifier un check-in.',
+      ? 'Contact the customer urgently to understand the reason for the usage drop.'
+      : 'Monitor progress over the next week and schedule a check-in.',
     priority,
     confidence_score: confidence,
     mrr_impact_cents: Math.round(input.mrr_cents * (dropPct / 100)),
@@ -233,24 +233,24 @@ export function evaluateAccountHealthSummary(input: InsightInput): InsightCandid
 
   if (health < 30) {
     priority = 'critical'
-    title = 'Compte en état critique'
-    description = `Score de santé très bas (${health}%) avec un risque de churn de ${churn}%. MRR : ${mrrEur(input.mrr_cents)} €. Situation nécessitant une attention immédiate.`
-    action = 'Analyser les causes du score bas et contacter le client dans les 48h.'
+    title = 'Account in critical condition'
+    description = `Very low health score (${health}%) with a churn risk of ${churn}%. MRR: €${mrrEur(input.mrr_cents)}. Situation requires immediate attention.`
+    action = 'Analyze the causes of the low score and contact the customer within 48h.'
   } else if (health < 50) {
     priority = 'high'
-    title = 'Compte à risque — surveillance requise'
-    description = `Score de santé de ${health}% avec un risque de churn de ${churn}%. MRR : ${mrrEur(input.mrr_cents)} €. Suivi renforcé recommandé.`
-    action = 'Planifier un check-in avec le client dans les 7 prochains jours.'
+    title = 'At-risk account — monitoring required'
+    description = `Health score of ${health}% with a churn risk of ${churn}%. MRR: €${mrrEur(input.mrr_cents)}. Increased follow-up recommended.`
+    action = 'Schedule a check-in with the customer within the next 7 days.'
   } else if (health < 70) {
     priority = 'medium'
-    title = 'Compte à surveiller'
-    description = `Score de santé de ${health}% avec un risque de churn de ${churn}%. MRR : ${mrrEur(input.mrr_cents)} €. Évolution à surveiller.`
-    action = "Effectuer un suivi mensuel et surveiller l'évolution des indicateurs."
+    title = 'Account to watch'
+    description = `Health score of ${health}% with a churn risk of ${churn}%. MRR: €${mrrEur(input.mrr_cents)}. Progress to monitor.`
+    action = 'Perform a monthly follow-up and monitor how the indicators evolve.'
   } else {
     priority = 'low'
-    title = 'Compte en bonne santé'
-    description = `Score de santé de ${health}% avec un risque de churn faible (${churn}%). MRR : ${mrrEur(input.mrr_cents)} €. Compte stable.`
-    action = "Maintenir l'engagement actuel et identifier les opportunités d'expansion."
+    title = 'Account in good health'
+    description = `Health score of ${health}% with a low churn risk (${churn}%). MRR: €${mrrEur(input.mrr_cents)}. Stable account.`
+    action = 'Maintain current engagement and identify expansion opportunities.'
   }
 
   return {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-// ── Types miroir (churn-alert/index.ts) ───────────────────────
+// ── Mirror types (churn-alert/index.ts) ───────────────────────
 
 interface CriticalAccount {
   id: string
@@ -11,7 +11,7 @@ interface CriticalAccount {
   health_score: number
 }
 
-// ── Helpers miroir ────────────────────────────────────────────
+// ── Mirror helpers ────────────────────────────────────────────
 
 function maskCustomerId(stripeCustomerId: string): string {
   return 'cus_***' + stripeCustomerId.slice(-3)
@@ -29,21 +29,21 @@ function buildChurnAlertEmail(accounts: CriticalAccount[]): string {
     return `
     <tr>
       <td>${label}</td>
-      <td>${mrr}€/mois</td>
+      <td>${mrr}€/mo</td>
       <td>${a.health_score}/100</td>
       <td>${a.churn_risk_score}/100</td>
-      <td><a href="https://app.sentioapp.io/dashboard/accounts/${a.id}">Voir →</a></td>
+      <td><a href="https://app.sentioapp.io/dashboard/accounts/${a.id}">View →</a></td>
     </tr>`
   }).join('')
 
   return `<!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head><meta charset="UTF-8"></head>
 <body>
-  <h1>Alerte churn</h1>
-  <p><strong>${n} compte${n > 1 ? 's' : ''}</strong> ${n > 1 ? 'viennent' : 'vient'} de passer en zone critique.</p>
+  <h1>Churn alert</h1>
+  <p><strong>${n} account${n > 1 ? 's' : ''}</strong> ${n > 1 ? 'have' : 'has'} just entered critical risk zone.</p>
   <table><thead><tr>
-    <th>Compte</th><th>MRR</th><th>Santé</th><th>Risque</th><th>Action</th>
+    <th>Account</th><th>MRR</th><th>Health</th><th>Risk</th><th>Action</th>
   </tr></thead><tbody>${rows}</tbody></table>
 </body>
 </html>`
@@ -72,61 +72,61 @@ const anonymousAccount: CriticalAccount = {
 // ── Tests ─────────────────────────────────────────────────────
 
 describe('maskCustomerId', () => {
-  it('retourne cus_*** + 3 derniers chars', () => {
+  it('returns cus_*** + last 3 chars', () => {
     expect(maskCustomerId('cus_abcXYZ')).toBe('cus_***XYZ')
   })
 
-  it('fonctionne avec un id court', () => {
+  it('works with a short id', () => {
     expect(maskCustomerId('cus_abc')).toBe('cus_***abc')
   })
 })
 
 describe('formatAccountLabel', () => {
-  it('retourne display_name si non-null', () => {
+  it('returns display_name when non-null', () => {
     expect(formatAccountLabel(baseAccount)).toBe('Acme Corp')
   })
 
-  it('retourne cus_***<3chars> si display_name est null', () => {
+  it('returns cus_***<3chars> when display_name is null', () => {
     expect(formatAccountLabel(anonymousAccount)).toBe('cus_***456')
   })
 })
 
 describe('buildChurnAlertEmail', () => {
-  it('génère un email avec N comptes en sujet', () => {
+  it('generates an email with N accounts in the subject', () => {
     const html = buildChurnAlertEmail([baseAccount, anonymousAccount])
-    expect(html).toContain('2 comptes')
-    expect(html).toContain('viennent de passer')
+    expect(html).toContain('2 accounts')
+    expect(html).toContain('have just entered')
   })
 
-  it('singulier avec 1 compte', () => {
+  it('singular with 1 account', () => {
     const html = buildChurnAlertEmail([baseAccount])
-    expect(html).toContain('1 compte')
-    expect(html).toContain('vient de passer')
+    expect(html).toContain('1 account')
+    expect(html).toContain('has just entered')
   })
 
-  it('utilise display_name si disponible', () => {
+  it('uses display_name when available', () => {
     const html = buildChurnAlertEmail([baseAccount])
     expect(html).toContain('Acme Corp')
   })
 
-  it('masque stripe_customer_id si display_name absent', () => {
+  it('masks stripe_customer_id when display_name is absent', () => {
     const html = buildChurnAlertEmail([anonymousAccount])
     expect(html).toContain('cus_***456')
     expect(html).not.toContain('cus_def456')
   })
 
-  it('affiche le MRR en euros', () => {
+  it('displays MRR in euros', () => {
     const html = buildChurnAlertEmail([baseAccount])
-    expect(html).toContain('499€/mois')
+    expect(html).toContain('499€/mo')
   })
 
-  it('affiche churn_risk_score et health_score', () => {
+  it('displays churn_risk_score and health_score', () => {
     const html = buildChurnAlertEmail([baseAccount])
     expect(html).toContain('82/100')
     expect(html).toContain('18/100')
   })
 
-  it('inclut un lien vers le compte', () => {
+  it('includes a link to the account', () => {
     const html = buildChurnAlertEmail([baseAccount])
     expect(html).toContain('/dashboard/accounts/uuid-001')
   })
@@ -141,28 +141,28 @@ describe('buildChurnAlertEmail', () => {
       health_score: 10,
     }
 
-    it('ne contient pas de symbole @ (email)', () => {
+    it('does not contain an @ symbol (email)', () => {
       const html = buildChurnAlertEmail([piiAccount])
       const bodyContent = html.replace(/href="[^"]*"/g, '').replace(/action="[^"]*"/g, '')
       expect(bodyContent).not.toMatch(/@/)
     })
 
-    it('ne contient pas de champ "email" dans le payload', () => {
+    it('does not contain an "email" field in the payload', () => {
       const html = buildChurnAlertEmail([piiAccount])
       expect(html.toLowerCase()).not.toContain('"email"')
     })
 
-    it('ne contient pas de "phone" dans le payload', () => {
+    it('does not contain "phone" in the payload', () => {
       const html = buildChurnAlertEmail([piiAccount])
       expect(html.toLowerCase()).not.toContain('phone')
     })
 
-    it('ne contient pas de "ip" comme donnée de compte', () => {
+    it('does not contain "ip" as account data', () => {
       const html = buildChurnAlertEmail([piiAccount])
       expect(html).not.toMatch(/"ip"/)
     })
 
-    it('stripe_customer_id est masqué (jamais en clair)', () => {
+    it('stripe_customer_id is masked (never in clear text)', () => {
       const html = buildChurnAlertEmail([piiAccount])
       expect(html).not.toContain('cus_pii789')
       expect(html).toContain('cus_***789')
@@ -170,10 +170,10 @@ describe('buildChurnAlertEmail', () => {
   })
 })
 
-describe('aucun email si liste vide', () => {
-  it('produit un HTML valide avec 0 lignes', () => {
+describe('no email if the list is empty', () => {
+  it('produces valid HTML with 0 rows', () => {
     const html = buildChurnAlertEmail([])
-    expect(html).toContain('0 compte')
+    expect(html).toContain('0 account')
     expect(html).toContain('<tbody></tbody>')
   })
 })

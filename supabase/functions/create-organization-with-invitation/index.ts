@@ -16,10 +16,10 @@ import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 
 // Comptes démo représentatifs pour la révélation progressive
 const DEMO_ACCOUNTS = [
-  { company_name: 'Acme SaaS',  mrr_cents: 240000, health_score: 82, churn_risk_score: 18, segment: 'Champions'     },
-  { company_name: 'Nexio',      mrr_cents: 110000, health_score: 31, churn_risk_score: 72, segment: 'En danger'     },
-  { company_name: 'TechFlow',   mrr_cents:  89000, health_score: 54, churn_risk_score: 48, segment: 'À risque léger' },
-  { company_name: 'Strio',      mrr_cents:  99000, health_score: 67, churn_risk_score: 35, segment: 'Stables'       },
+  { company_name: 'Acme SaaS',  mrr_cents: 240000, health_score: 82, churn_risk_score: 18, segment: 'Champions'         },
+  { company_name: 'Nexio',      mrr_cents: 110000, health_score: 31, churn_risk_score: 72, segment: 'At Risk'           },
+  { company_name: 'TechFlow',   mrr_cents:  89000, health_score: 54, churn_risk_score: 48, segment: 'Slightly at Risk'  },
+  { company_name: 'Strio',      mrr_cents:  99000, health_score: 67, churn_risk_score: 35, segment: 'Stable'            },
 ]
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -36,26 +36,26 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Authentication failed', 401)
   }
 
-  let body: { user_id?: unknown; email?: unknown; company_name?: unknown; locale?: unknown }
+  let body: { user_id?: unknown; email?: unknown; company_name?: unknown }
   try {
     body = await req.json()
   } catch {
     return errorResponse('Invalid JSON body', 400)
   }
 
-  const { user_id, company_name, locale } = body
+  const { user_id, company_name } = body
   // email reçu en transit uniquement — jamais lu ni persisté
 
   if (!user_id || typeof user_id !== 'string') {
-    return errorResponse('user_id est requis', 400)
+    return errorResponse('user_id is required', 400)
   }
   if (!company_name || typeof company_name !== 'string' || company_name.trim().length === 0) {
-    return errorResponse('company_name est requis', 400)
+    return errorResponse('company_name is required', 400)
   }
 
   // Vérifier cohérence JWT / user_id
   if (auth.userId !== user_id) {
-    return errorResponse('user_id ne correspond pas au token JWT', 403)
+    return errorResponse('user_id does not match the JWT token', 403)
   }
 
   let supabase
@@ -70,7 +70,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // 1. Vérifier que l'utilisateur existe dans auth.users
   const { data: authUser, error: authErr } = await supabase.auth.admin.getUserById(user_id)
   if (authErr || !authUser?.user) {
-    return errorResponse('Utilisateur introuvable', 400)
+    return errorResponse('User not found', 400)
   }
 
   // 2. Vérifier si une organisation existe déjà (créée par le trigger SQL on_auth_user_created)
@@ -81,7 +81,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .maybeSingle()
 
   const today = new Date().toISOString().split('T')[0]
-  const resolvedLocale = (locale === 'en') ? 'en' : 'fr'
   const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()
 
   let orgId: string
@@ -95,14 +94,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
         name: company_name.trim(),
         onboarding_step: 'promise',
         onboarding_completed: false,
-        locale: resolvedLocale,
         trial_ends_at: trialEndsAt,
       })
       .eq('id', orgId)
 
     if (updateErr) {
       console.error(JSON.stringify({ level: 'error', function_name: 'create-organization-with-invitation', message: updateErr.message }))
-      return errorResponse('Erreur mise à jour organisation', 500)
+      return errorResponse('Failed to update organization', 500)
     }
   } else {
     // Pas de trigger actif — créer l'organisation from scratch
@@ -114,14 +112,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
         onboarding_completed: false,
         plan_type: 'free',
         trial_ends_at: trialEndsAt,
-        locale: resolvedLocale,
       })
       .select('id')
       .single()
 
     if (orgErr || !org) {
       console.error(JSON.stringify({ level: 'error', function_name: 'create-organization-with-invitation', message: orgErr?.message ?? 'org insert failed' }))
-      return errorResponse('Erreur création organisation', 500)
+      return errorResponse('Failed to create organization', 500)
     }
 
     orgId = org.id
@@ -134,7 +131,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (profileErr) {
       console.error(JSON.stringify({ level: 'error', function_name: 'create-organization-with-invitation', message: profileErr.message }))
       await supabase.from('organizations').delete().eq('id', orgId)
-      return errorResponse('Erreur création profil', 500)
+      return errorResponse('Failed to create profile', 500)
     }
   }
 

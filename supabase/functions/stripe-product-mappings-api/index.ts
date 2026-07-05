@@ -180,14 +180,14 @@ async function handleUpsert(
 
   // Validation stripe_price_id
   if (!body.stripe_price_id || typeof body.stripe_price_id !== 'string' || body.stripe_price_id.trim().length === 0) {
-    return errorResponse('stripe_price_id est requis', 400)
+    return errorResponse('stripe_price_id is required', 400)
   }
   const stripePriceId = body.stripe_price_id.trim()
 
   // Validation plan_tier
   if (body.plan_tier !== null && body.plan_tier !== undefined) {
     if (!VALID_PLAN_TIERS.includes(body.plan_tier as PlanTier)) {
-      return errorResponse(`plan_tier doit être null ou l'une des valeurs : ${VALID_PLAN_TIERS.join(', ')}`, 400)
+      return errorResponse(`plan_tier must be null or one of: ${VALID_PLAN_TIERS.join(', ')}`, 400)
     }
   }
   const planTier = (body.plan_tier ?? null) as PlanTier | null
@@ -200,7 +200,7 @@ async function handleUpsert(
   if (!unlimitedSeats) {
     if (body.seat_limit !== null && body.seat_limit !== undefined) {
       if (typeof body.seat_limit !== 'number' || !Number.isInteger(body.seat_limit) || body.seat_limit <= 0) {
-        return errorResponse('seat_limit doit être un entier positif ou null', 400)
+        return errorResponse('seat_limit must be a positive integer or null', 400)
       }
       seatLimit = body.seat_limit
     }
@@ -251,7 +251,7 @@ async function handlePricesFromStripe(
 
   const stripeApiKey: string = org?.stripe_api_key ?? Deno.env.get('STRIPE_SECRET_KEY') ?? ''
   if (!stripeApiKey) {
-    return errorResponse('Clé Stripe non configurée. Ajoutez votre clé dans Intégrations → Stripe.', 400)
+    return errorResponse('Stripe key not configured. Add your key under Integrations → Stripe.', 400)
   }
 
   // Récupérer les mappings existants pour le flag already_mapped
@@ -283,13 +283,13 @@ async function handlePricesFromStripe(
       if (!resp.ok) {
         const err = await resp.text()
         console.error(JSON.stringify({ level: 'error', function_name: 'stripe-product-mappings-api', message: `Stripe prices → ${resp.status}: ${err}` }))
-        return errorResponse('Impossible de récupérer les prices Stripe', 502)
+        return errorResponse('Failed to fetch Stripe prices', 502)
       }
       page = await resp.json() as StripePriceListResponse
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error(JSON.stringify({ level: 'error', function_name: 'stripe-product-mappings-api', message: `Stripe fetch failed: ${msg}` }))
-      return errorResponse('Erreur lors de la communication avec Stripe', 502)
+      return errorResponse('Error communicating with Stripe', 502)
     }
 
     for (const price of page.data) {

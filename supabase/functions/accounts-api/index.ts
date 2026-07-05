@@ -11,14 +11,14 @@
 //                  search (texte libre sur display_name ou stripe_customer_id)
 //   Response 200 :
 //     {
-//       data: Array<Account & { priority_label: 'critique' | 'surveillance' | 'nouveau' | 'stable' }>,
+//       data: Array<Account & { priority_label: 'critical' | 'watch' | 'new' | 'stable' }>,
 //       pagination: { limit: number, next_cursor: string | null, has_more: boolean }
 //     }
 //   priority_label calculé côté SQL (vue accounts_with_priority) :
-//     critique     : churn_risk_score >= 80 OU health_score <= 30
-//     surveillance : churn_risk_score >= 50 OU health_score <= 55
-//     nouveau      : created_at < 90j ET churn_risk_score < 50
-//     stable       : sinon
+//     critical : churn_risk_score >= 80 OU health_score <= 30
+//     watch    : churn_risk_score >= 50 OU health_score <= 55
+//     new      : created_at < 90j ET churn_risk_score < 50
+//     stable   : sinon
 //
 // GET /accounts-api?id=:uuid
 //   Response 200 :

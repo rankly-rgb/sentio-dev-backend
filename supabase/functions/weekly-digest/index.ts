@@ -45,7 +45,7 @@ export interface WeeklyStats {
 // ── Helpers exportés pour les tests ──────────────────────────
 
 export function formatMrr(cents: number): string {
-  return Math.round(cents / 100).toLocaleString('fr-FR') + '€'
+  return Math.round(cents / 100).toLocaleString('en-US') + '€'
 }
 
 export function formatMrrVariation(current: number, previous: number): string {
@@ -58,8 +58,8 @@ export function formatMrrVariation(current: number, previous: number): string {
 
 export function formatCountVariation(current: number, previous: number): string {
   const delta = current - previous
-  if (delta > 0) return ` (+${delta} vs semaine précédente)`
-  if (delta < 0) return ` (${delta} vs semaine précédente)`
+  if (delta > 0) return ` (+${delta} vs last week)`
+  if (delta < 0) return ` (${delta} vs last week)`
   return ' (stable)'
 }
 
@@ -83,7 +83,7 @@ function accountRow(account: DigestAccount, scoreField: 'churn_risk_score' | 'ex
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:right">${mrr}€</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:center;color:${scoreColor};font-weight:600">${scoreLabel}</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0">
-        <a href="${APP_URL}/dashboard/accounts/${account.id}" style="color:#3b82f6;text-decoration:none">Voir →</a>
+        <a href="${APP_URL}/dashboard/accounts/${account.id}" style="color:#3b82f6;text-decoration:none">View →</a>
       </td>
     </tr>`
 }
@@ -99,8 +99,8 @@ export function getWeekRange(): { monday: Date; sunday: Date; label: string } {
   sunday.setUTCDate(monday.getUTCDate() + 6)
 
   const fmt = (d: Date) =>
-    d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', timeZone: 'UTC' })
-  return { monday, sunday, label: `${fmt(monday)} au ${fmt(sunday)}` }
+    d.toLocaleDateString('en-US', { day: 'numeric', month: 'long', timeZone: 'UTC' })
+  return { monday, sunday, label: `${fmt(monday)} to ${fmt(sunday)}` }
 }
 
 export function buildWeeklyDigestEmail(stats: WeeklyStats, weekLabel: string): string {
@@ -109,11 +109,11 @@ export function buildWeeklyDigestEmail(stats: WeeklyStats, weekLabel: string): s
 
   const churnRows = stats.topChurnRisks.length > 0
     ? stats.topChurnRisks.map(a => accountRow(a, 'churn_risk_score')).join('')
-    : '<tr><td colspan="4" style="padding:16px 8px;text-align:center;color:#94a3b8">Aucun compte à risque cette semaine 🎉</td></tr>'
+    : '<tr><td colspan="4" style="padding:16px 8px;text-align:center;color:#94a3b8">No at-risk accounts this week 🎉</td></tr>'
 
   const expansionRows = stats.topExpansion.length > 0
     ? stats.topExpansion.map(a => accountRow(a, 'expansion_score')).join('')
-    : '<tr><td colspan="4" style="padding:16px 8px;text-align:center;color:#94a3b8">Aucune opportunité détectée</td></tr>'
+    : '<tr><td colspan="4" style="padding:16px 8px;text-align:center;color:#94a3b8">No opportunities detected</td></tr>'
 
   const tableHeader = (cols: string[]) => `
     <thead>
@@ -123,47 +123,47 @@ export function buildWeeklyDigestEmail(stats: WeeklyStats, weekLabel: string): s
     </thead>`
 
   return `<!DOCTYPE html>
-<html lang="fr">
-<head><meta charset="UTF-8"><title>Bilan rétention — Sentio AI</title></head>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Retention digest — Sentio AI</title></head>
 <body style="font-family:sans-serif;max-width:680px;margin:0 auto;padding:24px;color:#1a1a1a;background:#f8fafc">
   <div style="background:#fff;border-radius:8px;padding:32px;box-shadow:0 1px 3px rgba(0,0,0,0.08)">
     <div style="display:flex;align-items:center;margin-bottom:8px">
       <span style="font-size:28px;margin-right:12px">📊</span>
-      <h1 style="margin:0;color:#0f172a;font-size:22px">Bilan rétention</h1>
+      <h1 style="margin:0;color:#0f172a;font-size:22px">Retention digest</h1>
     </div>
-    <p style="color:#64748b;margin-top:4px;margin-bottom:28px">Semaine du ${weekLabel}</p>
+    <p style="color:#64748b;margin-top:4px;margin-bottom:28px">Week of ${weekLabel}</p>
 
     <div style="background:#f8fafc;border-radius:6px;padding:20px;margin-bottom:28px">
-      <h2 style="margin:0 0 16px;color:#0f172a;font-size:16px">Vue d'ensemble</h2>
+      <h2 style="margin:0 0 16px;color:#0f172a;font-size:16px">Overview</h2>
       <ul style="margin:0;padding:0 0 0 20px;line-height:2">
-        <li><strong>MRR total :</strong> ${formatMrr(stats.totalMrrCents)}${mrrVar}</li>
-        <li><strong>Comptes critiques :</strong> ${stats.criticalCount}${criticalVar}</li>
+        <li><strong>Total MRR:</strong> ${formatMrr(stats.totalMrrCents)}${mrrVar}</li>
+        <li><strong>Critical accounts:</strong> ${stats.criticalCount}${criticalVar}</li>
       </ul>
     </div>
 
-    <h2 style="color:#0f172a;font-size:16px;margin-bottom:12px">🚨 Comptes prioritaires cette semaine</h2>
+    <h2 style="color:#0f172a;font-size:16px;margin-bottom:12px">🚨 Priority accounts this week</h2>
     <table style="width:100%;border-collapse:collapse;margin-bottom:28px">
-      ${tableHeader(['Compte', 'MRR', 'Risque churn', 'Action'])}
+      ${tableHeader(['Account', 'MRR', 'Churn risk', 'Action'])}
       <tbody>${churnRows}</tbody>
     </table>
 
-    <h2 style="color:#0f172a;font-size:16px;margin-bottom:12px">📈 Opportunités d'expansion</h2>
+    <h2 style="color:#0f172a;font-size:16px;margin-bottom:12px">📈 Expansion opportunities</h2>
     <table style="width:100%;border-collapse:collapse;margin-bottom:32px">
-      ${tableHeader(['Compte', 'MRR', 'Score expansion', 'Action'])}
+      ${tableHeader(['Account', 'MRR', 'Expansion score', 'Action'])}
       <tbody>${expansionRows}</tbody>
     </table>
 
     <div style="text-align:center">
       <a href="${APP_URL}/dashboard"
          style="background:#0f172a;color:#fff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;display:inline-block">
-        Voir le dashboard complet →
+        View full dashboard →
       </a>
     </div>
 
     <hr style="border:none;border-top:1px solid #e2e8f0;margin:32px 0">
     <p style="color:#94a3b8;font-size:12px;text-align:center;margin:0">
-      Sentio AI — Digest hebdomadaire automatique.<br>
-      Pour modifier la fréquence, rendez-vous dans Paramètres.
+      Sentio AI — Automatic weekly digest.<br>
+      To change the frequency, go to Settings.
     </p>
   </div>
 </body>
@@ -282,7 +282,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
       const emailResult = await sendEmail({
         to: org.notification_email,
-        subject: `📊 Votre bilan rétention — semaine du ${weekLabel}`,
+        subject: `📊 Your weekly retention digest — ${weekLabel}`,
         html: buildWeeklyDigestEmail(stats, weekLabel),
         from_name: 'Sentio AI',
       })

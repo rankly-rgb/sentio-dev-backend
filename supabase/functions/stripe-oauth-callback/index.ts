@@ -42,8 +42,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const { code, state } = body
-  if (!code || typeof code !== 'string') return errorResponse('code est requis', 400)
-  if (!state || typeof state !== 'string') return errorResponse('state est requis', 400)
+  if (!code || typeof code !== 'string') return errorResponse('code is required', 400)
+  if (!state || typeof state !== 'string') return errorResponse('state is required', 400)
 
   const stripeSecret = Deno.env.get('STRIPE_SECRET_KEY')
   if (!stripeSecret) {
@@ -72,11 +72,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .maybeSingle()
 
   if (stateErr || !oauthState) {
-    return errorResponse('State invalide ou expiré', 400)
+    return errorResponse('Invalid or expired state', 400)
   }
 
   if (oauthState.organization_id !== orgId) {
-    return errorResponse('State ne correspond pas à l\'organisation', 403)
+    return errorResponse('State does not match the organization', 403)
   }
 
   // Supprimer le state utilisé (one-time use)
@@ -100,20 +100,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
       8000,
     )
   } catch {
-    return errorResponse('Impossible de joindre Stripe. Réessayez dans quelques instants.', 502)
+    return errorResponse('Could not reach Stripe. Please try again shortly.', 502)
   }
 
   if (!tokenRes.ok) {
     const errBody = await tokenRes.json().catch(() => ({}))
     console.error(JSON.stringify({ level: 'error', function_name: 'stripe-oauth-callback', message: 'Token exchange failed', stripe_error: errBody }))
-    return errorResponse('Échec de l\'échange OAuth Stripe', 400)
+    return errorResponse('Stripe OAuth token exchange failed', 400)
   }
 
   const tokenData = await tokenRes.json()
   const stripeUserId: string = tokenData.stripe_user_id
 
   if (!stripeUserId) {
-    return errorResponse('stripe_user_id absent de la réponse Stripe', 500)
+    return errorResponse('stripe_user_id missing from Stripe response', 500)
   }
 
   // Stocker stripe_user_id dans Vault
@@ -143,7 +143,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (updateErr) {
     console.error(JSON.stringify({ level: 'error', function_name: 'stripe-oauth-callback', message: updateErr.message }))
-    return errorResponse('Erreur mise à jour organisation', 500)
+    return errorResponse('Failed to update organization', 500)
   }
 
   // Avancer l'étape seulement si on n'est pas déjà plus loin (idempotent)

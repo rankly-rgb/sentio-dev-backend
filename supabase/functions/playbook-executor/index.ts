@@ -203,7 +203,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const validTriggers = ['segment_change', 'churn_threshold', 'invoice_past_due', 'manual']
   if (validTriggers.indexOf(input.trigger_reason) === -1) {
-    return errorResponse(`trigger_reason invalide. Valeurs : ${validTriggers.join(', ')}`, 400)
+    return errorResponse(`Invalid trigger_reason. Values: ${validTriggers.join(', ')}`, 400)
   }
 
   // ── Récupérer les destinations actives ───────────────────
@@ -261,7 +261,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const segmentCurrent = input.segment_current ?? 'unknown'
 
   if (!accountId) {
-    return errorResponse('Account introuvable pour ce stripe_customer_id', 404)
+    return errorResponse('Account not found for this stripe_customer_id', 404)
   }
 
   // ── Insérer les destinations en attente de validation ────

@@ -50,7 +50,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   ])
 
   if (orgRes.error || !orgRes.data) {
-    return errorResponse('Organisation introuvable', 404)
+    return errorResponse('Organization not found', 404)
   }
 
   const org = orgRes.data

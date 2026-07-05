@@ -42,7 +42,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const mode = url.searchParams.get('mode') ?? 'count'
 
   if (mode !== 'count' && mode !== 'risk') {
-    return errorResponse("mode doit être 'count' ou 'risk'", 400)
+    return errorResponse("mode must be 'count' or 'risk'", 400)
   }
 
   // ── mode=count : premier écran de révélation ──────────────
@@ -90,7 +90,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (accErr) {
     console.error(JSON.stringify({ level: 'error', function_name: 'get-accounts-summary', message: accErr.message }))
-    return errorResponse('Erreur lecture comptes', 500)
+    return errorResponse('Failed to read accounts', 500)
   }
 
   if (!accounts?.length) {

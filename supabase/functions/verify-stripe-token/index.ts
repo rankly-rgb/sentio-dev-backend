@@ -57,12 +57,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { stripe_api_key } = body
   if (!stripe_api_key || typeof stripe_api_key !== 'string') {
-    return jsonResponse({ success: false, error: 'stripe_api_key est requis' })
+    return jsonResponse({ success: false, error: 'stripe_api_key is required' })
   }
 
   const { valid, mode } = validateStripeKeyFormat(stripe_api_key)
   if (!valid) {
-    return jsonResponse({ success: false, error: 'Format de clé invalide' })
+    return jsonResponse({ success: false, error: 'Invalid key format' })
   }
 
   let supabase
@@ -85,15 +85,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
       8000,
     )
   } catch {
-    return jsonResponse({ success: false, error: 'Impossible de joindre Stripe. Réessayez dans quelques instants.' })
+    return jsonResponse({ success: false, error: 'Could not reach Stripe. Please try again shortly.' })
   }
 
   if (stripeRes.status === 401 || stripeRes.status === 403) {
-    return jsonResponse({ success: false, error: 'Clé Stripe invalide ou permissions insuffisantes' })
+    return jsonResponse({ success: false, error: 'Invalid Stripe key or insufficient permissions' })
   }
 
   if (!stripeRes.ok) {
-    return jsonResponse({ success: false, error: 'Impossible de joindre Stripe. Réessayez dans quelques instants.' })
+    return jsonResponse({ success: false, error: 'Could not reach Stripe. Please try again shortly.' })
   }
 
   // Stocker la clé dans Vault
@@ -123,7 +123,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (updateErr) {
     console.error(JSON.stringify({ level: 'error', function_name: 'verify-stripe-token', message: updateErr.message }))
-    return jsonResponse({ success: false, error: 'Erreur mise à jour organisation' })
+    return jsonResponse({ success: false, error: 'Failed to update organization' })
   }
 
   // Avancer l'étape seulement si on n'est pas déjà plus loin (idempotent)

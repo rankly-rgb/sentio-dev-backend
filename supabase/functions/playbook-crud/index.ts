@@ -52,19 +52,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const orgId = auth.organizationId
 
-  // Résoudre la langue de l'org une seule fois par requête
-  const { data: orgRow } = await supabase
-    .from('organizations')
-    .select('locale')
-    .eq('id', orgId)
-    .maybeSingle()
-  const lang: 'fr' | 'en' = (orgRow?.locale === 'en') ? 'en' : 'fr'
-
   switch (req.method) {
     case 'POST':
       return handleCreate(supabase, req, orgId)
     case 'GET':
-      return id ? handleGetOne(supabase, id, orgId, lang) : handleList(supabase, url, orgId, lang)
+      return id ? handleGetOne(supabase, id, orgId) : handleList(supabase, url, orgId)
     case 'PUT':
     case 'PATCH':
       return id ? handleUpdate(supabase, id, req, orgId) : errorResponse('id query parameter required', 400)
@@ -93,11 +85,9 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     }
     body = {
       ...body,
-      title: body.title ?? template.title_fr,
-      title_fr: template.title_fr,
+      title: body.title ?? template.title_en,
       title_en: template.title_en,
-      description: body.description ?? template.description_fr,
-      description_fr: template.description_fr,
+      description: body.description ?? template.description_en,
       description_en: template.description_en,
       playbook_type: template.playbook_type,
       template_category: template.template_category,
@@ -113,25 +103,21 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
 
   // Enforce auth org_id — ignore body.organization_id to prevent cross-tenant writes
   const organizationId = authOrgId
-  const title    = body.title    as string | undefined
-  const titleFr  = body.title_fr as string | undefined
-  const titleEn  = body.title_en as string | undefined
+  const title   = body.title    as string | undefined
+  const titleEn = body.title_en as string | undefined
 
   if (!organizationId) return errorResponse('organization_id is required', 400)
 
-  // Validate: title or at least one locale variant required
-  const hasTitleFr = titleFr && titleFr.trim().length > 0
+  // Validate: title or title_en required
   const hasTitleEn = titleEn && titleEn.trim().length > 0
   const hasTitleLegacy = title && title.trim().length > 0
 
-  if (!hasTitleFr && !hasTitleEn && !hasTitleLegacy) {
-    return errorResponse('At least one of title, title_fr, or title_en must be non-empty', 400)
+  if (!hasTitleEn && !hasTitleLegacy) {
+    return errorResponse('At least one of title or title_en must be non-empty', 400)
   }
 
-  // Legacy call: only title provided → replicate to title_fr (EN populated only if absent)
-  const resolvedTitle   = hasTitleLegacy ? (title as string).trim() : (hasTitleFr ? titleFr!.trim() : titleEn!.trim())
-  const resolvedTitleFr = hasTitleFr ? titleFr!.trim() : (hasTitleLegacy ? resolvedTitle : null)
-  const resolvedTitleEn = hasTitleEn ? titleEn!.trim() : (hasTitleLegacy ? resolvedTitle : null)
+  const resolvedTitle   = hasTitleLegacy ? (title as string).trim() : titleEn!.trim()
+  const resolvedTitleEn = hasTitleEn ? titleEn!.trim() : resolvedTitle
 
   // Determine if workflow
   const isWorkflow = body.is_workflow === true
@@ -202,11 +188,7 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
   }
 
   const rawDesc   = (body.description    as string | null) ?? null
-  const rawDescFr = (body.description_fr as string | null) ?? null
   const rawDescEn = (body.description_en as string | null) ?? null
-
-  // Legacy: description only → replicate to description_fr
-  const resolvedDescFr = rawDescFr ?? rawDesc
   const resolvedDescEn = rawDescEn ?? rawDesc
 
   const insertPayload: Record<string, unknown> = {
@@ -216,7 +198,6 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     trigger_conditions: validatedTrigger,
     eligibility_criteria: validatedEligibility,
     description: rawDesc,
-    description_fr: resolvedDescFr,
     description_en: resolvedDescEn,
     playbook_type: (body.playbook_type as string) ?? 'manual',
     template_category: (body.template_category as string) ?? null,
@@ -231,7 +212,6 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     is_workflow: isWorkflow,
     steps: validatedSteps,
     status: 'draft',
-    title_fr: resolvedTitleFr,
     title_en: resolvedTitleEn,
   }
 
@@ -251,7 +231,7 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
 
 // ── LIST ────────────────────────────────────────────────────
 
-async function handleList(supabase: SupabaseClient, url: URL, authOrgId: string, lang: 'fr' | 'en'): Promise<Response> {
+async function handleList(supabase: SupabaseClient, url: URL, authOrgId: string): Promise<Response> {
   // Use auth org_id — query param ignored to prevent cross-tenant reads
   const orgId = authOrgId
 
@@ -297,14 +277,14 @@ async function handleList(supabase: SupabaseClient, url: URL, authOrgId: string,
     return errorResponse(`Failed to list playbooks: ${error.message}`, 500)
   }
 
-  const localizedData = (data ?? []).map((p: Record<string, unknown>) => localizePlaybook(p, lang))
+  const localizedData = (data ?? []).map((p: Record<string, unknown>) => localizePlaybook(p))
 
   return jsonResponse({ data: localizedData, total: count, page, per_page: perPage })
 }
 
 // ── GET ONE ─────────────────────────────────────────────────
 
-async function handleGetOne(supabase: SupabaseClient, id: string, authOrgId: string, lang: 'fr' | 'en'): Promise<Response> {
+async function handleGetOne(supabase: SupabaseClient, id: string, authOrgId: string): Promise<Response> {
   const { data: playbook, error } = await supabase
     .from('playbooks')
     .select('*')
@@ -338,7 +318,7 @@ async function handleGetOne(supabase: SupabaseClient, id: string, authOrgId: str
       : null,
   }
 
-  return jsonResponse({ ...localizePlaybook(playbook as Record<string, unknown>, lang), execution_stats: stats })
+  return jsonResponse({ ...localizePlaybook(playbook as Record<string, unknown>), execution_stats: stats })
 }
 
 // ── UPDATE ──────────────────────────────────────────────────
@@ -372,9 +352,7 @@ async function handleUpdate(supabase: SupabaseClient, id: string, req: Request, 
   }
 
   if (body.description    !== undefined) updates.description    = body.description
-  if (body.title_fr       !== undefined) updates.title_fr       = body.title_fr
   if (body.title_en       !== undefined) updates.title_en       = body.title_en
-  if (body.description_fr !== undefined) updates.description_fr = body.description_fr
   if (body.description_en !== undefined) updates.description_en = body.description_en
   if (body.segment_id !== undefined) updates.segment_id = body.segment_id
   if (body.insight_id !== undefined) updates.insight_id = body.insight_id
@@ -515,38 +493,27 @@ async function handleUpdate(supabase: SupabaseClient, id: string, req: Request, 
   return jsonResponse(data)
 }
 
-// ── Localisation i18n ───────────────────────────────────────
+// ── English display fields ───────────────────────────────────
 
 /**
  * Enrichit un playbook avec display_name et display_description
- * résolus selon la locale de l'org.
- *
- * Chaîne de fallback :
- *   FR : title_fr → title_en → title
- *   EN : title_en → title_fr → title
- * (idem pour description)
+ * en anglais (title_en/description_en), avec repli sur les
+ * colonnes canoniques title/description si absentes.
  */
 export function localizePlaybook(
   playbook: Record<string, unknown>,
-  lang: 'fr' | 'en',
 ): Record<string, unknown> {
-  const titleFr  = nonEmpty(playbook.title_fr as string | null)
   const titleEn  = nonEmpty(playbook.title_en as string | null)
   const titleLeg = (playbook.title as string) ?? ''
 
-  const descFr  = nonEmpty(playbook.description_fr as string | null)
   const descEn  = nonEmpty(playbook.description_en as string | null)
   const descLeg = (playbook.description as string | null) ?? ''
 
-  const displayName = lang === 'en'
-    ? (titleEn ?? titleFr ?? titleLeg)
-    : (titleFr ?? titleEn ?? titleLeg)
-
-  const displayDescription = lang === 'en'
-    ? (descEn ?? descFr ?? descLeg)
-    : (descFr ?? descEn ?? descLeg)
-
-  return { ...playbook, display_name: displayName, display_description: displayDescription }
+  return {
+    ...playbook,
+    display_name: titleEn ?? titleLeg,
+    display_description: descEn ?? descLeg,
+  }
 }
 
 function nonEmpty(v: string | null | undefined): string | null {
