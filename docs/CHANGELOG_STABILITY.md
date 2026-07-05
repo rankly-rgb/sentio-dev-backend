@@ -4,6 +4,24 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Accounts — priority_label calculé (2026-07-05)
+
+Audit préalable : aucune vue SQL n'existait sur `accounts` (aucun fichier sous `supabase/views/`), et `accounts-api` (seul endpoint de liste de comptes — il n'y a pas de fonction `get-accounts`) sélectionnait directement la table `accounts` sans label de priorité calculé.
+
+**Changements :**
+- Migration `20260705000002_accounts_priority_label_view.sql` : vue `accounts_with_priority` (`WITH (security_invoker = true)` pour que la RLS de `accounts` s'applique à tout appelant, y compris hors service_role) — ajoute `priority_label` via `CASE` SQL, non stocké.
+- `accounts-api/index.ts` : `handleList` sélectionne désormais depuis `accounts_with_priority` au lieu de `accounts`, ajoute `priority_label` à la liste de colonnes retournées. `handleGetOne` et `handlePatch` inchangés (écriture sur `accounts` directement).
+
+**Règles `priority_label`** (priorité décroissante, exclusif) :
+1. `critique` — `churn_risk_score >= 80` OU `health_score <= 30`
+2. `surveillance` — `churn_risk_score >= 50` OU `health_score <= 55`
+3. `nouveau` — `created_at` < 90 jours ET `churn_risk_score < 50`
+4. `stable` — défaut
+
+**Tests** : pas de nouveau test Vitest — la logique vit entièrement en SQL (`CASE` dans la vue), même convention que `list_deduplicated_insights` (voir entrée du 2026-07-05 ci-dessous).
+
+---
+
 ## AI Insights — Pagination & Dedup v1 (2026-07-05)
 
 Audit préalable sur `insights-crud` (aucune fonction `get-insights` n'existe — c'est `insights-crud` qui expose la liste). L'endpoint utilisait déjà une pagination (`page`/`per_page`), mais celle-ci divergeait du contrat documenté dans `API_CONTRACTS.md` (`limit`/`offset`). Le tri par défaut était `created_at DESC` (pas de priorisation), et aucune déduplication n'était appliquée : un compte pouvait accumuler plusieurs insights actifs-puis-résolus du même `insight_type` sur des jours différents, qui s'affichaient comme des doublons visuels une fois tous les statuts inclus dans le filtre.

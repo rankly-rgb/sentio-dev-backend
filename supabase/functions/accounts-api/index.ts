@@ -11,9 +11,14 @@
 //                  search (texte libre sur display_name ou stripe_customer_id)
 //   Response 200 :
 //     {
-//       data: Account[],
+//       data: Array<Account & { priority_label: 'critique' | 'surveillance' | 'nouveau' | 'stable' }>,
 //       pagination: { limit: number, next_cursor: string | null, has_more: boolean }
 //     }
+//   priority_label calculé côté SQL (vue accounts_with_priority) :
+//     critique     : churn_risk_score >= 80 OU health_score <= 30
+//     surveillance : churn_risk_score >= 50 OU health_score <= 55
+//     nouveau      : created_at < 90j ET churn_risk_score < 50
+//     stable       : sinon
 //
 // GET /accounts-api?id=:uuid
 //   Response 200 :
@@ -104,13 +109,13 @@ async function handleList(
   const search = url.searchParams.get('search')?.trim()
 
   let query = supabase
-    .from('accounts')
+    .from('accounts_with_priority')
     .select(
       'id, stripe_customer_id, display_name, plan_tier, billing_interval, mrr_cents, ' +
       'seat_count, seat_limit, ' +
       'health_score, churn_risk_score, expansion_score, product_usage_score, ' +
       'financial_score, engagement_score, contract_score, ' +
-      'contract_end_date, scores_calculated_at, created_at, updated_at',
+      'contract_end_date, scores_calculated_at, created_at, updated_at, priority_label',
     )
     .eq('organization_id', orgId)
     .order('created_at', { ascending: false })
