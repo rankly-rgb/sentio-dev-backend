@@ -657,6 +657,11 @@ Exécute un playbook manuellement sur des comptes ou un segment.
 `account_ids` OU `segment_id` — au moins l'un. Max 200 comptes par run.  
 `cooldown_hours` : ignore les comptes déjà exécutés dans ce délai (défaut : pas de cooldown).
 
+**Action send_email**  
+Requiert que l'organisation ait `notification_email` configuré dans la table `organizations`.
+L'email est résolu en mémoire au moment de l'exécution, non stocké.
+Si absent : action retourne `status: 'failed'` avec message explicite dans `playbook_executions.result`.
+
 **Response 200**
 ```json
 { "executed": 3, "skipped": 1, "failed": 0 }
@@ -737,6 +742,56 @@ Suggestion déterministe du playbook le plus pertinent à activer, basée sur l'
 `data` est `null` si aucune suggestion pertinente.
 
 **Codes d'erreur** : `401`, `500`
+
+---
+
+### playbook-templates (GET)
+
+Retourne la liste des templates de playbooks disponibles en V1.
+Pas de filtre organization — les templates sont définis dans le code (constantes TypeScript).
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/playbook-templates` |
+| **Méthode** | `GET` |
+| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
+
+**Query params** : `locale` (optionnel, `'fr'` | `'en'`, défaut `'fr'`)
+
+**Response 200**
+```json
+{
+  "data": {
+    "templates": [
+      {
+        "id": "churn-critical-alert",
+        "title": "Alerte churn critique",
+        "description": "Envoie une alerte email immédiate...",
+        "playbook_type": "automated",
+        "template_category": "churn_prevention",
+        "priority": "critical",
+        "is_automated": true,
+        "trigger_conditions": { "health_score_below": 40, "evaluation": "daily" },
+        "actions": [{ "type": "send_email", "order": 1, "config": { "email_subject": "...", "email_body_html": "..." } }]
+      }
+    ],
+    "locale": "fr",
+    "total": 6
+  }
+}
+```
+
+**Codes d'erreur** : `401` (JWT absent ou invalide), `405` (méthode non autorisée)
+
+**Templates V1 disponibles** : `churn-critical-alert`, `churn-progressive-decline`, `renewal-upcoming`, `payment-recovery`, `expansion-opportunity`, `reactivation-churned`
+
+**Utilisé par** : frontend modal "New playbook" — sélection de template
+
+**Créer un playbook depuis un template** :
+```
+POST /playbook-crud { "from_template_id": "churn-critical-alert", "title": "Mon alerte custom" }
+→ 201 { "id": "uuid", "title": "Mon alerte custom", "actions": [...], "organization_id": "..." }
+```
 
 ---
 
@@ -850,6 +905,157 @@ Ingère des événements d'usage produit depuis les systèmes du client (SDK, we
 | `401` | Header `X-Sentio-Webhook-Secret` absent ou secret invalide / inactif |
 | `404` | Compte introuvable dans l'organisation |
 | `500` | Erreur serveur |
+
+---
+
+## stripe-product-mappings-api
+
+Gestion du mapping `stripe_price_id → plan_tier + seat_limit`.  
+Chaque organisation configure ce mapping une fois via l'UI ; `sync-stripe` l'utilise à chaque run pour enrichir les comptes.
+
+**Auth** : Bearer JWT utilisateur (ES256)
+
+---
+
+### GET `/stripe-product-mappings-api`
+
+Retourne tous les mappings de l'organisation avec un flag `in_use`.
+
+**Response 200**
+```json
+{
+  "mappings": [
+    {
+      "id": "uuid",
+      "organization_id": "uuid",
+      "stripe_price_id": "price_xxx",
+      "stripe_product_name": "Growth Plan",
+      "stripe_price_label": "199€/mois",
+      "plan_tier": "growth",
+      "seat_limit": 25,
+      "unlimited_seats": false,
+      "in_use": true,
+      "created_at": "2026-06-14T00:00:00Z",
+      "updated_at": "2026-06-14T00:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+`in_use: true` si ce `stripe_price_id` est actuellement utilisé dans un abonnement `active` ou `trialing` de l'organisation.
+
+---
+
+### PUT `/stripe-product-mappings-api`
+
+Crée ou met à jour un mapping (upsert sur `organization_id + stripe_price_id`).
+
+**Body**
+```json
+{
+  "stripe_price_id": "price_xxx",
+  "plan_tier": "growth",
+  "seat_limit": 25,
+  "unlimited_seats": false,
+  "stripe_product_name": "Growth Plan",
+  "stripe_price_label": "199€/mois"
+}
+```
+
+| Champ | Type | Requis | Contraintes |
+|-------|------|--------|-------------|
+| `stripe_price_id` | `string` | Oui | Non vide |
+| `plan_tier` | `'starter' \| 'growth' \| 'enterprise' \| null` | Non | null si non applicable |
+| `seat_limit` | `number \| null` | Non | Entier > 0 ou null. Ignoré si `unlimited_seats = true` |
+| `unlimited_seats` | `boolean` | Non | `true` = plan sans plafond ; force `seat_limit = null` |
+| `stripe_product_name` | `string \| null` | Non | Label d'identification dans l'UI |
+| `stripe_price_label` | `string \| null` | Non | Ex : `"199€/mois"`, affiché dans l'UI |
+
+**Response 200**
+```json
+{
+  "mapping": {
+    "id": "uuid",
+    "organization_id": "uuid",
+    "stripe_price_id": "price_xxx",
+    "stripe_product_name": "Growth Plan",
+    "stripe_price_label": "199€/mois",
+    "plan_tier": "growth",
+    "seat_limit": 25,
+    "unlimited_seats": false,
+    "created_at": "2026-06-14T00:00:00Z",
+    "updated_at": "2026-06-14T00:00:00Z"
+  }
+}
+```
+
+**Codes d'erreur**
+
+| Code | Cas |
+|------|-----|
+| `400` | `stripe_price_id` absent ou vide |
+| `400` | `plan_tier` hors des valeurs autorisées |
+| `400` | `seat_limit` non entier ou ≤ 0 |
+| `500` | Erreur DB |
+
+---
+
+### GET `/stripe-product-mappings-api/prices-from-stripe`
+
+Appelle l'API Stripe de l'organisation pour lister tous les prices récurrents actifs.  
+Sert à pré-peupler l'UI de configuration du mapping.
+
+**Response 200**
+```json
+{
+  "prices": [
+    {
+      "stripe_price_id": "price_xxx",
+      "stripe_product_name": "Growth Plan",
+      "stripe_price_label": "199€/mois",
+      "currency": "eur",
+      "unit_amount": 19900,
+      "recurring_interval": "month",
+      "already_mapped": true
+    }
+  ]
+}
+```
+
+`already_mapped: true` si ce `stripe_price_id` a déjà un mapping configuré pour cette organisation.  
+Les prices non-récurrents (one-shot) sont exclus de la réponse.
+
+**Codes d'erreur**
+
+| Code | Cas |
+|------|-----|
+| `400` | Clé Stripe non configurée pour l'organisation |
+| `502` | Erreur ou timeout lors de l'appel Stripe |
+
+---
+
+### Type `StripeProductMapping`
+
+```typescript
+interface StripeProductMapping {
+  id: string
+  organization_id: string
+  stripe_price_id: string
+  stripe_product_name: string | null
+  stripe_price_label: string | null
+  plan_tier: 'starter' | 'growth' | 'enterprise' | null
+  seat_limit: number | null          // null = non configuré (≠ illimité)
+  unlimited_seats: boolean           // true = plan sans plafond de sièges
+  in_use?: boolean                   // présent uniquement dans GET liste
+  created_at: string
+  updated_at: string
+}
+```
+
+> **Règle `seat_limit`** : `null` signifie "non configuré". Ce n'est pas la même chose qu'illimité.  
+> Un plan illimité est représenté par `unlimited_seats: true` + `seat_limit: null`.  
+> `sync-stripe` utilise `seat_limit = null` comme signal d'absence de mapping → `expansion_score` calculé en mode absolu (`seat_count / 15`).
 
 ---
 

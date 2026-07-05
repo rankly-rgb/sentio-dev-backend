@@ -20,17 +20,18 @@ export interface ConditionGroup {
 
 // ── Action types ────────────────────────────────────────────
 export const VALID_ACTION_TYPES = [
-  'slack_notify',
-  'create_task',
-  'assign_owner',
-  'update_tag',
-  'log_note',
-  'schedule_review',
-  'flag_for_review',
-  'send_email',
-  'hubspot_enroll_sequence',
-  'hubspot_update_company',
-  'hubspot_create_task',
+  'send_email',       // V1 : alerte email via Resend (action principale)
+  'export_csv',       // V1 : export liste comptes ciblés (transit PII)
+  'log_note',         // V1 : journalisation interne
+  'flag_for_review',  // V1 : marquage manuel
+  /* V2 */ // 'slack_notify',
+  /* V2 */ // 'hubspot_enroll_sequence',
+  /* V2 */ // 'hubspot_update_company',
+  /* V2 */ // 'hubspot_create_task',
+  /* V2 */ // 'create_task',
+  /* V2 */ // 'assign_owner',
+  /* V2 */ // 'update_tag',
+  /* V2 */ // 'schedule_review',
 ] as const
 
 export type PlaybookActionType = typeof VALID_ACTION_TYPES[number]
@@ -57,9 +58,19 @@ export const VALID_PLAYBOOK_TYPES = ['manual', 'automated', 'semi_automated', 't
 export type PlaybookType = typeof VALID_PLAYBOOK_TYPES[number]
 
 export const VALID_TEMPLATE_CATEGORIES = [
-  'churn_prevention', 'expansion', 'onboarding', 'reactivation', 'renewal', 'winback',
-  'payment_recovery', 'health_monitoring', 'customer_education', 'nps_detractors',
-  'champions_advocacy', 'downgrade_prevention', 'success_planning',
+  'churn_prevention',
+  'expansion',
+  'renewal',
+  'payment_recovery',
+  'reactivation',
+  /* V2 */ // 'onboarding',
+  /* V2 */ // 'winback',
+  /* V2 */ // 'health_monitoring',
+  /* V2 */ // 'customer_education',
+  /* V2 */ // 'nps_detractors',
+  /* V2 */ // 'champions_advocacy',
+  /* V2 */ // 'downgrade_prevention',
+  /* V2 */ // 'success_planning',
 ] as const
 export type TemplateCategory = typeof VALID_TEMPLATE_CATEGORIES[number]
 
@@ -216,6 +227,25 @@ export function validatePlaybookActions(actions: unknown): PlaybookAction[] {
     // Validate config
     if (!config || typeof config !== 'object' || Array.isArray(config)) {
       throw new Error(`actions[${i}].config must be an object`)
+    }
+
+    // Type-specific config validation
+    if (type === 'send_email') {
+      const cfg = config as Record<string, unknown>
+      const subject = cfg.email_subject
+      const body = cfg.email_body_html
+      if (!subject || typeof subject !== 'string' || subject.trim().length === 0) {
+        throw new Error(`actions[${i}].config.email_subject must be a non-empty string`)
+      }
+      if (subject.length > 150) {
+        throw new Error(`actions[${i}].config.email_subject must be 150 characters or less`)
+      }
+      if (!body || typeof body !== 'string' || body.trim().length === 0) {
+        throw new Error(`actions[${i}].config.email_body_html must be a non-empty string`)
+      }
+      if (body.length < 10) {
+        throw new Error(`actions[${i}].config.email_body_html must be at least 10 characters`)
+      }
     }
 
     // Validate order
@@ -456,3 +486,145 @@ export function calculateStepDueDate(delayDays: number, fromDate?: Date): string
   const due = new Date(base.getTime() + delayDays * 24 * 60 * 60 * 1000)
   return due.toISOString()
 }
+
+// ── Playbook Templates V1 ───────────────────────────────────
+
+export interface PlaybookTemplate {
+  id: string
+  title_fr: string
+  title_en: string
+  description_fr: string
+  description_en: string
+  playbook_type: PlaybookType
+  template_category: string
+  priority: 'critical' | 'high' | 'medium' | 'low'
+  is_automated: boolean
+  trigger_conditions: Record<string, unknown>
+  eligibility_criteria?: Record<string, unknown>
+  actions: PlaybookAction[]
+}
+
+export const PLAYBOOK_TEMPLATES_V1: PlaybookTemplate[] = [
+  {
+    id: 'churn-critical-alert',
+    title_fr: 'Alerte churn critique',
+    title_en: 'Critical churn alert',
+    description_fr: 'Envoie une alerte email immédiate quand un compte passe sous le seuil de risque critique (score < 40).',
+    description_en: 'Sends an immediate email alert when an account drops below the critical risk threshold (score < 40).',
+    playbook_type: 'automated',
+    template_category: 'churn_prevention',
+    priority: 'critical',
+    is_automated: true,
+    trigger_conditions: { health_score_below: 40, evaluation: 'daily' },
+    eligibility_criteria: { mrr_cents_min: 1 },
+    actions: [{
+      type: 'send_email',
+      order: 1,
+      config: {
+        email_subject: '🚨 Risque critique — {{account_name}} (score {{health_score}})',
+        email_body_html: '<p><strong>{{account_name}}</strong> a atteint un score de santé critique de <strong>{{health_score}}/100</strong>.</p><p>MRR : {{mrr}} | Risque de churn : {{churn_risk}}%</p><p>Action recommandée : contacter ce compte dans les 48h.</p>',
+      },
+    }],
+  },
+  {
+    id: 'churn-progressive-decline',
+    title_fr: 'Déclin progressif détecté',
+    title_en: 'Progressive decline detected',
+    description_fr: 'Alerte quand le score de santé d\'un compte baisse de plus de 15 points en 30 jours.',
+    description_en: 'Alerts when an account health score drops more than 15 points in 30 days.',
+    playbook_type: 'automated',
+    template_category: 'churn_prevention',
+    priority: 'high',
+    is_automated: true,
+    trigger_conditions: { health_score_drop_30d: 15, evaluation: 'daily' },
+    actions: [{
+      type: 'send_email',
+      order: 1,
+      config: {
+        email_subject: '📉 Déclin détecté — {{account_name}} (-{{score_drop}} pts en 30j)',
+        email_body_html: '<p>Le score de <strong>{{account_name}}</strong> a baissé de <strong>{{score_drop}} points</strong> sur les 30 derniers jours.</p><p>Score actuel : {{health_score}}/100</p>',
+      },
+    }],
+  },
+  {
+    id: 'renewal-upcoming',
+    title_fr: 'Renouvellement imminent',
+    title_en: 'Upcoming renewal',
+    description_fr: 'Alerte 30 jours avant la date de renouvellement d\'un abonnement.',
+    description_en: 'Alerts 30 days before a subscription renewal date.',
+    playbook_type: 'automated',
+    template_category: 'renewal',
+    priority: 'medium',
+    is_automated: true,
+    trigger_conditions: { days_until_renewal: 30, evaluation: 'daily' },
+    actions: [{
+      type: 'send_email',
+      order: 1,
+      config: {
+        email_subject: '📅 Renouvellement dans 30j — {{account_name}}',
+        email_body_html: '<p>Le contrat de <strong>{{account_name}}</strong> arrive à renouvellement dans <strong>30 jours</strong>.</p><p>MRR actuel : {{mrr}} | Score de santé : {{health_score}}/100</p>',
+      },
+    }],
+  },
+  {
+    id: 'payment-recovery',
+    title_fr: 'Paiement en échec',
+    title_en: 'Failed payment',
+    description_fr: 'Alerte immédiate quand un compte passe en statut past_due ou unpaid dans Stripe.',
+    description_en: 'Immediate alert when an account becomes past_due or unpaid in Stripe.',
+    playbook_type: 'automated',
+    template_category: 'payment_recovery',
+    priority: 'critical',
+    is_automated: true,
+    trigger_conditions: { stripe_status: ['past_due', 'unpaid'], evaluation: 'on_sync' },
+    actions: [
+      {
+        type: 'send_email',
+        order: 1,
+        config: {
+          email_subject: '💳 Paiement en échec — {{account_name}}',
+          email_body_html: '<p>Le compte <strong>{{account_name}}</strong> est en statut <strong>{{stripe_status}}</strong>.</p><p>MRR concerné : {{mrr}}</p>',
+        },
+      },
+      {
+        type: 'export_csv',
+        order: 2,
+        config: {},
+      },
+    ],
+  },
+  {
+    id: 'expansion-opportunity',
+    title_fr: 'Opportunité d\'expansion',
+    title_en: 'Expansion opportunity',
+    description_fr: 'Identifie les comptes avec un score de santé élevé et une croissance MRR sur 2 mois.',
+    description_en: 'Identifies accounts with a high health score and MRR growth over 2 months.',
+    playbook_type: 'manual',
+    template_category: 'expansion',
+    priority: 'medium',
+    is_automated: false,
+    trigger_conditions: { health_score_above: 75, mrr_growth_2m: true, evaluation: 'weekly' },
+    actions: [{
+      type: 'export_csv',
+      order: 1,
+      config: {},
+    }],
+  },
+  {
+    id: 'reactivation-churned',
+    title_fr: 'Comptes à réactiver',
+    title_en: 'Accounts to reactivate',
+    description_fr: 'Liste les comptes churned depuis moins de 90 jours, candidats à une réactivation.',
+    description_en: 'Lists accounts churned within the last 90 days, candidates for reactivation.',
+    playbook_type: 'manual',
+    template_category: 'reactivation',
+    priority: 'low',
+    is_automated: false,
+    trigger_conditions: { churned_within_days: 90, evaluation: 'weekly' },
+    actions: [{
+      type: 'export_csv',
+      order: 1,
+      config: {},
+    }],
+  },
+]

@@ -18,6 +18,7 @@ import {
   VALID_TEMPLATE_CATEGORIES,
   VALID_PRIORITIES,
   VALID_EXECUTION_FREQUENCIES,
+  PLAYBOOK_TEMPLATES_V1,
   type PlaybookStatus,
   type ExecutionFrequency,
 } from '../_shared/playbook-engine.ts'
@@ -84,6 +85,32 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     return errorResponse('Invalid JSON body', 400)
   }
 
+  // Template creation: enrich body from built-in template constants
+  if (body.from_template_id) {
+    const template = PLAYBOOK_TEMPLATES_V1.find((t) => t.id === body.from_template_id)
+    if (!template) {
+      return errorResponse(`Template '${body.from_template_id}' not found`, 404)
+    }
+    body = {
+      ...body,
+      title: body.title ?? template.title_fr,
+      title_fr: template.title_fr,
+      title_en: template.title_en,
+      description: body.description ?? template.description_fr,
+      description_fr: template.description_fr,
+      description_en: template.description_en,
+      playbook_type: template.playbook_type,
+      template_category: template.template_category,
+      priority: template.priority,
+      is_automated: template.is_automated,
+      is_template: false,
+      trigger_conditions: template.trigger_conditions,
+      eligibility_criteria: template.eligibility_criteria ?? null,
+      actions: template.actions,
+      source: 'template',
+    }
+  }
+
   // Enforce auth org_id — ignore body.organization_id to prevent cross-tenant writes
   const organizationId = authOrgId
   const title    = body.title    as string | undefined
@@ -135,22 +162,31 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
   }
 
   // Validate trigger_conditions (optional)
-  let validatedTrigger = null
+  // Template trigger conditions are stored as raw JSONB — not ConditionGroup format
+  let validatedTrigger: unknown = null
   if (body.trigger_conditions) {
-    try {
-      validatedTrigger = validateConditions(body.trigger_conditions)
-    } catch (err) {
-      return errorResponse(err instanceof Error ? err.message : 'Invalid trigger_conditions', 400)
+    if (body.from_template_id) {
+      validatedTrigger = body.trigger_conditions
+    } else {
+      try {
+        validatedTrigger = validateConditions(body.trigger_conditions)
+      } catch (err) {
+        return errorResponse(err instanceof Error ? err.message : 'Invalid trigger_conditions', 400)
+      }
     }
   }
 
   // Validate eligibility_criteria (optional)
-  let validatedEligibility = null
+  let validatedEligibility: unknown = null
   if (body.eligibility_criteria) {
-    try {
-      validatedEligibility = validateConditions(body.eligibility_criteria)
-    } catch (err) {
-      return errorResponse(err instanceof Error ? err.message : 'Invalid eligibility_criteria', 400)
+    if (body.from_template_id) {
+      validatedEligibility = body.eligibility_criteria
+    } else {
+      try {
+        validatedEligibility = validateConditions(body.eligibility_criteria)
+      } catch (err) {
+        return errorResponse(err instanceof Error ? err.message : 'Invalid eligibility_criteria', 400)
+      }
     }
   }
 

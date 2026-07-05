@@ -151,6 +151,8 @@ async function handleSubscriptionEvent(
   const cancelAt = sub.cancel_at ? new Date(sub.cancel_at * 1000).toISOString().split('T')[0] : null
   const canceledAt = sub.canceled_at ? new Date(sub.canceled_at * 1000).toISOString() : null
   const trialEnd = sub.trial_end ? new Date(sub.trial_end * 1000).toISOString().split('T')[0] : null
+  const contractStart = sub.current_period_start ? new Date(sub.current_period_start * 1000).toISOString() : null
+  const contractEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null
 
   // Fetch previous MRR for THIS subscription BEFORE upsert (TOCTOU fix)
   const { data: prevSubRow } = await supabase
@@ -247,6 +249,8 @@ async function handleSubscriptionEvent(
       mrr_cents: totalMrr,
       arr_cents: totalMrr * 12,
       last_stripe_sync_at: new Date().toISOString(),
+      ...(contractStart !== null && { contract_start_date: contractStart }),
+      ...(contractEnd !== null && { contract_end_date: contractEnd }),
     })
     .eq('id', accountRow.id)
 
@@ -351,6 +355,8 @@ interface StripeSubscription {
   trial_end?: number | null
   cancel_at?: number | null
   canceled_at?: number | null
+  current_period_start?: number | null
+  current_period_end?: number | null
 }
 
 interface StripeInvoice {

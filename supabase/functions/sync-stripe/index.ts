@@ -48,6 +48,7 @@ interface StripeSubscription {
   customer: string
   status: string
   quantity: number
+  created: number
   plan?: { amount: number; interval: string; id: string; product: string }
   items?: {
     data: Array<{
@@ -167,6 +168,21 @@ function calcMrrCents(sub: StripeSubscription): number {
   return Math.round((amount * qty) / (interval === 'year' ? 12 : 1))
 }
 
+// Retourne le stripe_price_id de l'abonnement actif principal.
+// Critère : MRR le plus élevé. Tie-break : le plus récemment créé (created DESC).
+function getPrimaryPriceId(subs: Array<{
+  mrrCents: number
+  createdAt: number
+  priceId: string | null
+}>): string | null {
+  if (subs.length === 0) return null
+  const sorted = subs.slice().sort((a, b) => {
+    if (b.mrrCents !== a.mrrCents) return b.mrrCents - a.mrrCents
+    return b.createdAt - a.createdAt
+  })
+  return sorted[0].priceId
+}
+
 // ── Helpers batch ─────────────────────────────────────────────
 async function batchUpsert<T extends Record<string, unknown>>(
   supabase: SupabaseClient,
@@ -260,6 +276,8 @@ async function syncSubscriptions(
     quantity: number
     contractStart: string | null
     contractEnd: string | null
+    priceId: string | null
+    createdAt: number
   }>>()
 
   // Collect all subscription rows — batch upsert at the end
@@ -305,6 +323,8 @@ async function syncSubscriptions(
         quantity: qty,
         contractStart: periodStart,
         contractEnd: periodEnd,
+        priceId: sub.items?.data?.[0]?.price?.id ?? null,
+        createdAt: sub.created,
       })
       accountSubMeta.set(accountId, list)
     }
@@ -318,12 +338,35 @@ async function syncSubscriptions(
 
   // Phase 2 : batch upsert account MRR aggregates
   // upsert on accounts with onConflict='id' to batch-update all in one round-trip per 500 rows
+
+  // Récupérer le mapping price_id → plan_tier/seat_limit une seule fois pour toute la sync
+  const { data: productMappings } = await supabase
+    .from('stripe_product_mappings')
+    .select('stripe_price_id, plan_tier, seat_limit, unlimited_seats')
+    .eq('organization_id', organizationId)
+
+  const mappingByPriceId = new Map(
+    (productMappings ?? []).map((m: {
+      stripe_price_id: string
+      plan_tier: string | null
+      seat_limit: number | null
+      unlimited_seats: boolean
+    }) => [m.stripe_price_id, m]),
+  )
+
   const accountUpdateRows: Record<string, unknown>[] = []
   for (const acctId of customerToAccount.values()) {
     const subs = accountSubMeta.get(acctId) ?? []
     const totalMrr = subs.reduce((sum, s) => sum + s.mrrCents, 0)
     const totalSeats = subs.reduce((sum, s) => sum + s.quantity, 0)
-    const primary = subs.length > 0 ? subs.sort((a, b) => b.mrrCents - a.mrrCents)[0] : null
+    const primary = subs.length > 0 ? subs.slice().sort((a, b) => b.mrrCents - a.mrrCents)[0] : null
+
+    // Résoudre le mapping produit à partir du price_id de l'abonnement principal
+    const primaryPriceId = getPrimaryPriceId(subs)
+    const mapping = primaryPriceId ? mappingByPriceId.get(primaryPriceId) : undefined
+    const planTier = mapping?.plan_tier ?? null
+    // seat_limit = NULL si mapping absent, non configuré, ou unlimited_seats = true
+    const seatLimit = mapping ? (mapping.unlimited_seats ? null : (mapping.seat_limit ?? null)) : null
 
     const row: Record<string, unknown> = {
       id: acctId,
@@ -331,6 +374,8 @@ async function syncSubscriptions(
       mrr_cents: totalMrr,
       arr_cents: totalMrr * 12,
       seat_count: totalSeats > 0 ? totalSeats : null,
+      plan_tier: planTier,
+      seat_limit: seatLimit,
     }
     if (primary) {
       row.billing_interval = primary.billingInterval

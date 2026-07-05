@@ -201,15 +201,15 @@ describe('evaluateConditions', () => {
 
 describe('validatePlaybookActions', () => {
   const validActions: PlaybookAction[] = [
-    { type: 'slack_notify', config: { channel: '#cs-team' }, order: 1 },
-    { type: 'create_task', config: { title: 'Follow up' }, order: 2 },
+    { type: 'log_note', config: { note: 'Risk flagged' }, order: 1 },
+    { type: 'flag_for_review', config: {}, order: 2 },
   ]
 
   it('returns valid array for correct input', () => {
     const result = validatePlaybookActions(validActions)
     expect(result).toHaveLength(2)
-    expect(result[0].type).toBe('slack_notify')
-    expect(result[1].type).toBe('create_task')
+    expect(result[0].type).toBe('log_note')
+    expect(result[1].type).toBe('flag_for_review')
   })
 
   it('throws for non-array input', () => {
@@ -226,36 +226,68 @@ describe('validatePlaybookActions', () => {
   })
 
   it('throws for missing config', () => {
-    const actions = [{ type: 'slack_notify', order: 1 }]
+    const actions = [{ type: 'log_note', order: 1 }]
     expect(() => validatePlaybookActions(actions)).toThrow('actions[0].config must be an object')
   })
 
   it('throws for missing order', () => {
-    const actions = [{ type: 'slack_notify', config: {} }]
+    const actions = [{ type: 'log_note', config: {} }]
     expect(() => validatePlaybookActions(actions)).toThrow('actions[0].order must be a positive integer')
   })
 
   it('throws for duplicate orders', () => {
     const actions = [
-      { type: 'slack_notify', config: {}, order: 1 },
-      { type: 'create_task', config: {}, order: 1 },
+      { type: 'log_note', config: {}, order: 1 },
+      { type: 'flag_for_review', config: {}, order: 1 },
     ]
     expect(() => validatePlaybookActions(actions)).toThrow('order 1 is duplicated')
   })
 
   it('throws for non-object config (array)', () => {
-    const actions = [{ type: 'slack_notify', config: [1, 2], order: 1 }]
+    const actions = [{ type: 'log_note', config: [1, 2], order: 1 }]
     expect(() => validatePlaybookActions(actions)).toThrow('actions[0].config must be an object')
   })
 
   it('throws for zero order', () => {
-    const actions = [{ type: 'slack_notify', config: {}, order: 0 }]
+    const actions = [{ type: 'log_note', config: {}, order: 0 }]
     expect(() => validatePlaybookActions(actions)).toThrow('actions[0].order must be a positive integer')
   })
 
   it('throws for negative order', () => {
-    const actions = [{ type: 'slack_notify', config: {}, order: -1 }]
+    const actions = [{ type: 'log_note', config: {}, order: -1 }]
     expect(() => validatePlaybookActions(actions)).toThrow('actions[0].order must be a positive integer')
+  })
+
+  it('throws for send_email missing email_subject', () => {
+    const actions = [{ type: 'send_email', config: { email_body_html: '<p>body</p>' }, order: 1 }]
+    expect(() => validatePlaybookActions(actions)).toThrow('email_subject must be a non-empty string')
+  })
+
+  it('throws for send_email with email_subject over 150 chars', () => {
+    const actions = [{ type: 'send_email', config: { email_subject: 'x'.repeat(151), email_body_html: '<p>body</p>' }, order: 1 }]
+    expect(() => validatePlaybookActions(actions)).toThrow('150 characters or less')
+  })
+
+  it('throws for send_email missing email_body_html', () => {
+    const actions = [{ type: 'send_email', config: { email_subject: 'Subject' }, order: 1 }]
+    expect(() => validatePlaybookActions(actions)).toThrow('email_body_html must be a non-empty string')
+  })
+
+  it('throws for send_email with email_body_html under 10 chars', () => {
+    const actions = [{ type: 'send_email', config: { email_subject: 'Subject', email_body_html: 'short' }, order: 1 }]
+    expect(() => validatePlaybookActions(actions)).toThrow('at least 10 characters')
+  })
+
+  it('accepts valid send_email action', () => {
+    const actions = [{ type: 'send_email', config: { email_subject: 'Alert', email_body_html: '<p>Valid body content</p>' }, order: 1 }]
+    const result = validatePlaybookActions(actions)
+    expect(result[0].type).toBe('send_email')
+  })
+
+  it('accepts export_csv with empty config', () => {
+    const actions = [{ type: 'export_csv', config: {}, order: 1 }]
+    const result = validatePlaybookActions(actions)
+    expect(result[0].type).toBe('export_csv')
   })
 })
 
@@ -342,23 +374,23 @@ describe('validateConditions', () => {
 describe('executeAction', () => {
   const context = { playbookId: 'pb-001', executionId: 'exec-001' }
 
-  it('returns completed status for slack_notify', () => {
-    const action: PlaybookAction = { type: 'slack_notify', config: { channel: '#cs-team' }, order: 1 }
+  it('returns completed status for log_note', () => {
+    const action: PlaybookAction = { type: 'log_note', config: { note: 'Risk flagged' }, order: 1 }
     const result = executeAction(action, baseAccount, context)
     expect(result.status).toBe('completed')
-    expect(result.action_type).toBe('slack_notify')
+    expect(result.action_type).toBe('log_note')
     expect(result.order).toBe(1)
   })
 
-  it('returns completed status for create_task', () => {
-    const action: PlaybookAction = { type: 'create_task', config: { title: 'Follow up' }, order: 2 }
+  it('returns completed status for flag_for_review', () => {
+    const action: PlaybookAction = { type: 'flag_for_review', config: {}, order: 2 }
     const result = executeAction(action, baseAccount, context)
     expect(result.status).toBe('completed')
-    expect(result.action_type).toBe('create_task')
+    expect(result.action_type).toBe('flag_for_review')
   })
 
-  it('returns completed status for flag_for_review', () => {
-    const action: PlaybookAction = { type: 'flag_for_review', config: {}, order: 3 }
+  it('returns completed status for export_csv', () => {
+    const action: PlaybookAction = { type: 'export_csv', config: {}, order: 3 }
     const result = executeAction(action, baseAccount, context)
     expect(result.status).toBe('completed')
   })
@@ -370,16 +402,16 @@ describe('executeAction', () => {
   })
 
   it('includes executed_at timestamp', () => {
-    const action: PlaybookAction = { type: 'assign_owner', config: { role: 'csm' }, order: 1 }
+    const action: PlaybookAction = { type: 'flag_for_review', config: {}, order: 1 }
     const result = executeAction(action, baseAccount, context)
     expect(result.executed_at).toBeDefined()
     expect(new Date(result.executed_at).getTime()).not.toBeNaN()
   })
 
   it('includes config in message', () => {
-    const action: PlaybookAction = { type: 'update_tag', config: { tag: 'vip' }, order: 1 }
+    const action: PlaybookAction = { type: 'log_note', config: { note: 'vip account' }, order: 1 }
     const result = executeAction(action, baseAccount, context)
-    expect(result.message).toContain('"tag":"vip"')
+    expect(result.message).toContain('"note":"vip account"')
   })
 
   it('works for all valid action types', () => {

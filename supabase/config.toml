@@ -80,6 +80,10 @@ verify_jwt = false
 [functions.playbooks-suggested]
 verify_jwt = false
 
+# playbook-templates : JWT vérifié dans le code (ES256) — templates constants, pas de DB
+[functions.playbook-templates]
+verify_jwt = false
+
 # session-ping : JWT vérifié dans le code (ES256 — chantier 7)
 [functions.session-ping]
 verify_jwt = false
@@ -139,6 +143,10 @@ verify_jwt = false
 [functions.get-accounts-summary]
 verify_jwt = false
 
+# get-today-status : JWT vérifié dans le code (ES256 — statut portefeuille Today)
+[functions.get-today-status]
+verify_jwt = false
+
 [functions.save-org-preferences]
 verify_jwt = false
 
@@ -150,6 +158,9 @@ verify_jwt = false
 verify_jwt = false
 
 # Onboarding Flow — connexion Stripe & HubSpot
+[functions.stripe-product-mappings-api]
+verify_jwt = false
+
 [functions.verify-stripe-token]
 verify_jwt = false
 
@@ -166,4 +177,16 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.stripe-oauth-callback]
+verify_jwt = false
+
+# export-csv : JWT vérifié dans le code (ES256 — export comptes + transit PII Stripe)
+[functions.export-csv]
+verify_jwt = false
+
+# churn-alert : cron quotidien 06:00 UTC — alerte si comptes churn_risk >= 70 mis à jour dans les 24h
+[functions.churn-alert]
+verify_jwt = false
+
+# weekly-digest : cron lundi 07:00 UTC — bilan hebdomadaire rétention/expansion par org
+[functions.weekly-digest]
 verify_jwt = false

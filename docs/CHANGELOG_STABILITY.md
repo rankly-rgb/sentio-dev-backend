@@ -4,6 +4,53 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Today Portfolio Status v1 (2026-07-04)
+
+Nouvelle Edge Function `get-today-status` : statut global du portefeuille pour la future page "Aujourd'hui". Fonctionnalité entièrement nouvelle — un audit préalable a confirmé qu'aucune page "Today" ni logique de statut global n'existait sur `main` (le seul champ proche, `health_trend` dans `dashboard-api`, est un delta de tendance KPI, pas un statut qualitatif). Une branche non mergée (`feat/export-playbook-accounts`) contient des helpers `today-actions-helpers.ts` avec une granularité par compte (P0/P1/P2), différente de ce statut agrégé.
+
+### Règles de statut
+
+1. `critical` si au moins 1 `ai_insights` actif avec `priority='critical'`
+2. sinon `at_risk` si la part de comptes scorés (`churn_risk_score` non null) avec `churn_risk_score > 70` dépasse 30 %
+3. sinon `stable`
+
+### Réponse API
+
+```json
+{
+  "data": {
+    "status": "critical",
+    "critical_count": 2,
+    "total_mrr_cents": 1284500,
+    "champions_count": 12,
+    "top_urgent_account": {
+      "id": "uuid",
+      "name": "Acme Corp",
+      "mrr": 49900,
+      "risk_score": 82,
+      "top_insight": "Facture impayée depuis 20 jours"
+    }
+  }
+}
+```
+
+`top_urgent_account` = compte avec `churn_risk_score > 70` au MRR le plus élevé (`null` si aucun). `top_insight` = titre du plus prioritaire des insights actifs liés à ce compte (`''` si aucun — jamais `null`, pour que le frontend puisse appeler des méthodes string sans vérification).
+
+`total_mrr_cents` = somme de `mrr_cents` sur tous les comptes de l'org (`accounts` n'a pas de colonne `status` — un compte churné a déjà `mrr_cents = 0`, donc la somme brute équivaut à un filtre "actif"). `champions_count` = memberships actifs du segment système `account_segments.segment_type = 'champions'` (valeur exacte de la CHECK constraint ; `accounts` n'a pas de colonne `segment` directe, l'appartenance passe par `segment_memberships`).
+
+### Corrections post-revue (avant merge)
+
+Un premier passage de revue avait proposé `total_mrr_cents` via `accounts.status = 'active'` et `champions_count` via `accounts.segment = 'champion'` — ni la colonne `status` ni la colonne `segment` n'existent sur `accounts` (vérifié dans les migrations). Corrigé pour utiliser le schéma réel : somme JS de `mrr_cents` (convention déjà suivie par `onboarding-first-win`/`weekly-digest`) et jointure `account_segments` → `segment_memberships` (convention suivie par `dashboard-api`/`account-summary`), avec le slug pluriel `champions` qui correspond à la CHECK constraint.
+
+### Fichiers
+
+| Fichier | Rôle |
+|---------|------|
+| `supabase/functions/get-today-status/index.ts` | Edge Function GET, `verify_jwt=false` (JWT vérifié dans le code) |
+| `supabase/tests/get-today-status.test.ts` | 16 tests : `determineTodayStatus`, `selectTopUrgentAccount`, `selectTopInsightTitle`, `calcTotalMrrCents` |
+
+---
+
 ## HubSpot Playbook Dispatch Audit (2026-05-28)
 
 Audit complet de la fonctionnalité de dispatch playbook vers HubSpot. 8 corrections réparties en P0 (bugs bloquants), P1 (performance) et P2 (robustesse).

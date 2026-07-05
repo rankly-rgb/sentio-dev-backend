@@ -157,7 +157,13 @@ Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financi
 | `NEXT_PUBLIC_SUPABASE_URL` | Oui | Client Supabase |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Oui | Client Supabase |
 | `SUPABASE_SERVICE_ROLE_KEY` | Oui | Server/Edge Functions |
-| `STRIPE_SECRET_KEY` | Oui | API Stripe |
-| `STRIPE_WEBHOOK_SECRET` | Oui | HMAC webhooks |
-| `HUBSPOT_API_KEY` | Non | API HubSpot |
-| `SLACK_WEBHOOK_URL` | Non | Alertes monitoring |
+| `STRIPE_SECRET_KEY` | Oui | API Stripe + OAuth callback |
+| `STRIPE_WEBHOOK_SECRET` | Oui | HMAC webhooks Stripe |
+| `STRIPE_CLIENT_ID` | Non* | OAuth Stripe (`stripe-oauth-initiate`) — fallback flow clé directe si absent |
+| `HUBSPOT_API_KEY` | Non | Fallback global HubSpot (priorité 3, après Vault et `organizations.hubspot_api_key`) |
+| `RESEND_API_KEY` | Non | Emails de bienvenue (`on-user-signup`) — log-only si absent |
+| `ANTHROPIC_API_KEY` | Non | Résumés IA comptes (`account-summary`) — 503 si absent |
+| `SLACK_WEBHOOK_URL` | Non | Alertes monitoring — silencieux si absent |
+| `NEXT_PUBLIC_APP_URL` | Non | URL de base de l'app (OAuth redirect) — défaut `https://app.sentioapp.io` |
+
+*Optionnel si le flow de connexion Stripe par clé directe (`verify-stripe-token`) est utilisé à la place.
