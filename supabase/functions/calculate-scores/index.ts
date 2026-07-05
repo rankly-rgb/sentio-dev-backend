@@ -73,14 +73,14 @@ const SEGMENT_DEFINITIONS: Array<{
   criteria: Record<string, unknown>
   description: string
 }> = [
-  { segment_name: 'Champions', segment_type: 'champions', priority: 'high', criteria: { health_score_gte: 80 }, description: 'Comptes en excellente sante' },
-  { segment_name: 'En expansion', segment_type: 'en_expansion', priority: 'medium', criteria: { expansion_score_gte: 70, health_score_gte: 60 }, description: "Comptes avec potentiel d'expansion" },
-  { segment_name: 'Stables', segment_type: 'stables', priority: 'low', criteria: { health_score_gte: 40, churn_risk_lt: 50 }, description: 'Comptes stables sans risque' },
-  { segment_name: 'A risque leger', segment_type: 'a_risque_leger', priority: 'medium', criteria: { churn_risk_gte: 50, churn_risk_lt: 70 }, description: 'Comptes montrant des signes de risque' },
-  { segment_name: 'En danger critique', segment_type: 'en_danger_critique', priority: 'critical', criteria: { churn_risk_gte: 70 }, description: 'Comptes en danger imminent de churn' },
-  { segment_name: 'Impayes', segment_type: 'impayes', priority: 'critical', criteria: { has_overdue_invoices: true }, description: 'Comptes avec factures impayees' },
-  { segment_name: 'En churn', segment_type: 'en_churn', priority: 'critical', criteria: { mrr_cents_eq: 0 }, description: 'Comptes ayant churne' },
-  { segment_name: 'Nouveaux (< 90j)', segment_type: 'nouveaux', priority: 'low', criteria: { days_since_creation_lt: 90 }, description: 'Comptes crees il y a moins de 90 jours' },
+  { segment_name: 'Champions', segment_type: 'champions', priority: 'high', criteria: { health_score_gte: 80 }, description: 'Accounts in excellent health' },
+  { segment_name: 'Expanding', segment_type: 'en_expansion', priority: 'medium', criteria: { expansion_score_gte: 70, health_score_gte: 60 }, description: 'Accounts with expansion potential' },
+  { segment_name: 'Stable', segment_type: 'stables', priority: 'low', criteria: { health_score_gte: 40, churn_risk_lt: 50 }, description: 'Stable accounts with no risk' },
+  { segment_name: 'Slightly at Risk', segment_type: 'a_risque_leger', priority: 'medium', criteria: { churn_risk_gte: 50, churn_risk_lt: 70 }, description: 'Accounts showing signs of risk' },
+  { segment_name: 'Critical Danger', segment_type: 'en_danger_critique', priority: 'critical', criteria: { churn_risk_gte: 70 }, description: 'Accounts in imminent danger of churning' },
+  { segment_name: 'Unpaid', segment_type: 'impayes', priority: 'critical', criteria: { has_overdue_invoices: true }, description: 'Accounts with overdue invoices' },
+  { segment_name: 'Churned', segment_type: 'en_churn', priority: 'critical', criteria: { mrr_cents_eq: 0 }, description: 'Accounts that have churned' },
+  { segment_name: 'New (< 90d)', segment_type: 'nouveaux', priority: 'low', criteria: { days_since_creation_lt: 90 }, description: 'Accounts created less than 90 days ago' },
 ]
 
 // ── Ensure system segments exist for an org ──────────────────

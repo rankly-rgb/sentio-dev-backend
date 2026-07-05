@@ -1,6 +1,6 @@
 // ============================================================
 // Shared : score-narratives
-// Génère des phrases contextuelles déterministes (FR) pour
+// Génère des phrases contextuelles déterministes (EN) pour
 // chaque dimension du score de santé.
 // Utilisé par : accounts-api (à la volée) + calculate-scores (persisté en DB).
 // ============================================================
@@ -59,11 +59,11 @@ export function generateNarratives(inputs: NarrativeInputs): ScoreNarratives {
 // ── Dimension narratives ─────────────────────────────────────
 
 function narrativeHealth(health_score: number | null): string {
-  if (health_score === null) return "Score de santé non encore calculé."
-  if (health_score >= 80) return `Score de santé excellent (${health_score}/100).`
-  if (health_score >= 60) return `Score de santé correct (${health_score}/100). Quelques axes d'amélioration.`
-  if (health_score >= 40) return `Score de santé dégradé (${health_score}/100). Attention requise.`
-  return `Score de santé critique (${health_score}/100). Intervention urgente recommandée.`
+  if (health_score === null) return "Health score not yet calculated."
+  if (health_score >= 80) return `Excellent health score (${health_score}/100).`
+  if (health_score >= 60) return `Fair health score (${health_score}/100). Some areas for improvement.`
+  if (health_score >= 40) return `Degraded health score (${health_score}/100). Attention required.`
+  return `Critical health score (${health_score}/100). Urgent intervention recommended.`
 }
 
 function narrativeFinancial(
@@ -73,7 +73,7 @@ function narrativeFinancial(
   overdueCount: number,
   overdueAmountCents: number,
 ): string {
-  if (mrr_cents === 0) return "Compte sans MRR actif — abonnement résilié ou suspendu."
+  if (mrr_cents === 0) return "Account with no active MRR — subscription canceled or suspended."
 
   const score = financial_score ?? 0
   const mrrEur = (mrr_cents / 100).toFixed(0)
@@ -82,23 +82,23 @@ function narrativeFinancial(
     const tenureMonths = contract_start_date
       ? Math.floor((Date.now() - new Date(contract_start_date).getTime()) / (1000 * 60 * 60 * 24 * 30))
       : null
-    const tenureStr = tenureMonths !== null ? `, abonnement actif depuis ${tenureMonths} mois` : ''
-    return `Aucun impayé${tenureStr}. MRR : ${mrrEur} €.`
+    const tenureStr = tenureMonths !== null ? `, active subscription for ${tenureMonths} months` : ''
+    return `No overdue invoices${tenureStr}. MRR: €${mrrEur}.`
   }
-  if (score >= 70) return `Facturation stable. MRR : ${mrrEur} €.`
+  if (score >= 70) return `Stable billing. MRR: €${mrrEur}.`
   if (score >= 50) {
-    return `Attention : ${overdueCount} facture(s) en retard (${(overdueAmountCents / 100).toFixed(0)} €).`
+    return `Warning: ${overdueCount} overdue invoice(s) (€${(overdueAmountCents / 100).toFixed(0)}).`
   }
-  return `Risque financier élevé : ${overdueCount} impayé(s) pour ${(overdueAmountCents / 100).toFixed(0)} € au total.`
+  return `High financial risk: ${overdueCount} overdue invoice(s) totaling €${(overdueAmountCents / 100).toFixed(0)}.`
 }
 
 function narrativeUsage(product_usage_score: number | null, totalEvents30d: number): string {
   const score = product_usage_score ?? 50
-  if (score === 50 && totalEvents30d === 0) return "Aucune donnée d'utilisation disponible."
-  if (score >= 80) return `Utilisation active : ${totalEvents30d} événements sur les 30 derniers jours.`
-  if (score >= 60) return `Utilisation modérée : ${totalEvents30d} événements sur les 30 derniers jours.`
-  if (score >= 40) return `Faible utilisation détectée : seulement ${totalEvents30d} événements sur 30 jours.`
-  return `Utilisation très faible ou inactive (${totalEvents30d} événements). Risque de désengagement.`
+  if (score === 50 && totalEvents30d === 0) return "No usage data available."
+  if (score >= 80) return `Active usage: ${totalEvents30d} events over the last 30 days.`
+  if (score >= 60) return `Moderate usage: ${totalEvents30d} events over the last 30 days.`
+  if (score >= 40) return `Low usage detected: only ${totalEvents30d} events over 30 days.`
+  return `Very low or inactive usage (${totalEvents30d} events). Risk of disengagement.`
 }
 
 function narrativeEngagement(
@@ -107,7 +107,7 @@ function narrativeEngagement(
   lastMeetingDate: string | null,
 ): string {
   if (openTicketCount === null && lastMeetingDate === null) {
-    return "Aucune donnée HubSpot disponible pour l'engagement."
+    return "No HubSpot data available for engagement."
   }
   const score = engagement_score ?? 50
   const ticketCount = openTicketCount ?? 0
@@ -116,18 +116,18 @@ function narrativeEngagement(
     : null
 
   if (score >= 70) {
-    const meetingStr = daysSinceMeeting !== null ? `, dernière réunion il y a ${daysSinceMeeting} jour(s)` : ''
-    return `Bon engagement${meetingStr}.`
+    const meetingStr = daysSinceMeeting !== null ? `, last meeting ${daysSinceMeeting} day(s) ago` : ''
+    return `Good engagement${meetingStr}.`
   }
   if (score >= 40) {
-    const ticketStr = ticketCount > 0 ? ` — ${ticketCount} ticket(s) ouvert(s).` : '.'
-    return `Engagement modéré${ticketStr}`
+    const ticketStr = ticketCount > 0 ? ` — ${ticketCount} open ticket(s).` : '.'
+    return `Moderate engagement${ticketStr}`
   }
-  const ticketStr = ticketCount > 0 ? `${ticketCount} ticket(s) ouvert(s)` : 'tickets non renseignés'
+  const ticketStr = ticketCount > 0 ? `${ticketCount} open ticket(s)` : 'no ticket data'
   const meetingStr = daysSinceMeeting !== null
-    ? `, dernière réunion il y a ${daysSinceMeeting} jours`
-    : ', aucune réunion récente'
-  return `Faible engagement : ${ticketStr}${meetingStr}.`
+    ? `, last meeting ${daysSinceMeeting} days ago`
+    : ', no recent meeting'
+  return `Low engagement: ${ticketStr}${meetingStr}.`
 }
 
 function narrativeContract(
@@ -136,16 +136,16 @@ function narrativeContract(
   billing_interval: string | null,
 ): string {
   if (!contract_end_date) {
-    const intervalMap: Record<string, string> = { monthly: 'mensuel', annual: 'annuel' }
-    const intervalStr = billing_interval ? (intervalMap[billing_interval] ?? billing_interval) : 'non précisé'
-    return `Abonnement ${intervalStr}, pas de date d'échéance renseignée.`
+    const intervalMap: Record<string, string> = { monthly: 'monthly', annual: 'annual' }
+    const intervalStr = billing_interval ? (intervalMap[billing_interval] ?? billing_interval) : 'unspecified'
+    return `${intervalStr.charAt(0).toUpperCase()}${intervalStr.slice(1)} subscription, no renewal date on file.`
   }
 
   const daysUntil = Math.floor((new Date(contract_end_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
 
-  if (daysUntil < 0) return `Contrat expiré depuis ${Math.abs(daysUntil)} jour(s). Action requise.`
-  if (daysUntil < 30) return `Renouvellement critique : dans ${daysUntil} jour(s) (${contract_end_date}).`
-  if (daysUntil < 60) return `Renouvellement imminent : dans ${daysUntil} jours (${contract_end_date}).`
-  if (daysUntil < 90) return `Renouvellement dans ${daysUntil} jours — à planifier.`
-  return `Contrat actif, renouvellement dans ${daysUntil} jours (${contract_end_date}).`
+  if (daysUntil < 0) return `Contract expired ${Math.abs(daysUntil)} day(s) ago. Action required.`
+  if (daysUntil < 30) return `Critical renewal: in ${daysUntil} day(s) (${contract_end_date}).`
+  if (daysUntil < 60) return `Renewal imminent: in ${daysUntil} days (${contract_end_date}).`
+  if (daysUntil < 90) return `Renewal in ${daysUntil} days — to plan.`
+  return `Active contract, renewal in ${daysUntil} days (${contract_end_date}).`
 }

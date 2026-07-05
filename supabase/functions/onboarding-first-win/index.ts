@@ -20,7 +20,7 @@
 //             health_score: number,
 //             churn_risk: number,
 //             mrr: number,             // en centimes
-//             top_risk_reason: string  // ex. "Invoice impayée depuis 20 jours"
+//             top_risk_reason: string  // ex. "Overdue invoice for 20 day(s)"
 //           }
 //         ],
 //         mrr_at_risk: number,         // somme MRR comptes health_score < 40
@@ -38,7 +38,6 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
-import { type Lang, t } from '../_shared/translations.ts'
 
 interface AccountRow {
   id: string
@@ -94,14 +93,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const orgId = auth.organizationId
-
-  // Récupérer la langue de l'org
-  const { data: orgRow } = await supabase
-    .from('organizations')
-    .select('locale')
-    .eq('id', orgId)
-    .maybeSingle()
-  const lang: Lang = ((orgRow?.locale ?? 'fr') as Lang)
 
   // Récupérer tous les comptes avec scores
   const { data: accounts, error: accountsError } = await supabase
@@ -167,7 +158,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       health_score: account.health_score ?? 0,
       churn_risk: account.churn_risk_score ?? 0,
       mrr: account.mrr_cents ?? 0,
-      top_risk_reason: buildRiskReason(account, overdueByAccount, lastUsageByAccount, today, lang),
+      top_risk_reason: buildRiskReason(account, overdueByAccount, lastUsageByAccount, today),
     }
   })
 
@@ -195,14 +186,13 @@ export function buildRiskReason(
   overdueByAccount: Map<string, InvoiceRow>,
   lastUsageByAccount: Map<string, string>,
   today: number,
-  lang: Lang = 'fr',
 ): string {
   // 1. Facture impayée ?
   const overdueInvoice = overdueByAccount.get(account.id)
   if (overdueInvoice?.due_date) {
     const dueDaysAgo = Math.floor((today - new Date(overdueInvoice.due_date).getTime()) / (1000 * 60 * 60 * 24))
     if (dueDaysAgo > 0) {
-      return t(lang, 'risk.overdue_invoice', { days: dueDaysAgo })
+      return `Overdue invoice for ${dueDaysAgo} day(s)`
     }
   }
 
@@ -211,16 +201,16 @@ export function buildRiskReason(
   if (lastUsageAt) {
     const daysSinceUsage = Math.floor((today - new Date(lastUsageAt).getTime()) / (1000 * 60 * 60 * 24))
     if (daysSinceUsage >= 30) {
-      return t(lang, 'risk.no_usage_days', { days: daysSinceUsage })
+      return `No activity for ${daysSinceUsage} days`
     }
   } else {
-    return t(lang, 'risk.no_usage_long')
+    return 'No activity for over 30 days'
   }
 
   // 3. Santé financière dégradée ?
   if ((account.financial_score ?? 100) < 30) {
-    return t(lang, 'risk.financial_degraded')
+    return 'Degraded financial health'
   }
 
-  return t(lang, 'risk.low_health')
+  return 'Low health score'
 }

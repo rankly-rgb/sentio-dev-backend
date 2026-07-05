@@ -23,13 +23,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (req.method !== 'GET') return errorResponse('Method not allowed', 405)
 
-  const url = new URL(req.url)
-  const locale: 'fr' | 'en' = url.searchParams.get('locale') === 'en' ? 'en' : 'fr'
-
   const templates = PLAYBOOK_TEMPLATES_V1.map((t) => ({
     id: t.id,
-    title: locale === 'en' ? t.title_en : t.title_fr,
-    description: locale === 'en' ? t.description_en : t.description_fr,
+    title: t.title_en,
+    description: t.description_en,
     playbook_type: t.playbook_type,
     template_category: t.template_category,
     priority: t.priority,
@@ -41,7 +38,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
   return jsonResponse({
     data: {
       templates,
-      locale,
       total: templates.length,
     },
   })

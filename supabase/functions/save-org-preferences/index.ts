@@ -52,18 +52,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (danger_threshold !== undefined) {
     const v = Number(danger_threshold)
-    if (!Number.isInteger(v) || v < 10 || v > 60) return errorResponse('danger_threshold doit être entre 10 et 60', 400)
+    if (!Number.isInteger(v) || v < 10 || v > 60) return errorResponse('danger_threshold must be between 10 and 60', 400)
   }
   if (at_risk_threshold !== undefined) {
     const v = Number(at_risk_threshold)
-    if (!Number.isInteger(v) || v < 30 || v > 80) return errorResponse('at_risk_threshold doit être entre 30 et 80', 400)
+    if (!Number.isInteger(v) || v < 30 || v > 80) return errorResponse('at_risk_threshold must be between 30 and 80', 400)
   }
   if (champion_threshold !== undefined) {
     const v = Number(champion_threshold)
-    if (!Number.isInteger(v) || v < 60 || v > 100) return errorResponse('champion_threshold doit être entre 60 et 100', 400)
+    if (!Number.isInteger(v) || v < 60 || v > 100) return errorResponse('champion_threshold must be between 60 and 100', 400)
   }
   if (alert_channel !== undefined && !VALID_ALERT_CHANNELS.includes(alert_channel as typeof VALID_ALERT_CHANNELS[number])) {
-    return errorResponse(`alert_channel doit être l'un de : ${VALID_ALERT_CHANNELS.join(', ')}`, 400)
+    return errorResponse(`alert_channel must be one of: ${VALID_ALERT_CHANNELS.join(', ')}`, 400)
   }
 
   let supabase
@@ -95,7 +95,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (upsertErr) {
     console.error(JSON.stringify({ level: 'error', function_name: 'save-org-preferences', message: upsertErr.message }))
-    return errorResponse('Erreur sauvegarde préférences', 500)
+    return errorResponse('Failed to save preferences', 500)
   }
 
   // Lire l'étape courante pour savoir s'il faut avancer vers 'invested'

@@ -33,11 +33,11 @@ type Provider = typeof VALID_PROVIDERS[number]
 
 function validateApiKey(provider: Provider, apiKey: string): string | null {
   if (!apiKey || typeof apiKey !== 'string' || apiKey.trim().length === 0) {
-    return 'api_key ne peut pas être vide'
+    return 'api_key cannot be empty'
   }
   if (provider === 'stripe') {
     if (!apiKey.startsWith('sk_live_') && !apiKey.startsWith('sk_test_')) {
-      return 'La clé Stripe doit commencer par sk_live_ ou sk_test_'
+      return 'The Stripe key must start with sk_live_ or sk_test_'
     }
   }
   return null
@@ -101,7 +101,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const { provider, api_key } = body
 
   if (!provider || !VALID_PROVIDERS.includes(provider as Provider)) {
-    return errorResponse(`provider doit être l'un de : ${VALID_PROVIDERS.join(', ')}`, 400)
+    return errorResponse(`provider must be one of: ${VALID_PROVIDERS.join(', ')}`, 400)
   }
 
   const validationError = validateApiKey(provider as Provider, api_key as string)

@@ -68,10 +68,6 @@ verify_jwt = false
 [functions.onboarding-status]
 verify_jwt = false
 
-# org-settings : JWT vérifié dans le code (ES256)
-[functions.org-settings]
-verify_jwt = false
-
 # dashboard-api : JWT vérifié dans le code (ES256 — chantiers 3, 4)
 [functions.dashboard-api]
 verify_jwt = false
@@ -148,13 +144,6 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.save-org-preferences]
-verify_jwt = false
-
-# Locale organisation — JWT vérifié dans le code (ES256)
-[functions.get-organization-locale]
-verify_jwt = false
-
-[functions.update-organization-locale]
 verify_jwt = false
 
 # Onboarding Flow — connexion Stripe & HubSpot

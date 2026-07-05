@@ -1,12 +1,9 @@
 import { describe, it, expect } from 'vitest'
 
-// ── Miroir de localizePlaybook (playbook-crud/index.ts) ────────
+// ── Mirror of localizePlaybook (playbook-crud/index.ts) ────────
 //
-// Chaîne de fallback :
-//   FR : title_fr → title_en → title
-//   EN : title_en → title_fr → title
-// Idem pour description.
-// Retourne toujours display_name et display_description non-null.
+// Fallback chain: title_en → title; description_en → description.
+// Always returns non-null display_name / display_description.
 
 function nonEmpty(v: string | null | undefined): string | null {
   return v && v.trim().length > 0 ? v : null
@@ -14,25 +11,18 @@ function nonEmpty(v: string | null | undefined): string | null {
 
 function localizePlaybook(
   playbook: Record<string, unknown>,
-  lang: 'fr' | 'en',
 ): Record<string, unknown> {
-  const titleFr  = nonEmpty(playbook.title_fr as string | null)
   const titleEn  = nonEmpty(playbook.title_en as string | null)
   const titleLeg = (playbook.title as string) ?? ''
 
-  const descFr  = nonEmpty(playbook.description_fr as string | null)
   const descEn  = nonEmpty(playbook.description_en as string | null)
   const descLeg = (playbook.description as string | null) ?? ''
 
-  const displayName = lang === 'en'
-    ? (titleEn ?? titleFr ?? titleLeg)
-    : (titleFr ?? titleEn ?? titleLeg)
-
-  const displayDescription = lang === 'en'
-    ? (descEn ?? descFr ?? descLeg)
-    : (descFr ?? descEn ?? descLeg)
-
-  return { ...playbook, display_name: displayName, display_description: displayDescription }
+  return {
+    ...playbook,
+    display_name: titleEn ?? titleLeg,
+    display_description: descEn ?? descLeg,
+  }
 }
 
 // ── Fixtures ──────────────────────────────────────────────────
@@ -41,152 +31,85 @@ function makePlaybook(overrides: Partial<Record<string, unknown>> = {}): Record<
   return {
     id: 'pb-001',
     organization_id: 'org-001',
-    title: 'Playbook Prévention Churn',
-    description: 'Détection et traitement des comptes en danger critique.',
-    title_fr: 'Playbook Prévention Churn',
+    title: 'Churn Prevention Playbook',
+    description: 'Detects and handles accounts in critical danger.',
     title_en: null,
-    description_fr: 'Détection et traitement des comptes en danger critique.',
     description_en: null,
     status: 'draft',
     ...overrides,
   }
 }
 
-// ── display_name — langue FR ────────────────────────────────────
+// ── display_name ─────────────────────────────────────────────
 
-describe('localizePlaybook — display_name FR', () => {
-  it('retourne title_fr si disponible', () => {
-    const pb = makePlaybook({ title_fr: 'Prévention Churn FR' })
-    expect(localizePlaybook(pb, 'fr').display_name).toBe('Prévention Churn FR')
-  })
-
-  it('fallback sur title_en si title_fr est null', () => {
-    const pb = makePlaybook({ title_fr: null, title_en: 'Churn Prevention EN' })
-    expect(localizePlaybook(pb, 'fr').display_name).toBe('Churn Prevention EN')
-  })
-
-  it('fallback sur title legacy si title_fr et title_en sont null', () => {
-    const pb = makePlaybook({ title_fr: null, title_en: null, title: 'Legacy Title' })
-    expect(localizePlaybook(pb, 'fr').display_name).toBe('Legacy Title')
-  })
-
-  it('ignore title_fr vide (string vide traité comme null)', () => {
-    const pb = makePlaybook({ title_fr: '', title_en: 'EN fallback' })
-    expect(localizePlaybook(pb, 'fr').display_name).toBe('EN fallback')
-  })
-})
-
-// ── display_name — langue EN ────────────────────────────────────
-
-describe('localizePlaybook — display_name EN', () => {
-  it('retourne title_en si disponible', () => {
+describe('localizePlaybook — display_name', () => {
+  it('returns title_en when available', () => {
     const pb = makePlaybook({ title_en: 'Churn Prevention EN' })
-    expect(localizePlaybook(pb, 'en').display_name).toBe('Churn Prevention EN')
+    expect(localizePlaybook(pb).display_name).toBe('Churn Prevention EN')
   })
 
-  it('fallback sur title_fr si title_en est null', () => {
-    const pb = makePlaybook({ title_fr: 'Prévention Churn FR', title_en: null })
-    expect(localizePlaybook(pb, 'en').display_name).toBe('Prévention Churn FR')
+  it('falls back to legacy title when title_en is null', () => {
+    const pb = makePlaybook({ title_en: null, title: 'Legacy Title' })
+    expect(localizePlaybook(pb).display_name).toBe('Legacy Title')
   })
 
-  it('fallback sur title legacy si title_en et title_fr sont null', () => {
-    const pb = makePlaybook({ title_fr: null, title_en: null, title: 'Legacy Title' })
-    expect(localizePlaybook(pb, 'en').display_name).toBe('Legacy Title')
-  })
-
-  it('ignore title_en vide (string vide traité comme null)', () => {
-    const pb = makePlaybook({ title_en: '', title_fr: 'FR fallback' })
-    expect(localizePlaybook(pb, 'en').display_name).toBe('FR fallback')
+  it('ignores an empty title_en (treated as null)', () => {
+    const pb = makePlaybook({ title_en: '', title: 'Legacy fallback' })
+    expect(localizePlaybook(pb).display_name).toBe('Legacy fallback')
   })
 })
 
-// ── display_description — langue FR ────────────────────────────
+// ── display_description ───────────────────────────────────────
 
-describe('localizePlaybook — display_description FR', () => {
-  it('retourne description_fr si disponible', () => {
-    const pb = makePlaybook({ description_fr: 'Desc FR explicite' })
-    expect(localizePlaybook(pb, 'fr').display_description).toBe('Desc FR explicite')
-  })
-
-  it('fallback sur description_en si description_fr est null', () => {
-    const pb = makePlaybook({ description_fr: null, description_en: 'Desc EN' })
-    expect(localizePlaybook(pb, 'fr').display_description).toBe('Desc EN')
-  })
-
-  it('fallback sur description legacy si les deux sont null', () => {
-    const pb = makePlaybook({ description_fr: null, description_en: null, description: 'Legacy desc' })
-    expect(localizePlaybook(pb, 'fr').display_description).toBe('Legacy desc')
-  })
-})
-
-// ── display_description — langue EN ────────────────────────────
-
-describe('localizePlaybook — display_description EN', () => {
-  it('retourne description_en si disponible', () => {
+describe('localizePlaybook — display_description', () => {
+  it('returns description_en when available', () => {
     const pb = makePlaybook({ description_en: 'Desc EN' })
-    expect(localizePlaybook(pb, 'en').display_description).toBe('Desc EN')
+    expect(localizePlaybook(pb).display_description).toBe('Desc EN')
   })
 
-  it('fallback sur description_fr si description_en est null', () => {
-    const pb = makePlaybook({ description_fr: 'Desc FR', description_en: null })
-    expect(localizePlaybook(pb, 'en').display_description).toBe('Desc FR')
-  })
-
-  it('fallback sur description legacy si les deux sont null', () => {
-    const pb = makePlaybook({ description_fr: null, description_en: null, description: 'Legacy desc' })
-    expect(localizePlaybook(pb, 'en').display_description).toBe('Legacy desc')
+  it('falls back to legacy description when description_en is null', () => {
+    const pb = makePlaybook({ description_en: null, description: 'Legacy desc' })
+    expect(localizePlaybook(pb).display_description).toBe('Legacy desc')
   })
 })
 
-// ── Champs bruts préservés ──────────────────────────────────────
+// ── Raw fields preserved ────────────────────────────────────────
 
-describe('localizePlaybook — champs bruts préservés', () => {
-  it('conserve tous les champs originaux', () => {
-    const pb = makePlaybook({ title_en: 'EN', title_fr: 'FR', description_en: 'D-EN', description_fr: 'D-FR' })
-    const result = localizePlaybook(pb, 'en')
-    expect(result.title_fr).toBe('FR')
+describe('localizePlaybook — raw fields preserved', () => {
+  it('keeps all original fields', () => {
+    const pb = makePlaybook({ title_en: 'EN', description_en: 'D-EN' })
+    const result = localizePlaybook(pb)
     expect(result.title_en).toBe('EN')
-    expect(result.description_fr).toBe('D-FR')
     expect(result.description_en).toBe('D-EN')
     expect(result.id).toBe('pb-001')
     expect(result.status).toBe('draft')
   })
 
-  it('display_name jamais null — fallback garanti', () => {
-    const pb = makePlaybook({ title_fr: null, title_en: null, title: 'Fallback' })
-    const result = localizePlaybook(pb, 'en')
+  it('display_name is never null — fallback guaranteed', () => {
+    const pb = makePlaybook({ title_en: null, title: 'Fallback' })
+    const result = localizePlaybook(pb)
     expect(result.display_name).not.toBeNull()
     expect(result.display_name).toBe('Fallback')
   })
 
-  it('display_description jamais null — fallback garanti', () => {
-    const pb = makePlaybook({ description_fr: null, description_en: null, description: 'Fallback desc' })
-    const result = localizePlaybook(pb, 'fr')
+  it('display_description is never null — fallback guaranteed', () => {
+    const pb = makePlaybook({ description_en: null, description: 'Fallback desc' })
+    const result = localizePlaybook(pb)
     expect(result.display_description).not.toBeNull()
     expect(result.display_description).toBe('Fallback desc')
   })
 })
 
-// ── Liste de playbooks ──────────────────────────────────────────
+// ── List of playbooks ────────────────────────────────────────────
 
-describe('localizePlaybook — liste', () => {
-  it('localise chaque élément en EN', () => {
+describe('localizePlaybook — list', () => {
+  it('localizes each element', () => {
     const playbooks = [
-      makePlaybook({ id: 'pb-1', title_fr: 'PB A FR', title_en: 'PB A EN' }),
-      makePlaybook({ id: 'pb-2', title_fr: 'PB B FR', title_en: null }),
+      makePlaybook({ id: 'pb-1', title: 'PB A legacy', title_en: 'PB A EN' }),
+      makePlaybook({ id: 'pb-2', title: 'PB B legacy', title_en: null }),
     ]
-    const results = playbooks.map((p) => localizePlaybook(p, 'en'))
+    const results = playbooks.map((p) => localizePlaybook(p))
     expect(results[0].display_name).toBe('PB A EN')
-    expect(results[1].display_name).toBe('PB B FR')
-  })
-
-  it('localise chaque élément en FR', () => {
-    const playbooks = [
-      makePlaybook({ id: 'pb-1', title_fr: 'PB A FR', title_en: 'PB A EN' }),
-      makePlaybook({ id: 'pb-2', title_fr: null, title_en: 'PB B EN' }),
-    ]
-    const results = playbooks.map((p) => localizePlaybook(p, 'fr'))
-    expect(results[0].display_name).toBe('PB A FR')
-    expect(results[1].display_name).toBe('PB B EN')
+    expect(results[1].display_name).toBe('PB B legacy')
   })
 })

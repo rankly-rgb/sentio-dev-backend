@@ -164,7 +164,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Missing required fields: queue_item_id, action', 400)
   }
   if (body.action !== 'approved' && body.action !== 'rejected') {
-    return errorResponse("action doit etre 'approved' ou 'rejected'", 400)
+    return errorResponse("action must be 'approved' or 'rejected'", 400)
   }
 
   // ── Charger l'item (scope org) ───────────────────────────
@@ -219,7 +219,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .maybeSingle()
 
   if (destError || !dest) {
-    return errorResponse('Destination introuvable', 404)
+    return errorResponse('Destination not found', 404)
   }
 
   const destination = dest as DestinationRow

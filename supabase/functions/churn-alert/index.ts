@@ -50,38 +50,38 @@ export function buildChurnAlertEmail(accounts: CriticalAccount[]): string {
     return `
     <tr>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0">${label}</td>
-      <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:right">${mrr}€/mois</td>
+      <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:right">${mrr}€/mo</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:center">${a.health_score}/100</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:center;color:#dc2626;font-weight:600">${a.churn_risk_score}/100</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0">
-        <a href="${APP_URL}/dashboard/accounts/${a.id}" style="color:#3b82f6;text-decoration:none">Voir →</a>
+        <a href="${APP_URL}/dashboard/accounts/${a.id}" style="color:#3b82f6;text-decoration:none">View →</a>
       </td>
     </tr>`
   }).join('')
 
   return `<!DOCTYPE html>
-<html lang="fr">
-<head><meta charset="UTF-8"><title>Alerte churn — Sentio AI</title></head>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Churn alert — Sentio AI</title></head>
 <body style="font-family:sans-serif;max-width:680px;margin:0 auto;padding:24px;color:#1a1a1a;background:#f8fafc">
   <div style="background:#fff;border-radius:8px;padding:32px;box-shadow:0 1px 3px rgba(0,0,0,0.08)">
     <div style="display:flex;align-items:center;margin-bottom:24px">
       <span style="font-size:28px;margin-right:12px">🚨</span>
-      <h1 style="margin:0;color:#0f172a;font-size:22px">Alerte churn — Sentio AI</h1>
+      <h1 style="margin:0;color:#0f172a;font-size:22px">Churn alert — Sentio AI</h1>
     </div>
 
     <p style="color:#475569;margin-bottom:24px">
-      <strong style="color:#dc2626">${n} compte${n > 1 ? 's' : ''}</strong>
-      ${n > 1 ? 'viennent' : 'vient'} de passer en zone critique dans votre portefeuille.
-      Une action rapide peut réduire le risque de churn.
+      <strong style="color:#dc2626">${n} account${n > 1 ? 's' : ''}</strong>
+      ${n > 1 ? 'have' : 'has'} just entered critical risk zone in your portfolio.
+      Quick action can reduce churn risk.
     </p>
 
     <table style="width:100%;border-collapse:collapse;margin-bottom:24px">
       <thead>
         <tr style="background:#f1f5f9">
-          <th style="padding:10px 8px;text-align:left;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">Compte</th>
+          <th style="padding:10px 8px;text-align:left;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">Account</th>
           <th style="padding:10px 8px;text-align:right;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">MRR</th>
-          <th style="padding:10px 8px;text-align:center;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">Santé</th>
-          <th style="padding:10px 8px;text-align:center;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">Risque</th>
+          <th style="padding:10px 8px;text-align:center;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">Health</th>
+          <th style="padding:10px 8px;text-align:center;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">Risk</th>
           <th style="padding:10px 8px;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">Action</th>
         </tr>
       </thead>
@@ -91,14 +91,14 @@ export function buildChurnAlertEmail(accounts: CriticalAccount[]): string {
     <div style="text-align:center;margin-top:32px">
       <a href="${APP_URL}/dashboard"
          style="background:#0f172a;color:#fff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;display:inline-block">
-        Ouvrir Sentio →
+        Open Sentio →
       </a>
     </div>
 
     <hr style="border:none;border-top:1px solid #e2e8f0;margin:32px 0">
     <p style="color:#94a3b8;font-size:12px;text-align:center;margin:0">
-      Sentio AI — Alerte automatique quotidienne.<br>
-      Pour modifier la fréquence, rendez-vous dans Paramètres.
+      Sentio AI — Automatic daily alert.<br>
+      To change the frequency, go to Settings.
     </p>
   </div>
 </body>
@@ -170,7 +170,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       const n = criticalAccounts.length
       const emailResult = await sendEmail({
         to: org.notification_email,
-        subject: `🚨 ${n} compte${n > 1 ? 's' : ''} en danger critique — Sentio AI`,
+        subject: `🚨 Churn alert: ${n} account${n > 1 ? 's show' : ' shows'} critical risk signals`,
         html: buildChurnAlertEmail(criticalAccounts as CriticalAccount[]),
         from_name: 'Sentio AI',
       })

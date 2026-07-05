@@ -491,9 +491,7 @@ export function calculateStepDueDate(delayDays: number, fromDate?: Date): string
 
 export interface PlaybookTemplate {
   id: string
-  title_fr: string
   title_en: string
-  description_fr: string
   description_en: string
   playbook_type: PlaybookType
   template_category: string
@@ -507,9 +505,7 @@ export interface PlaybookTemplate {
 export const PLAYBOOK_TEMPLATES_V1: PlaybookTemplate[] = [
   {
     id: 'churn-critical-alert',
-    title_fr: 'Alerte churn critique',
     title_en: 'Critical churn alert',
-    description_fr: 'Envoie une alerte email immédiate quand un compte passe sous le seuil de risque critique (score < 40).',
     description_en: 'Sends an immediate email alert when an account drops below the critical risk threshold (score < 40).',
     playbook_type: 'automated',
     template_category: 'churn_prevention',
@@ -521,16 +517,14 @@ export const PLAYBOOK_TEMPLATES_V1: PlaybookTemplate[] = [
       type: 'send_email',
       order: 1,
       config: {
-        email_subject: '🚨 Risque critique — {{account_name}} (score {{health_score}})',
-        email_body_html: '<p><strong>{{account_name}}</strong> a atteint un score de santé critique de <strong>{{health_score}}/100</strong>.</p><p>MRR : {{mrr}} | Risque de churn : {{churn_risk}}%</p><p>Action recommandée : contacter ce compte dans les 48h.</p>',
+        email_subject: '🚨 Critical risk — {{account_name}} (score {{health_score}})',
+        email_body_html: '<p><strong>{{account_name}}</strong> has reached a critical health score of <strong>{{health_score}}/100</strong>.</p><p>MRR: {{mrr}} | Churn risk: {{churn_risk}}%</p><p>Recommended action: contact this account within 48h.</p>',
       },
     }],
   },
   {
     id: 'churn-progressive-decline',
-    title_fr: 'Déclin progressif détecté',
     title_en: 'Progressive decline detected',
-    description_fr: 'Alerte quand le score de santé d\'un compte baisse de plus de 15 points en 30 jours.',
     description_en: 'Alerts when an account health score drops more than 15 points in 30 days.',
     playbook_type: 'automated',
     template_category: 'churn_prevention',
@@ -541,16 +535,14 @@ export const PLAYBOOK_TEMPLATES_V1: PlaybookTemplate[] = [
       type: 'send_email',
       order: 1,
       config: {
-        email_subject: '📉 Déclin détecté — {{account_name}} (-{{score_drop}} pts en 30j)',
-        email_body_html: '<p>Le score de <strong>{{account_name}}</strong> a baissé de <strong>{{score_drop}} points</strong> sur les 30 derniers jours.</p><p>Score actuel : {{health_score}}/100</p>',
+        email_subject: '📉 Decline detected — {{account_name}} (-{{score_drop}} pts in 30d)',
+        email_body_html: '<p>The health score of <strong>{{account_name}}</strong> has dropped by <strong>{{score_drop}} points</strong> over the last 30 days.</p><p>Current score: {{health_score}}/100</p>',
       },
     }],
   },
   {
     id: 'renewal-upcoming',
-    title_fr: 'Renouvellement imminent',
     title_en: 'Upcoming renewal',
-    description_fr: 'Alerte 30 jours avant la date de renouvellement d\'un abonnement.',
     description_en: 'Alerts 30 days before a subscription renewal date.',
     playbook_type: 'automated',
     template_category: 'renewal',
@@ -561,16 +553,14 @@ export const PLAYBOOK_TEMPLATES_V1: PlaybookTemplate[] = [
       type: 'send_email',
       order: 1,
       config: {
-        email_subject: '📅 Renouvellement dans 30j — {{account_name}}',
-        email_body_html: '<p>Le contrat de <strong>{{account_name}}</strong> arrive à renouvellement dans <strong>30 jours</strong>.</p><p>MRR actuel : {{mrr}} | Score de santé : {{health_score}}/100</p>',
+        email_subject: '📅 Renewal in 30 days — {{account_name}}',
+        email_body_html: '<p>The contract for <strong>{{account_name}}</strong> is up for renewal in <strong>30 days</strong>.</p><p>Current MRR: {{mrr}} | Health score: {{health_score}}/100</p>',
       },
     }],
   },
   {
     id: 'payment-recovery',
-    title_fr: 'Paiement en échec',
     title_en: 'Failed payment',
-    description_fr: 'Alerte immédiate quand un compte passe en statut past_due ou unpaid dans Stripe.',
     description_en: 'Immediate alert when an account becomes past_due or unpaid in Stripe.',
     playbook_type: 'automated',
     template_category: 'payment_recovery',
@@ -582,8 +572,8 @@ export const PLAYBOOK_TEMPLATES_V1: PlaybookTemplate[] = [
         type: 'send_email',
         order: 1,
         config: {
-          email_subject: '💳 Paiement en échec — {{account_name}}',
-          email_body_html: '<p>Le compte <strong>{{account_name}}</strong> est en statut <strong>{{stripe_status}}</strong>.</p><p>MRR concerné : {{mrr}}</p>',
+          email_subject: '💳 Failed payment — {{account_name}}',
+          email_body_html: '<p>Account <strong>{{account_name}}</strong> is in <strong>{{stripe_status}}</strong> status.</p><p>MRR affected: {{mrr}}</p>',
         },
       },
       {
@@ -595,9 +585,7 @@ export const PLAYBOOK_TEMPLATES_V1: PlaybookTemplate[] = [
   },
   {
     id: 'expansion-opportunity',
-    title_fr: 'Opportunité d\'expansion',
     title_en: 'Expansion opportunity',
-    description_fr: 'Identifie les comptes avec un score de santé élevé et une croissance MRR sur 2 mois.',
     description_en: 'Identifies accounts with a high health score and MRR growth over 2 months.',
     playbook_type: 'manual',
     template_category: 'expansion',
@@ -612,9 +600,7 @@ export const PLAYBOOK_TEMPLATES_V1: PlaybookTemplate[] = [
   },
   {
     id: 'reactivation-churned',
-    title_fr: 'Comptes à réactiver',
     title_en: 'Accounts to reactivate',
-    description_fr: 'Liste les comptes churned depuis moins de 90 jours, candidats à une réactivation.',
     description_en: 'Lists accounts churned within the last 90 days, candidates for reactivation.',
     playbook_type: 'manual',
     template_category: 'reactivation',

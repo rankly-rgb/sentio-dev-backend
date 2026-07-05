@@ -1,6 +1,6 @@
 // ============================================================
 // Edge Function : account-summary
-// Génère ou retourne un résumé IA en français des métriques
+// Génère ou retourne un résumé IA en anglais des métriques
 // d'un compte client, mis en cache 24h dans accounts.ai_summary.
 //
 // CONTRAT API
@@ -150,7 +150,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           model: MODEL,
           max_tokens: 300,
           system:
-            "Tu es un analyste SaaS B2B expert. Tu génères des résumés concis et professionnels en français sur la santé d'un compte client, basés uniquement sur des métriques anonymisées. Tu n'inventes aucune information. Tu écris 3 à 5 phrases maximum, sans titre ni liste à puces.",
+            "You are an expert B2B SaaS analyst. You generate concise, professional summaries in English about the health of a customer account, based solely on anonymized metrics. You never invent information. You write 3 to 5 sentences maximum, with no title or bullet points.",
           messages: [{ role: 'user', content: userPrompt }],
         }),
       },
@@ -205,25 +205,25 @@ interface PromptData {
 
 function buildPrompt(data: PromptData): string {
   const lines = [
-    "Génère un résumé de l'état de ce compte client pour un customer success manager.",
+    "Generate a summary of this customer account's status for a customer success manager.",
     '',
-    'Métriques :',
-    `- Score de santé global : ${data.health_score ?? 'N/A'}/100`,
-    `- Risque de churn : ${data.churn_risk_score ?? 'N/A'}/100`,
-    `- Score financier : ${data.financial_score ?? 'N/A'}/100`,
-    `- Score d'engagement : ${data.engagement_score ?? 'N/A'}/100`,
-    `- Score contrat : ${data.contract_score ?? 'N/A'}/100`,
-    `- Score d'usage produit : ${data.product_usage_score != null ? `${data.product_usage_score}/100` : 'Tracker non connecté'}`,
-    `- MRR : ${data.mrr_euros}€`,
+    'Metrics:',
+    `- Overall health score: ${data.health_score ?? 'N/A'}/100`,
+    `- Churn risk: ${data.churn_risk_score ?? 'N/A'}/100`,
+    `- Financial score: ${data.financial_score ?? 'N/A'}/100`,
+    `- Engagement score: ${data.engagement_score ?? 'N/A'}/100`,
+    `- Contract score: ${data.contract_score ?? 'N/A'}/100`,
+    `- Product usage score: ${data.product_usage_score != null ? `${data.product_usage_score}/100` : 'Tracker not connected'}`,
+    `- MRR: €${data.mrr_euros}`,
   ]
 
   if (data.plan_tier) {
     const interval = data.billing_interval ? ` (${data.billing_interval})` : ''
-    lines.push(`- Plan : ${data.plan_tier}${interval}`)
+    lines.push(`- Plan: ${data.plan_tier}${interval}`)
   }
-  if (data.months_since_created != null) lines.push(`- Client depuis : ${data.months_since_created} mois`)
-  if (data.segments.length > 0) lines.push(`- Segment(s) : ${data.segments.join(', ')}`)
-  if (data.insights.length > 0) lines.push(`- Alertes actives : ${data.insights.join('; ')}`)
+  if (data.months_since_created != null) lines.push(`- Customer for: ${data.months_since_created} months`)
+  if (data.segments.length > 0) lines.push(`- Segment(s): ${data.segments.join(', ')}`)
+  if (data.insights.length > 0) lines.push(`- Active alerts: ${data.insights.join('; ')}`)
 
   return lines.join('\n')
 }

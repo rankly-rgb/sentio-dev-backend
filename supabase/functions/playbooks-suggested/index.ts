@@ -35,14 +35,13 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
-import { type Lang, t } from '../_shared/translations.ts'
 
 interface SuggestionRule {
   segment_type: string | null
   template_category: string
   min_accounts: number
-  reason: (count: number, lang: Lang) => string
-  suggested_title: (lang: Lang) => string
+  reason: (count: number) => string
+  suggested_title: string
 }
 
 const SUGGESTION_RULES: SuggestionRule[] = [
@@ -50,36 +49,36 @@ const SUGGESTION_RULES: SuggestionRule[] = [
     segment_type: 'en_danger_critique',
     template_category: 'churn_prevention',
     min_accounts: 1,
-    reason: (n, lang) => t(lang, 'playbook.churn_prevention.reason', { n }),
-    suggested_title: (lang) => t(lang, 'playbook.churn_prevention.title'),
+    reason: (n) => `${n} account(s) in critical danger identified in your portfolio.`,
+    suggested_title: 'Churn Prevention Playbook',
   },
   {
     segment_type: 'impayes',
     template_category: 'payment_recovery',
     min_accounts: 1,
-    reason: (n, lang) => t(lang, 'playbook.payment_recovery.reason', { n }),
-    suggested_title: (lang) => t(lang, 'playbook.payment_recovery.title'),
+    reason: (n) => `${n} account(s) with outstanding payments pending resolution.`,
+    suggested_title: 'Payment Recovery Playbook',
   },
   {
     segment_type: 'en_churn',
     template_category: 'winback',
     min_accounts: 1,
-    reason: (n, lang) => t(lang, 'playbook.winback.reason', { n }),
-    suggested_title: (lang) => t(lang, 'playbook.winback.title'),
+    reason: (n) => `${n} churned account(s) (MRR = 0) — reactivation attempt possible.`,
+    suggested_title: 'Winback Playbook',
   },
   {
     segment_type: 'en_expansion',
     template_category: 'expansion',
     min_accounts: 1,
-    reason: (n, lang) => t(lang, 'playbook.expansion.reason', { n }),
-    suggested_title: (lang) => t(lang, 'playbook.expansion.title'),
+    reason: (n) => `${n} account(s) with high expansion potential identified.`,
+    suggested_title: 'Expansion Playbook',
   },
   {
     segment_type: 'a_risque_leger',
     template_category: 'health_monitoring',
     min_accounts: 3,
-    reason: (n, lang) => t(lang, 'playbook.health_monitoring.reason', { n }),
-    suggested_title: (lang) => t(lang, 'playbook.health_monitoring.title'),
+    reason: (n) => `${n} accounts show mild risk signals — proactive follow-up recommended.`,
+    suggested_title: 'Health Monitoring Playbook',
   },
 ]
 
@@ -107,14 +106,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method !== 'GET') return errorResponse('Method not allowed', 405)
 
   const orgId = auth.organizationId
-
-  // Récupérer la langue de l'org
-  const { data: orgRow } = await supabase
-    .from('organizations')
-    .select('locale')
-    .eq('id', orgId)
-    .maybeSingle()
-  const lang: Lang = ((orgRow?.locale ?? 'fr') as Lang)
 
   // 1. Charger les segments avec leurs comptes
   const { data: segments, error: segErr } = await supabase
@@ -169,8 +160,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       data: {
         suggested_playbook_id: existing?.id ?? null,
         template_category: rule.template_category,
-        title: existing?.title ?? rule.suggested_title(lang),
-        reason: rule.reason(accountCount, lang),
+        title: existing?.title ?? rule.suggested_title,
+        reason: rule.reason(accountCount),
         accounts_targeted: accountCount,
         already_active: alreadyActive,
         segment_type: rule.segment_type,
@@ -194,8 +185,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       data: {
         suggested_playbook_id: existing?.id ?? null,
         template_category: 'renewal',
-        title: existing?.title ?? t(lang, 'playbook.renewal.title'),
-        reason: t(lang, 'playbook.renewal.reason', { n: renewalCount ?? 0 }),
+        title: existing?.title ?? 'Renewal Management Playbook',
+        reason: `${renewalCount ?? 0} active renewal alert(s) in your portfolio.`,
         accounts_targeted: renewalCount ?? 0,
         already_active: alreadyActive,
         segment_type: null,

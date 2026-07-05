@@ -47,7 +47,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { step } = body
   if (!step || !STEP_ORDER.includes(step as OnboardingStep)) {
-    return errorResponse(`step doit être l'un de : ${STEP_ORDER.join(', ')}`, 400)
+    return errorResponse(`step must be one of: ${STEP_ORDER.join(', ')}`, 400)
   }
 
   let supabase
@@ -69,7 +69,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .maybeSingle()
 
   if (orgErr || !org) {
-    return errorResponse('Organisation introuvable', 404)
+    return errorResponse('Organization not found', 404)
   }
 
   const currentStep = org.onboarding_step ?? 'promise'
@@ -107,7 +107,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (updateErr) {
     console.error(JSON.stringify({ level: 'error', function_name: 'update-onboarding-step', message: updateErr.message }))
-    return errorResponse('Erreur mise à jour étape', 500)
+    return errorResponse('Failed to update step', 500)
   }
 
   console.log(JSON.stringify({

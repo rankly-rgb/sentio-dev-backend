@@ -27,13 +27,9 @@ après `supabase.auth.signUp()`.
 {
   "user_id": "uuid",
   "email": "transit uniquement — jamais persisté",
-  "company_name": "Acme Corp",
-  "locale": "fr"
+  "company_name": "Acme Corp"
 }
 ```
-
-> `locale` est optionnel — défaut `'fr'`. Valeurs acceptées : `'fr'` | `'en'`.
-
 
 **Response 200**
 ```json
@@ -186,9 +182,9 @@ est `stripe` ou `revelation`.
   "at_risk_threshold": 60,
   "champion_threshold": 80,
   "segment_name_champions": "Champions",
-  "segment_name_at_risk": "À risque léger",
-  "segment_name_danger": "En danger",
-  "segment_name_stable": "Stables",
+  "segment_name_at_risk": "Slightly at Risk",
+  "segment_name_danger": "At Risk",
+  "segment_name_stable": "Stable",
   "alert_channel": "slack"
 }
 ```
@@ -211,91 +207,30 @@ est `stripe` ou `revelation`.
 
 ---
 
-## Locale organisation
+## Langue produit
 
-### get-organization-locale
-
-Retourne la locale de l'organisation appelante. À appeler au chargement de l'app pour hydrater le contexte locale frontend.
-
-| | |
-|---|---|
-| **URL** | `https://upqakxuatlshhqiagbqw.supabase.co/functions/v1/get-organization-locale` |
-| **Méthode** | `GET` |
-| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
-
-**Response 200**
-```json
-{ "locale": "fr" }
-```
-
-**Codes d'erreur** : `401`, `404`, `500`
+Le produit est standardisé sur l'anglais américain (en-US) pour toutes les chaînes d'affichage (labels, messages d'erreur, emails). Le système de locale par organisation (`organizations.locale`, `get-organization-locale`, `update-organization-locale`, `org-settings`, dictionnaire de traductions) a été retiré — ces endpoints n'existent plus.
 
 ---
 
-### update-organization-locale
-
-Met à jour la locale de l'organisation. Valeurs acceptées : `'fr'` | `'en'`.
-
-| | |
-|---|---|
-| **URL** | `https://upqakxuatlshhqiagbqw.supabase.co/functions/v1/update-organization-locale` |
-| **Méthode** | `PATCH` |
-| **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
-
-**Body**
-```json
-{ "locale": "en" }
-```
-
-**Response 200**
-```json
-{ "success": true, "locale": "en" }
-```
-
-**Codes d'erreur**
-
-| Code | Cas |
-|------|-----|
-| `400` | `locale` manquant ou valeur hors `['fr', 'en']` |
-| `401` | JWT absent ou invalide |
-| `500` | Erreur base de données |
-
----
-
-### org-settings (GET/PATCH)
-
-Paramètres complets de l'organisation. Le GET retourne la locale **et** le dictionnaire de traductions complet, ce qui permet au frontend de charger toutes les chaînes en une seule requête.
-
-| | |
-|---|---|
-| **URL** | `https://upqakxuatlshhqiagbqw.supabase.co/functions/v1/org-settings` |
-| **GET** | Retourne `{ data: { locale: 'fr' \| 'en', translations: Record<string, string> } }` |
-| **PATCH body** | `{ locale: 'fr' \| 'en' }` → Response `{ success: true }` |
-
----
-
-## Playbooks — contenu bilingue
+## Playbooks
 
 ### playbook-crud (GET list)
 
 `GET /functions/v1/playbook-crud`
 
-Retourne la liste paginée avec les champs de contenu résolus selon la locale de l'organisation appelante.
+Retourne la liste paginée avec les champs de contenu.
 
 **Champs ajoutés à chaque objet playbook :**
 
 | Champ | Type | Description |
 |-------|------|-------------|
-| `display_name` | `string` | Titre résolu selon la locale (jamais null) |
-| `display_description` | `string` | Description résolue selon la locale (jamais null) |
-| `title_fr` | `string \| null` | Titre français explicite |
-| `title_en` | `string \| null` | Titre anglais |
-| `description_fr` | `string \| null` | Description française explicite |
-| `description_en` | `string \| null` | Description anglaise |
+| `display_name` | `string` | Titre à afficher (jamais null) |
+| `display_description` | `string` | Description à afficher (jamais null) |
+| `title_en` | `string \| null` | Titre explicite (colonne historique) |
+| `description_en` | `string \| null` | Description explicite (colonne historique) |
 
-**Chaîne de fallback :**
-- `locale=fr` : `title_fr` → `title_en` → `title` (legacy)
-- `locale=en` : `title_en` → `title_fr` → `title` (legacy)
+**Chaîne de fallback :** `title_en` → `title` (legacy)
 
 ---
 
@@ -303,7 +238,7 @@ Retourne la liste paginée avec les champs de contenu résolus selon la locale d
 
 `GET /functions/v1/playbook-crud?id=<uuid>`
 
-Retourne tous les champs bruts (`title_fr`, `title_en`, `description_fr`, `description_en`) pour alimenter le formulaire d'édition multilingue, plus les champs résolus `display_name` / `display_description`.
+Retourne tous les champs bruts (`title_en`, `description_en`) plus les champs résolus `display_name` / `display_description`.
 
 ---
 
@@ -311,22 +246,20 @@ Retourne tous les champs bruts (`title_fr`, `title_en`, `description_fr`, `descr
 
 `POST /functions/v1/playbook-crud`
 
-**Body (champs bilingues)** — au moins un champ `title_*` obligatoire :
+**Body** — au moins un champ `title` ou `title_en` obligatoire :
 
 ```json
 {
-  "title": "string (legacy — copié dans title_fr et title_en si les variants sont absents)",
-  "title_fr": "string?",
+  "title": "string (legacy — copié dans title_en si absent)",
   "title_en": "string?",
   "description": "string? (legacy)",
-  "description_fr": "string?",
   "description_en": "string?"
 }
 ```
 
-**Règle de validation :** au moins un parmi `title`, `title_fr`, `title_en` doit être non-vide.
+**Règle de validation :** au moins un parmi `title`, `title_en` doit être non-vide.
 
-**Comportement legacy :** si seul `title` est fourni, il est copié dans `title_fr` et `title_en`.
+**Comportement legacy :** si seul `title` est fourni, il est copié dans `title_en`.
 
 ---
 
@@ -334,13 +267,11 @@ Retourne tous les champs bruts (`title_fr`, `title_en`, `description_fr`, `descr
 
 `PUT /functions/v1/playbook-crud?id=<uuid>`
 
-Accepte les mêmes champs bilingues que le POST. Seuls les champs fournis sont mis à jour.
+Accepte les mêmes champs que le POST. Seuls les champs fournis sont mis à jour.
 
 ```json
 {
-  "title_fr": "string?",
   "title_en": "string?",
-  "description_fr": "string?",
   "description_en": "string?"
 }
 ```
@@ -450,7 +381,7 @@ Query params : `limit` (1–100, défaut 50), `cursor` (UUID), `search` (texte l
     "...account_fields": {},
     "display_name": "string | null",
     "scores": {
-      "health":     { "value": 72, "narrative": "Santé globale bonne" },
+      "health":     { "value": 72, "narrative": "Fair health score (72/100). Some areas for improvement." },
       "usage":      { "value": 80, "narrative": "..." },
       "financial":  { "value": 65, "narrative": "..." },
       "engagement": { "value": 70, "narrative": "..." },
@@ -476,7 +407,7 @@ Response 200 : `{ "data": { "id": "uuid", "display_name": "string | null" } }`
 
 ### account-summary (GET)
 
-Résumé IA en français des métriques d'un compte, généré par Claude Haiku et mis en cache 24h.
+Résumé IA en anglais des métriques d'un compte, généré par Claude Haiku et mis en cache 24h.
 
 | | |
 |---|---|
@@ -487,7 +418,7 @@ Résumé IA en français des métriques d'un compte, généré par Claude Haiku 
 **Response 200**
 ```json
 {
-  "summary": "Ce compte présente un profil stable...",
+  "summary": "This account shows a stable profile...",
   "generated_at": "2026-05-17T10:00:00Z",
   "cached": true
 }
@@ -693,7 +624,7 @@ Valide ou rejette un item de la file d'approbation CS.
 {
   "queue_item_id": "uuid",
   "action": "approved",
-  "comment": "Approuvé après vérification"
+  "comment": "Approved after review"
 }
 ```
 
@@ -737,8 +668,8 @@ Suggestion déterministe du playbook le plus pertinent à activer, basée sur l'
   "data": {
     "suggested_playbook_id": "uuid | null",
     "template_category": "churn_prevention",
-    "title": "Alerte churn critique",
-    "reason": "3 comptes en danger critique détectés",
+    "title": "Critical churn alert",
+    "reason": "3 account(s) in critical danger identified in your portfolio.",
     "accounts_targeted": 3,
     "already_active": false,
     "segment_type": "en_danger_critique"
@@ -763,8 +694,6 @@ Pas de filtre organization — les templates sont définis dans le code (constan
 | **Méthode** | `GET` |
 | **Auth** | `Authorization: Bearer <jwt_utilisateur>` |
 
-**Query params** : `locale` (optionnel, `'fr'` | `'en'`, défaut `'fr'`)
-
 **Response 200**
 ```json
 {
@@ -772,8 +701,8 @@ Pas de filtre organization — les templates sont définis dans le code (constan
     "templates": [
       {
         "id": "churn-critical-alert",
-        "title": "Alerte churn critique",
-        "description": "Envoie une alerte email immédiate...",
+        "title": "Critical churn alert",
+        "description": "Sends an immediate email alert...",
         "playbook_type": "automated",
         "template_category": "churn_prevention",
         "priority": "critical",
@@ -782,7 +711,6 @@ Pas de filtre organization — les templates sont définis dans le code (constan
         "actions": [{ "type": "send_email", "order": 1, "config": { "email_subject": "...", "email_body_html": "..." } }]
       }
     ],
-    "locale": "fr",
     "total": 6
   }
 }
@@ -796,8 +724,8 @@ Pas de filtre organization — les templates sont définis dans le code (constan
 
 **Créer un playbook depuis un template** :
 ```
-POST /playbook-crud { "from_template_id": "churn-critical-alert", "title": "Mon alerte custom" }
-→ 201 { "id": "uuid", "title": "Mon alerte custom", "actions": [...], "organization_id": "..." }
+POST /playbook-crud { "from_template_id": "churn-critical-alert", "title": "My custom alert" }
+→ 201 { "id": "uuid", "title": "My custom alert", "actions": [...], "organization_id": "..." }
 ```
 
 ---

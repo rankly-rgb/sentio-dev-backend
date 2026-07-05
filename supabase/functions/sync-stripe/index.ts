@@ -606,7 +606,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const organizationId = orgsToSync[0].id
   const apiKey = orgsToSync[0].stripe_api_key ?? Deno.env.get('STRIPE_SECRET_KEY')
   if (!apiKey) {
-    return errorResponse('Clé Stripe non configurée. Ajoutez votre clé dans Intégrations → Stripe.', 500)
+    return errorResponse('Stripe key not configured. Add your key under Integrations → Stripe.', 500)
   }
 
   // Pour le sync incrémental, récupérer la date du dernier sync

@@ -48,11 +48,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const { hubspot_api_key } = body
   if (!hubspot_api_key || typeof hubspot_api_key !== 'string') {
-    return jsonResponse({ success: false, error: 'hubspot_api_key est requis' })
+    return jsonResponse({ success: false, error: 'hubspot_api_key is required' })
   }
 
   if (!validateHubSpotKeyFormat(hubspot_api_key)) {
-    return jsonResponse({ success: false, error: 'Format invalide. Le token doit commencer par pat-' })
+    return jsonResponse({ success: false, error: 'Invalid format. The token must start with pat-' })
   }
 
   let supabase
@@ -75,11 +75,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
       8000,
     )
   } catch {
-    return jsonResponse({ success: false, error: 'Impossible de joindre HubSpot. Réessayez dans quelques instants.' })
+    return jsonResponse({ success: false, error: 'Could not reach HubSpot. Please try again shortly.' })
   }
 
   if (!hubspotRes.ok) {
-    return jsonResponse({ success: false, error: 'Clé HubSpot invalide ou permissions insuffisantes' })
+    return jsonResponse({ success: false, error: 'Invalid HubSpot key or insufficient permissions' })
   }
 
   // Stocker la clé dans Vault
@@ -106,7 +106,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (updateErr) {
     console.error(JSON.stringify({ level: 'error', function_name: 'hubspot-connect', message: updateErr.message }))
-    return jsonResponse({ success: false, error: 'Erreur mise à jour organisation' })
+    return jsonResponse({ success: false, error: 'Failed to update organization' })
   }
 
   // Marquer l'onboarding comme terminé si on n'est pas encore au-delà de l'étape hubspot (idempotent)
