@@ -21,6 +21,8 @@ Nouvelle Edge Function `get-today-status` : statut global du portefeuille pour l
   "data": {
     "status": "critical",
     "critical_count": 2,
+    "total_mrr_cents": 1284500,
+    "champions_count": 12,
     "top_urgent_account": {
       "id": "uuid",
       "name": "Acme Corp",
@@ -32,14 +34,20 @@ Nouvelle Edge Function `get-today-status` : statut global du portefeuille pour l
 }
 ```
 
-`top_urgent_account` = compte avec `churn_risk_score > 70` au MRR le plus élevé (`null` si aucun). `top_insight` = titre du plus prioritaire des insights actifs liés à ce compte.
+`top_urgent_account` = compte avec `churn_risk_score > 70` au MRR le plus élevé (`null` si aucun). `top_insight` = titre du plus prioritaire des insights actifs liés à ce compte (`''` si aucun — jamais `null`, pour que le frontend puisse appeler des méthodes string sans vérification).
+
+`total_mrr_cents` = somme de `mrr_cents` sur tous les comptes de l'org (`accounts` n'a pas de colonne `status` — un compte churné a déjà `mrr_cents = 0`, donc la somme brute équivaut à un filtre "actif"). `champions_count` = memberships actifs du segment système `account_segments.segment_type = 'champions'` (valeur exacte de la CHECK constraint ; `accounts` n'a pas de colonne `segment` directe, l'appartenance passe par `segment_memberships`).
+
+### Corrections post-revue (avant merge)
+
+Un premier passage de revue avait proposé `total_mrr_cents` via `accounts.status = 'active'` et `champions_count` via `accounts.segment = 'champion'` — ni la colonne `status` ni la colonne `segment` n'existent sur `accounts` (vérifié dans les migrations). Corrigé pour utiliser le schéma réel : somme JS de `mrr_cents` (convention déjà suivie par `onboarding-first-win`/`weekly-digest`) et jointure `account_segments` → `segment_memberships` (convention suivie par `dashboard-api`/`account-summary`), avec le slug pluriel `champions` qui correspond à la CHECK constraint.
 
 ### Fichiers
 
 | Fichier | Rôle |
 |---------|------|
 | `supabase/functions/get-today-status/index.ts` | Edge Function GET, `verify_jwt=false` (JWT vérifié dans le code) |
-| `supabase/tests/get-today-status.test.ts` | 13 tests : `determineTodayStatus`, `selectTopUrgentAccount`, `selectTopInsightTitle` |
+| `supabase/tests/get-today-status.test.ts` | 16 tests : `determineTodayStatus`, `selectTopUrgentAccount`, `selectTopInsightTitle`, `calcTotalMrrCents` |
 
 ---
 
