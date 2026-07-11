@@ -30,12 +30,6 @@ export default function OnboardingPromisePage() {
         const json = await res.json()
         const step: string = json.data?.current_step ?? 'stripe'
 
-        // Sauvegarder la locale si elle vient du signup
-        const locale = json.data?.locale
-        if (locale && typeof window !== 'undefined') {
-          localStorage.setItem('sentio_locale', locale)
-        }
-
         const routes: Record<string, string> = {
           stripe:    '/onboarding/stripe',
           import:    '/onboarding/import',
@@ -50,7 +44,7 @@ export default function OnboardingPromisePage() {
         if (attempts < 3) {
           setTimeout(redirect, 1000 * attempts)
         } else {
-          setError('Impossible de charger votre espace. Rafraîchissez la page.')
+          setError('Could not load your workspace. Please refresh the page.')
         }
       }
     }
@@ -66,7 +60,7 @@ export default function OnboardingPromisePage() {
           onClick={() => window.location.reload()}
           className="text-indigo-400 underline text-sm hover:text-indigo-300"
         >
-          Rafraîchir
+          Refresh
         </button>
       </div>
     )
@@ -75,7 +69,7 @@ export default function OnboardingPromisePage() {
   return (
     <div className="flex flex-col items-center gap-4 py-4">
       <div className="h-8 w-8 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
-      <p className="text-slate-400 text-sm">Chargement de votre espace…</p>
+      <p className="text-slate-400 text-sm">Loading your workspace…</p>
     </div>
   )
 }

@@ -56,7 +56,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const [orgRes, profileRes] = await Promise.all([
     supabase
       .from('organizations')
-      .select('id, name, plan_type, trial_ends_at, locale')
+      .select('id, name, plan_type, trial_ends_at')
       .eq('id', orgId)
       .maybeSingle(),
     supabase
@@ -74,18 +74,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const org = orgRes.data
   const email = profileRes.data?.email ?? null
-  const locale: 'fr' | 'en' = org.locale === 'en' ? 'en' : 'fr'
 
   if (email) {
-    const isEN = locale === 'en'
     const emailResult = await sendEmail({
       to: email,
-      subject: isEN
-        ? 'Welcome to Sentio AI — your 14-day trial starts now'
-        : 'Bienvenue sur Sentio AI — votre essai de 14 jours commence',
-      html: isEN
-        ? buildWelcomeEmailEN(org.name, org.trial_ends_at)
-        : buildWelcomeEmail(org.name, org.trial_ends_at),
+      subject: 'Welcome to Sentio AI — your 14-day trial starts now',
+      html: buildWelcomeEmail(org.name, org.trial_ends_at),
       from_name: 'Sentio AI',
     })
 
@@ -113,21 +107,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
 // ── Helpers exportés pour les tests ──────────────────────────
 
 export function formatTrialEndDate(trialEndsAt: string | null): string {
-  if (!trialEndsAt) return '14 jours'
-  const date = new Date(trialEndsAt)
-  if (isNaN(date.getTime())) return '14 jours'
-  return date.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })
-}
-
-export function formatTrialEndDateEN(trialEndsAt: string | null): string {
   if (!trialEndsAt) return '14 days'
   const date = new Date(trialEndsAt)
   if (isNaN(date.getTime())) return '14 days'
   return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
 }
 
-export function buildWelcomeEmailEN(orgName: string, trialEndsAt: string | null): string {
-  const trialDate = formatTrialEndDateEN(trialEndsAt)
+export function buildWelcomeEmail(orgName: string, trialEndsAt: string | null): string {
+  const trialDate = formatTrialEndDate(trialEndsAt)
   return `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>Welcome to Sentio AI</title></head>
@@ -147,32 +134,6 @@ export function buildWelcomeEmailEN(orgName: string, trialEndsAt: string | null)
   <p style="margin-top:40px;font-size:13px;color:#6b7280">
     You received this email because you just created a Sentio AI account.<br>
     Questions? Reply directly to this email.
-  </p>
-</body>
-</html>`
-}
-
-export function buildWelcomeEmail(orgName: string, trialEndsAt: string | null): string {
-  const trialDate = formatTrialEndDate(trialEndsAt)
-  return `<!DOCTYPE html>
-<html lang="fr">
-<head><meta charset="UTF-8"><title>Bienvenue sur Sentio AI</title></head>
-<body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1a1a1a">
-  <h1 style="color:#0f172a">Bienvenue sur Sentio AI 👋</h1>
-  <p>Votre espace <strong>${orgName}</strong> est prêt. Votre essai gratuit est valable jusqu'au <strong>${trialDate}</strong>.</p>
-  <h2 style="color:#0f172a;margin-top:32px">Vos 3 premières étapes</h2>
-  <ol>
-    <li style="margin-bottom:12px"><strong>Connectez Stripe</strong> — importez vos abonnements en 2 minutes.</li>
-    <li style="margin-bottom:12px"><strong>Connectez HubSpot</strong> (optionnel) — enrichissez les données d'engagement.</li>
-    <li style="margin-bottom:12px"><strong>Découvrez votre aha moment</strong> — identifiez vos comptes à risque en temps réel.</li>
-  </ol>
-  <a href="https://app.sentioapp.io/onboarding/promise"
-     style="display:inline-block;margin-top:24px;padding:12px 24px;background:#0f172a;color:#fff;text-decoration:none;border-radius:6px;font-weight:600">
-    Accéder au tableau de bord
-  </a>
-  <p style="margin-top:40px;font-size:13px;color:#6b7280">
-    Vous recevez cet email car vous venez de créer un compte Sentio AI.<br>
-    En cas de question, répondez directement à cet email.
   </p>
 </body>
 </html>`

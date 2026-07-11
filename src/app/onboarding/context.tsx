@@ -4,15 +4,13 @@ import { createContext, useContext } from 'react'
 
 export interface WizardStep {
   id: string
-  label_fr: string
-  label_en: string
+  label: string
   required: boolean
   status: 'completed' | 'active' | 'pending'
 }
 
 export interface OnboardingCtx {
   wizardSteps: WizardStep[]
-  locale: 'fr' | 'en'
   currentStep: string
   stripeConnected: boolean
   hubspotConnected: boolean

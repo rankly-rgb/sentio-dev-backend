@@ -15,7 +15,7 @@ function StripeCallbackInner() {
     const state = searchParams.get('state')
 
     if (!code || !state) {
-      setError('Paramètres OAuth manquants. Veuillez réessayer.')
+      setError('Missing OAuth parameters. Please try again.')
       return
     }
 
@@ -37,10 +37,10 @@ function StripeCallbackInner() {
         if (json.success || res.ok) {
           router.replace('/onboarding/import')
         } else {
-          setError(json.error ?? 'Échec de la connexion Stripe. Réessayez.')
+          setError(json.error ?? 'Failed to connect Stripe. Please retry.')
         }
       } catch {
-        setError('Erreur réseau. Réessayez.')
+        setError('Network error. Please retry.')
       }
     }
 
@@ -55,7 +55,7 @@ function StripeCallbackInner() {
           onClick={() => router.replace('/onboarding/stripe')}
           className="text-indigo-400 underline text-sm hover:text-indigo-300"
         >
-          Réessayer
+          Retry
         </button>
       </div>
     )
@@ -64,7 +64,7 @@ function StripeCallbackInner() {
   return (
     <div className="flex flex-col items-center gap-4 py-4">
       <div className="h-8 w-8 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
-      <p className="text-slate-400 text-sm">Finalisation de la connexion Stripe…</p>
+      <p className="text-slate-400 text-sm">Finishing Stripe connection…</p>
     </div>
   )
 }

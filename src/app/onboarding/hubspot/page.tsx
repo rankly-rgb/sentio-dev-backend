@@ -1,62 +1,35 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createSupabaseBrowserClient } from '@/lib/supabase/client'
 
-const T = {
-  fr: {
-    title: 'Connectez HubSpot',
-    subtitle: 'Optionnel — enrichit le scoring d\'engagement',
-    whatSync: 'Ce que HubSpot apporte',
-    items: [
-      'Scoring d\'engagement CRM',
-      'Détection des signaux de désengagement',
-    ],
-    zeroPii: '🛡️ Push-only · Nous ne lisons jamais vos contacts',
-    keyLabel: 'Token Private App HubSpot',
-    keyPlaceholder: 'pat-eu1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
-    connect: 'Connecter HubSpot',
-    connecting: 'Connexion en cours…',
-    skip: 'Ignorer pour l\'instant',
-    skipping: 'Redirection…',
-    errFormat: 'Le token doit commencer par pat-',
-    errInvalid: 'Token invalide ou permissions insuffisantes',
-    errNetwork: 'Impossible de joindre HubSpot. Réessayez.',
-  },
-  en: {
-    title: 'Connect HubSpot',
-    subtitle: 'Optional — enriches engagement scoring',
-    whatSync: 'What HubSpot adds',
-    items: [
-      'CRM engagement scoring',
-      'Disengagement signal detection',
-    ],
-    zeroPii: '🛡️ Push-only · We never read your contacts',
-    keyLabel: 'HubSpot Private App Token',
-    keyPlaceholder: 'pat-eu1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
-    connect: 'Connect HubSpot',
-    connecting: 'Connecting…',
-    skip: 'Skip for now',
-    skipping: 'Redirecting…',
-    errFormat: 'Token must start with pat-',
-    errInvalid: 'Invalid token or insufficient permissions',
-    errNetwork: 'Cannot reach HubSpot. Please retry.',
-  },
+const t = {
+  title: 'Connect HubSpot',
+  subtitle: 'Optional — enriches engagement scoring',
+  whatSync: 'What HubSpot adds',
+  items: [
+    'CRM engagement scoring',
+    'Disengagement signal detection',
+  ],
+  zeroPii: '🛡️ Push-only · We never read your contacts',
+  keyLabel: 'HubSpot Private App Token',
+  keyPlaceholder: 'pat-eu1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+  connect: 'Connect HubSpot',
+  connecting: 'Connecting…',
+  skip: 'Skip for now',
+  skipping: 'Redirecting…',
+  errFormat: 'Token must start with pat-',
+  errInvalid: 'Invalid token or insufficient permissions',
+  errNetwork: 'Cannot reach HubSpot. Please retry.',
 }
 
 export default function OnboardingHubSpotPage() {
   const router = useRouter()
-  const [locale, setLocale] = useState<'fr' | 'en'>('fr')
   const [apiKey, setApiKey] = useState('')
   const [loading, setLoading] = useState(false)
   const [skipping, setSkipping] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    const saved = localStorage.getItem('sentio_locale') as 'fr' | 'en' | null
-    if (saved) setLocale(saved)
-  }, [])
 
   async function getSession() {
     const supabase = createSupabaseBrowserClient()
@@ -103,7 +76,7 @@ export default function OnboardingHubSpotPage() {
         router.push('/dashboard')
       } else {
         setError(
-          json.error?.includes('invalide') || json.error?.includes('invalid')
+          json.error?.toLowerCase().includes('invalid')
             ? t.errInvalid
             : (json.error ?? t.errNetwork),
         )
@@ -124,8 +97,6 @@ export default function OnboardingHubSpotPage() {
       router.push('/dashboard')
     }
   }
-
-  const t = T[locale]
 
   return (
     <div>

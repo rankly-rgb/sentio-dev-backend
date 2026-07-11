@@ -96,7 +96,7 @@ export async function dispatchAction(
         return {
           ...base,
           status: 'completed',
-          message: `Export CSV disponible pour ${context.accounts_targeted ?? 0} compte(s) ciblé(s)`,
+          message: `CSV export available for ${context.accounts_targeted ?? 0} targeted account(s)`,
         }
       }
 
