@@ -3,55 +3,29 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createSupabaseBrowserClient } from '@/lib/supabase/client'
-import { useOnboarding } from '../context'
-
-const T = {
-  fr: {
-    title: 'Connectez Stripe',
-    subtitle: 'Import en 2 minutes · Aucune donnée personnelle',
-    whatSync: 'Ce que nous synchronisons',
-    items: ['Abonnements (ID uniquement)', 'MRR & ARR par compte', 'Factures & statuts de paiement'],
-    tabKey: 'Clé API (recommandé)',
-    tabOAuth: 'Stripe Connect (OAuth)',
-    keyLabel: 'Clé API Stripe restreinte',
-    keyPlaceholder: 'rk_live_... ou rk_test_...',
-    validate: 'Valider ma clé',
-    validating: 'Validation en cours…',
-    connectOAuth: 'Connecter via Stripe →',
-    connectingOAuth: 'Redirection vers Stripe…',
-    modeTest: 'Mode test activé',
-    modeLive: 'Mode production',
-    errFormat: 'La clé doit commencer par rk_live_, rk_test_, sk_live_ ou sk_test_',
-    errInvalid: 'Clé invalide ou permissions insuffisantes',
-    errNetwork: 'Impossible de joindre Stripe. Réessayez.',
-    zeroPii: '🛡️ Zero PII — aucune donnée personnelle',
-  },
-  en: {
-    title: 'Connect Stripe',
-    subtitle: 'Import in 2 minutes · No personal data',
-    whatSync: "What we'll sync",
-    items: ['Subscriptions (ID only)', 'MRR & ARR per account', 'Invoices & payment status'],
-    tabKey: 'API Key (recommended)',
-    tabOAuth: 'Stripe Connect (OAuth)',
-    keyLabel: 'Stripe restricted API key',
-    keyPlaceholder: 'rk_live_... or rk_test_...',
-    validate: 'Validate my key',
-    validating: 'Validating…',
-    connectOAuth: 'Connect via Stripe →',
-    connectingOAuth: 'Redirecting to Stripe…',
-    modeTest: 'Test mode',
-    modeLive: 'Live mode',
-    errFormat: 'Key must start with rk_live_, rk_test_, sk_live_ or sk_test_',
-    errInvalid: 'Invalid key or insufficient permissions',
-    errNetwork: 'Cannot reach Stripe. Please retry.',
-    zeroPii: '🛡️ Zero PII — no personal data stored',
-  },
+const t = {
+  title: 'Connect Stripe',
+  subtitle: 'Import in 2 minutes · No personal data',
+  whatSync: "What we'll sync",
+  items: ['Subscriptions (ID only)', 'MRR & ARR per account', 'Invoices & payment status'],
+  tabKey: 'API Key (recommended)',
+  tabOAuth: 'Stripe Connect (OAuth)',
+  keyLabel: 'Stripe restricted API key',
+  keyPlaceholder: 'rk_live_... or rk_test_...',
+  validate: 'Validate my key',
+  validating: 'Validating…',
+  connectOAuth: 'Connect via Stripe →',
+  connectingOAuth: 'Redirecting to Stripe…',
+  modeTest: 'Test mode',
+  modeLive: 'Live mode',
+  errFormat: 'Key must start with rk_live_, rk_test_, sk_live_ or sk_test_',
+  errInvalid: 'Invalid key or insufficient permissions',
+  errNetwork: 'Cannot reach Stripe. Please retry.',
+  zeroPii: '🛡️ Zero PII — no personal data stored',
 }
 
 export default function OnboardingStripePage() {
   const router = useRouter()
-  const { locale } = useOnboarding()
-  const t = T[locale]
 
   const [tab, setTab] = useState<'key' | 'oauth'>('key')
   const [apiKey, setApiKey] = useState('')
@@ -93,7 +67,7 @@ export default function OnboardingStripePage() {
         setMode(json.mode)
         setTimeout(() => router.push('/onboarding/import'), 800)
       } else {
-        setError(json.error === 'Clé Stripe invalide ou permissions insuffisantes'
+        setError(json.error?.toLowerCase().includes('invalid')
           ? t.errInvalid : (json.error ?? t.errNetwork))
       }
     } catch {

@@ -40,16 +40,16 @@ function generateCsv(
   includeEmail: boolean,
 ): string {
   const headers = [
-    'Entreprise',
-    'ID Stripe',
+    'Company',
+    'Stripe ID',
     ...(includeEmail ? ['Email'] : []),
     'MRR (€)',
-    'Score santé',
-    'Risque churn',
-    'Score expansion',
+    'Health Score',
+    'Churn Risk',
+    'Expansion Score',
     'Plan',
     'Seats',
-    'Fin contrat',
+    'Contract End',
   ]
 
   const rows = accounts.map((account) => {
@@ -118,23 +118,23 @@ describe('generateCsv', () => {
   it('contient les colonnes obligatoires avec email', () => {
     const csv = generateCsv([accountA], emailMap, true)
     const header = csv.split('\n')[0]
-    expect(header).toContain('Entreprise')
-    expect(header).toContain('ID Stripe')
+    expect(header).toContain('Company')
+    expect(header).toContain('Stripe ID')
     expect(header).toContain('Email')
     expect(header).toContain('MRR (€)')
-    expect(header).toContain('Score santé')
-    expect(header).toContain('Risque churn')
-    expect(header).toContain('Score expansion')
+    expect(header).toContain('Health Score')
+    expect(header).toContain('Churn Risk')
+    expect(header).toContain('Expansion Score')
     expect(header).toContain('Plan')
     expect(header).toContain('Seats')
-    expect(header).toContain('Fin contrat')
+    expect(header).toContain('Contract End')
   })
 
   it('exclut la colonne Email si include_email=false', () => {
     const csv = generateCsv([accountA], emptyMap, false)
     const header = csv.split('\n')[0]
     expect(header).not.toContain('Email')
-    expect(header).toContain('Entreprise')
+    expect(header).toContain('Company')
   })
 
   it('utilise display_name si disponible', () => {
@@ -151,13 +151,13 @@ describe('generateCsv', () => {
     const csv = generateCsv([accountB], emptyMap, false)
     const lines = csv.split('\n')
     const header = lines[0].split(',')
-    const entrepriseIdx = header.indexOf('Entreprise')
+    const companyIdx = header.indexOf('Company')
     const dataFields = lines[1].split(',')
     // La colonne Entreprise doit être masquée
-    expect(dataFields[entrepriseIdx]).toBe('cus_***789')
+    expect(dataFields[companyIdx]).toBe('cus_***789')
     // La colonne ID Stripe garde l'ID en clair (identifiant anonyme, pas PII)
-    const idStripeIdx = header.indexOf('ID Stripe')
-    expect(dataFields[idStripeIdx]).toBe('cus_XYZ789')
+    const stripeIdIdx = header.indexOf('Stripe ID')
+    expect(dataFields[stripeIdIdx]).toBe('cus_XYZ789')
   })
 
   it('convertit mrr_cents en euros (2 décimales)', () => {
@@ -261,10 +261,10 @@ describe('Zero-PII — emails uniquement dans le CSV, jamais ailleurs', () => {
     const csv = generateCsv([accountB], emptyMap, false)
     const lines = csv.split('\n')
     const header = lines[0].split(',')
-    const entrepriseIdx = header.indexOf('Entreprise')
+    const companyIdx = header.indexOf('Company')
     const fields = lines[1].split(',')
     // Colonne Entreprise : masquée
-    expect(fields[entrepriseIdx]).toBe('cus_***789')
+    expect(fields[companyIdx]).toBe('cus_***789')
     // stripe_customer_id reste dans la colonne ID Stripe (identifiant anonyme)
     expect(csv).toContain('cus_XYZ789')
   })

@@ -70,16 +70,16 @@ export function generateCsv(
   includeEmail: boolean,
 ): string {
   const headers = [
-    'Entreprise',
-    'ID Stripe',
+    'Company',
+    'Stripe ID',
     ...(includeEmail ? ['Email'] : []),
     'MRR (€)',
-    'Score santé',
-    'Risque churn',
-    'Score expansion',
+    'Health Score',
+    'Churn Risk',
+    'Expansion Score',
     'Plan',
     'Seats',
-    'Fin contrat',
+    'Contract End',
   ]
 
   const rows = accounts.map((account) => {
@@ -108,64 +108,62 @@ export function generateCsv(
 }
 
 export function buildSequenceTemplate(): string {
-  return `=== MODÈLE DE SÉQUENCE EMAIL — Sentio AI ===
-Généré le ${new Date().toLocaleDateString('fr-FR')}
-Ce modèle est un point de départ. Personnalisez avant envoi.
+  return `=== EMAIL SEQUENCE TEMPLATE — Sentio AI ===
+Generated on ${new Date().toLocaleDateString('en-US')}
+This template is a starting point. Customize it before sending.
 
-=== EMAIL 1 — Jour J ===
-Objet : [Votre produit] — on voulait prendre de vos nouvelles
+=== EMAIL 1 — Day 0 ===
+Subject: [Your product] — checking in
 
-Bonjour,
+Hi there,
 
-Je voulais m'assurer que tout se passe bien de votre côté
-avec [votre produit].
+I wanted to make sure everything is going well on your end
+with [your product].
 
-Nos données montrent que votre utilisation a évolué
-récemment, et je voulais être disponible si vous avez
-des questions ou des difficultés.
+Our data shows your usage has shifted recently, and I wanted
+to be available if you have any questions or run into
+any issues.
 
-Avez-vous 15 minutes cette semaine pour qu'on en parle ?
+Do you have 15 minutes this week to chat?
 
-Cordialement,
-[Votre nom]
+Best,
+[Your name]
 
-=== EMAIL 2 — Jour J+3 ===
-Objet : RE : [Votre produit] — une ressource qui pourrait vous aider
+=== EMAIL 2 — Day 3 ===
+Subject: RE: [Your product] — a resource that might help
 
-Bonjour,
+Hi there,
 
-Je me permets de relancer avec une ressource qui aide
-souvent dans votre situation : [LIEN VERS DOCUMENTATION
-OU CAS D'USAGE PERTINENT].
+Following up with a resource that often helps in your
+situation: [LINK TO RELEVANT DOCUMENTATION OR USE CASE].
 
-Si vous rencontrez un blocage spécifique, je peux
-organiser un appel rapide avec notre équipe support.
+If you're running into a specific blocker, I can set up
+a quick call with our support team.
 
-Bonne journée,
-[Votre nom]
+Have a great day,
+[Your name]
 
-=== EMAIL 3 — Jour J+7 ===
-Objet : Dernière tentative — [Votre produit]
+=== EMAIL 3 — Day 7 ===
+Subject: Last attempt — [Your product]
 
-Bonjour,
+Hi there,
 
-Je ne veux pas être intrusif, mais je tenais à vous
-contacter une dernière fois.
+I don't want to be intrusive, but I wanted to reach out
+one last time.
 
-Si [votre produit] ne répond plus à vos besoins actuels,
-je serais heureux d'échanger sur comment nous pourrions
-adapter notre offre — ou comprendre ce qui n'a pas
-fonctionné pour vous.
+If [your product] no longer fits your current needs, I'd be
+happy to discuss how we could adjust our offering — or
+understand what didn't work for you.
 
-Votre retour est précieux pour nous.
+Your feedback matters to us.
 
-Cordialement,
-[Votre nom]
+Best,
+[Your name]
 
 ---
-Exporté depuis Sentio AI — https://app.sentioapp.io
-Les emails ont été résolus depuis Stripe en transit.
-Aucune donnée personnelle n'est stockée par Sentio.
+Exported from Sentio AI — https://app.sentioapp.io
+Emails were resolved from Stripe in transit.
+No personal data is stored by Sentio.
 `
 }
 

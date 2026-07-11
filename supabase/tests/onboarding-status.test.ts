@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest'
 // ── Fonctions pures miroir (onboarding-status/index.ts) ───────
 
 type WizardStepStatus = 'completed' | 'active' | 'pending'
-interface WizardStep { id: string; label_fr: string; label_en: string; required: boolean; status: WizardStepStatus }
+interface WizardStep { id: string; label: string; required: boolean; status: WizardStepStatus }
 
 function buildWizardSteps(
   stripeConnected: boolean,
@@ -13,10 +13,10 @@ function buildWizardSteps(
   onboardingCompleted: boolean,
 ): WizardStep[] {
   return [
-    { id: 'stripe', label_fr: 'Connecter Stripe', label_en: 'Connect Stripe', required: true, status: stripeConnected ? 'completed' : 'active' },
-    { id: 'import', label_fr: 'Import des données', label_en: 'Import data', required: true, status: !stripeConnected ? 'pending' : firstScoreCalculated ? 'completed' : 'active' },
-    { id: 'first_win', label_fr: 'Premier insight', label_en: 'First insight', required: true, status: !firstScoreCalculated ? 'pending' : ahaMomentSeen ? 'completed' : 'active' },
-    { id: 'hubspot', label_fr: 'Connecter HubSpot', label_en: 'Connect HubSpot', required: false, status: hubspotConnected || onboardingCompleted ? 'completed' : !ahaMomentSeen ? 'pending' : 'active' },
+    { id: 'stripe', label: 'Connect Stripe', required: true, status: stripeConnected ? 'completed' : 'active' },
+    { id: 'import', label: 'Import data', required: true, status: !stripeConnected ? 'pending' : firstScoreCalculated ? 'completed' : 'active' },
+    { id: 'first_win', label: 'First insight', required: true, status: !firstScoreCalculated ? 'pending' : ahaMomentSeen ? 'completed' : 'active' },
+    { id: 'hubspot', label: 'Connect HubSpot', required: false, status: hubspotConnected || onboardingCompleted ? 'completed' : !ahaMomentSeen ? 'pending' : 'active' },
   ]
 }
 

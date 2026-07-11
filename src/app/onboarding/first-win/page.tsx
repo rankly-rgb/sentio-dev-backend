@@ -20,33 +20,18 @@ interface FirstWinData {
   global_health_score: number
 }
 
-const T = {
-  fr: {
-    title: '🎯 Votre radar est prêt',
-    mrrAtRisk: 'de MRR à risque',
-    healthScore: 'Score de santé global',
-    atRisk: 'Comptes à surveiller',
-    churn: 'risque churn',
-    mrr: 'MRR',
-    demoNote: 'Ces données sont issues de vos comptes démo — connectez vos vrais comptes pour voir votre situation réelle.',
-    cta: 'Voir tous mes comptes →',
-    loading: 'Analyse en cours…',
-    errRetry: 'Erreur de chargement.',
-    retry: 'Réessayer',
-  },
-  en: {
-    title: '🎯 Your radar is ready',
-    mrrAtRisk: 'MRR at risk',
-    healthScore: 'Global health score',
-    atRisk: 'Accounts to watch',
-    churn: 'churn risk',
-    mrr: 'MRR',
-    demoNote: 'This data comes from your demo accounts — connect your real data to see your actual situation.',
-    cta: 'View all accounts →',
-    loading: 'Analyzing…',
-    errRetry: 'Loading error.',
-    retry: 'Retry',
-  },
+const t = {
+  title: '🎯 Your radar is ready',
+  mrrAtRisk: 'MRR at risk',
+  healthScore: 'Global health score',
+  atRisk: 'Accounts to watch',
+  churn: 'churn risk',
+  mrr: 'MRR',
+  demoNote: 'This data comes from your demo accounts — connect your real data to see your actual situation.',
+  cta: 'View all accounts →',
+  loading: 'Analyzing…',
+  errRetry: 'Loading error.',
+  retry: 'Retry',
 }
 
 function healthColor(score: number) {
@@ -61,25 +46,17 @@ function healthBg(score: number) {
   return 'bg-red-900/40 border-red-700/50'
 }
 
-function formatMrr(cents: number, locale: 'fr' | 'en') {
-  const euros = cents / 100
-  return locale === 'en'
-    ? `$${euros.toLocaleString('en-US', { maximumFractionDigits: 0 })}`
-    : `${euros.toLocaleString('fr-FR', { maximumFractionDigits: 0 })} €`
+function formatMrr(cents: number) {
+  const dollars = cents / 100
+  return `$${dollars.toLocaleString('en-US', { maximumFractionDigits: 0 })}`
 }
 
 export default function OnboardingFirstWinPage() {
   const router = useRouter()
-  const [locale, setLocale] = useState<'fr' | 'en'>('fr')
   const [data, setData] = useState<FirstWinData | null>(null)
   const [loadError, setLoadError] = useState(false)
   const [loading, setLoading] = useState(true)
   const [navigating, setNavigating] = useState(false)
-
-  useEffect(() => {
-    const saved = localStorage.getItem('sentio_locale') as 'fr' | 'en' | null
-    if (saved) setLocale(saved)
-  }, [])
 
   useEffect(() => {
     async function load() {
@@ -124,8 +101,6 @@ export default function OnboardingFirstWinPage() {
     }
   }
 
-  const t = T[locale]
-
   if (loading) {
     return (
       <div className="flex flex-col items-center gap-4 py-4">
@@ -153,7 +128,7 @@ export default function OnboardingFirstWinPage() {
       {/* Stats row */}
       <div className="grid grid-cols-2 gap-3 mb-6">
         <div className="bg-red-900/30 border border-red-700/50 rounded-lg p-4 text-center">
-          <p className="text-2xl font-bold text-red-400">{formatMrr(data.mrr_at_risk, locale)}</p>
+          <p className="text-2xl font-bold text-red-400">{formatMrr(data.mrr_at_risk)}</p>
           <p className="text-xs text-red-300/70 mt-1">{t.mrrAtRisk}</p>
         </div>
         <div className={`border rounded-lg p-4 text-center ${healthBg(data.global_health_score)}`}>
@@ -176,7 +151,7 @@ export default function OnboardingFirstWinPage() {
                     {acc.display_name ?? acc.stripe_customer_id}
                   </span>
                   <span className="text-xs text-slate-400 flex-shrink-0 ml-2">
-                    {formatMrr(acc.mrr, locale)} {t.mrr}
+                    {formatMrr(acc.mrr)} {t.mrr}
                   </span>
                 </div>
                 <div className="flex items-center gap-3 mb-1">

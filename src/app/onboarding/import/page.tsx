@@ -4,31 +4,17 @@ import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createSupabaseBrowserClient } from '@/lib/supabase/client'
 
-const T = {
-  fr: {
-    title: 'Import en cours…',
-    subtitle: "Nous construisons votre base de données clients.",
-    steps: [
-      'Import des abonnements Stripe',
-      'Construction des cohortes clients',
-      'Calcul des scores de santé',
-    ],
-    footer: "L'import prend 30 à 90 secondes. Vous pouvez quitter cette page.",
-    error: 'Une erreur est survenue pendant le sync.',
-    retry: 'Réessayer depuis Stripe',
-  },
-  en: {
-    title: 'Importing data…',
-    subtitle: "We're building your customer database.",
-    steps: [
-      'Importing Stripe subscriptions',
-      'Building customer cohorts',
-      'Computing health scores',
-    ],
-    footer: 'Import takes 30–90 seconds. You can safely leave this page.',
-    error: 'An error occurred during sync.',
-    retry: 'Retry from Stripe',
-  },
+const t = {
+  title: 'Importing data…',
+  subtitle: "We're building your customer database.",
+  steps: [
+    'Importing Stripe subscriptions',
+    'Building customer cohorts',
+    'Computing health scores',
+  ],
+  footer: 'Import takes 30–90 seconds. You can safely leave this page.',
+  error: 'An error occurred during sync.',
+  retry: 'Retry from Stripe',
 }
 
 type StepStatus = 'pending' | 'running' | 'done'
@@ -64,17 +50,11 @@ function StepRow({ label, status }: { label: string; status: StepStatus }) {
 
 export default function OnboardingImportPage() {
   const router = useRouter()
-  const [locale, setLocale] = useState<'fr' | 'en'>('fr')
   const [steps, setSteps] = useState<StepStatus[]>(['running', 'pending', 'pending'])
   const [syncError, setSyncError] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null)
-
-  useEffect(() => {
-    const saved = localStorage.getItem('sentio_locale') as 'fr' | 'en' | null
-    if (saved) setLocale(saved)
-  }, [])
 
   useEffect(() => {
     elapsedRef.current = setInterval(() => setElapsed(e => e + 1), 1000)
@@ -124,8 +104,6 @@ export default function OnboardingImportPage() {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
   }, [router])
 
-  const t = T[locale]
-
   if (syncError) {
     return (
       <div className="text-center">
@@ -157,7 +135,7 @@ export default function OnboardingImportPage() {
 
       {elapsed > 90 && steps[0] === 'running' && (
         <div className="mb-4 bg-amber-900/30 border border-amber-700/50 rounded-lg p-3">
-          <p className="text-amber-400 text-xs">L&apos;import prend plus de temps que prévu. Nous continuons en arrière-plan.</p>
+          <p className="text-amber-400 text-xs">Import is taking longer than expected. We&apos;re continuing in the background.</p>
         </div>
       )}
 

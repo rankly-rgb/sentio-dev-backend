@@ -89,8 +89,7 @@ export type WizardStepStatus = 'completed' | 'active' | 'pending'
 
 export interface WizardStep {
   id: string
-  label_fr: string
-  label_en: string
+  label: string
   required: boolean
   status: WizardStepStatus
 }
@@ -105,29 +104,25 @@ export function buildWizardSteps(
   return [
     {
       id: 'stripe',
-      label_fr: 'Connecter Stripe',
-      label_en: 'Connect Stripe',
+      label: 'Connect Stripe',
       required: true,
       status: stripeConnected ? 'completed' : 'active',
     },
     {
       id: 'import',
-      label_fr: 'Import des données',
-      label_en: 'Import data',
+      label: 'Import data',
       required: true,
       status: !stripeConnected ? 'pending' : firstScoreCalculated ? 'completed' : 'active',
     },
     {
       id: 'first_win',
-      label_fr: 'Premier insight',
-      label_en: 'First insight',
+      label: 'First insight',
       required: true,
       status: !firstScoreCalculated ? 'pending' : ahaMomentSeen ? 'completed' : 'active',
     },
     {
       id: 'hubspot',
-      label_fr: 'Connecter HubSpot',
-      label_en: 'Connect HubSpot',
+      label: 'Connect HubSpot',
       required: false,
       status: hubspotConnected || onboardingCompleted ? 'completed' : !ahaMomentSeen ? 'pending' : 'active',
     },

@@ -5,10 +5,10 @@ import { createSupabaseBrowserClient } from '@/lib/supabase/client'
 import { OnboardingContext, type WizardStep } from './context'
 
 const DEFAULT_STEPS: WizardStep[] = [
-  { id: 'stripe',    label_fr: 'Connecter Stripe',   label_en: 'Connect Stripe',  required: true,  status: 'active'  },
-  { id: 'import',    label_fr: 'Import des données',  label_en: 'Import data',     required: true,  status: 'pending' },
-  { id: 'first_win', label_fr: 'Premier insight',     label_en: 'First insight',   required: true,  status: 'pending' },
-  { id: 'hubspot',   label_fr: 'Connecter HubSpot',   label_en: 'Connect HubSpot', required: false, status: 'pending' },
+  { id: 'stripe',    label: 'Connect Stripe',  required: true,  status: 'active'  },
+  { id: 'import',    label: 'Import data',     required: true,  status: 'pending' },
+  { id: 'first_win', label: 'First insight',   required: true,  status: 'pending' },
+  { id: 'hubspot',   label: 'Connect HubSpot', required: false, status: 'pending' },
 ]
 
 function StepIcon({ status, index }: { status: WizardStep['status']; index: number }) {
@@ -35,7 +35,7 @@ function StepIcon({ status, index }: { status: WizardStep['status']; index: numb
   )
 }
 
-function Stepper({ steps, locale }: { steps: WizardStep[]; locale: 'fr' | 'en' }) {
+function Stepper({ steps }: { steps: WizardStep[] }) {
   return (
     <div className="flex items-center justify-center gap-0 mb-10 px-4">
       {steps.map((step, i) => (
@@ -47,7 +47,7 @@ function Stepper({ steps, locale }: { steps: WizardStep[]; locale: 'fr' | 'en' }
               step.status === 'active'    ? 'text-indigo-300' :
                                            'text-slate-500'
             }`}>
-              {locale === 'en' ? step.label_en : step.label_fr}
+              {step.label}
             </span>
           </div>
           {i < steps.length - 1 && (
@@ -63,7 +63,6 @@ function Stepper({ steps, locale }: { steps: WizardStep[]; locale: 'fr' | 'en' }
 
 export default function OnboardingLayout({ children }: { children: React.ReactNode }) {
   const [wizardSteps, setWizardSteps] = useState<WizardStep[]>(DEFAULT_STEPS)
-  const [locale, setLocale] = useState<'fr' | 'en'>('fr')
   const [currentStep, setCurrentStep] = useState('stripe')
   const [stripeConnected, setStripeConnected] = useState(false)
   const [hubspotConnected, setHubspotConnected] = useState(false)
@@ -85,12 +84,7 @@ export default function OnboardingLayout({ children }: { children: React.ReactNo
       const json = await res.json()
       const d = json.data
 
-      const savedLocale = typeof window !== 'undefined'
-        ? (localStorage.getItem('sentio_locale') as 'fr' | 'en' | null)
-        : null
-
       setWizardSteps(d.wizard_steps ?? DEFAULT_STEPS)
-      setLocale(savedLocale ?? 'fr')
       setCurrentStep(d.current_step)
       setStripeConnected(d.stripe_connected)
       setHubspotConnected(d.hubspot_connected)
@@ -105,7 +99,7 @@ export default function OnboardingLayout({ children }: { children: React.ReactNo
   useEffect(() => { fetchStatus() }, [fetchStatus])
 
   const ctx = {
-    wizardSteps, locale, currentStep,
+    wizardSteps, currentStep,
     stripeConnected, hubspotConnected, firstScoreCalculated,
     ahaMomentSeen, onboardingCompleted,
     refresh: fetchStatus,
@@ -118,7 +112,7 @@ export default function OnboardingLayout({ children }: { children: React.ReactNo
           <p className="text-slate-400 text-sm font-semibold tracking-widest uppercase">Sentio AI</p>
         </div>
         <div className="w-full max-w-2xl">
-          <Stepper steps={wizardSteps} locale={locale} />
+          <Stepper steps={wizardSteps} />
         </div>
         <div className="w-full max-w-lg bg-slate-800 border border-slate-700 rounded-xl p-8 shadow-2xl">
           {children}
