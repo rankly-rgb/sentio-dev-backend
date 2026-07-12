@@ -27,7 +27,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 | Langage | TypeScript 5.x (target ES5 — pas de `[...new Set()]`) |
 | Styling | Tailwind CSS 3.x |
 | Auth | @supabase/ssr (cookies, PKCE, ES256) |
-| Tests | Vitest (244 tests) |
+| Tests | Vitest (614 tests) |
 | CI/CD | GitHub Actions + Vercel |
 
 **Phase actuelle** : setup/dev. Production intentionnellement inactif.
@@ -37,7 +37,7 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 ```bash
 npm run dev          # Serveur Next.js local
 npm run build        # Build production
-npm run test         # Tests Vitest (244 tests)
+npm run test         # Tests Vitest (614 tests)
 npm run lint         # ESLint
 npm run typecheck    # TypeScript check (tsc --noEmit)
 npm run verify       # typecheck + lint + test + build (post-modification)
@@ -54,6 +54,19 @@ Expansion   = (seat_usage_pct × 60%) + (feature_ceiling × 40%)
 Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financial=0.
 
 8 segments : Champions, En expansion, Stables, À risque léger, En danger critique, Impayés, En churn, Nouveaux (<90j).
+
+### Décision actée — poids fixes, pas de renormalisation (2026-07-12)
+
+`health_score` garde des poids fixes et des valeurs neutres fixes en cas de signal manquant. **Aucune renormalisation dynamique des poids** selon les signaux disponibles (ex : ne pas recalculer `score = (financial×w1 + engagement×w2) / (w1+w2)` quand `product_usage` est absent).
+
+**Raisons :**
+- Comparabilité dans le temps : le score d'un compte ne doit pas varier uniquement parce qu'un tracker se connecte/déconnecte — sinon les courbes `score_history` deviennent illisibles.
+- Volatilité : renormaliser ferait porter 100 % du poids sur un seul signal restant quand les autres manquent — précisément sur les comptes les moins bien instrumentés (souvent les plus récents).
+- Explicabilité : un score qui varie parce que la formule change silencieusement selon les données disponibles est plus difficile à justifier auprès d'un CSM qu'un score stable accompagné d'un indicateur de complétude séparé.
+
+Cette décision est explicite et ne doit pas être remise en cause par un futur agent sans repasser par une décision produit documentée. Le cas `Financial=0` (qui, contrairement à Usage/Engagement/Contrat, n'est pas une valeur neutre mais peut aussi signaler un vrai défaut de paiement via `overdue_count >= 5` dans `calcFinancialScore`, `_shared/scoring.ts`) reste un point ouvert distinct, à trancher séparément sur la base d'un diagnostic des comptes concernés.
+
+**Diagnostic Financial=0 (exécuté 2026-07-12, environnement dev/démo confirmé — organisations `Sentio Demo`/`Test OAuth Corp`, données Stripe test-mode seedées en masse)** : sur les comptes `churn_risk_score >= 70`, 99,9 % ont `financial_score = 0`. En croisant avec `subscriptions`, ce `0` recouvre en réalité 3 cas distincts que `calcFinancialScore` ne différencie pas aujourd'hui : (1) 88 % n'ont jamais eu de ligne `subscriptions` — vraie absence de donnée, candidate à `=50` neutre ; (2) 12 % ont une `subscription` `canceled`/`past_due` avec `mrr_cents=0` — vrai churn, doit rester bas ; (3) `mrr_cents>0` avec `overdue_count>=5` — risque réel, déjà correctement traité. Design retenu pour une future implémentation (non codé, en attente de validation produit) : distinguer ces 3 cas en joignant `subscriptions`, pas seulement `mrrCents`. Proportions non fiables comme métriques business (données de démo), mais le design à 3 voies reste valide indépendamment du ratio réel.
 
 ## Edge Functions
 

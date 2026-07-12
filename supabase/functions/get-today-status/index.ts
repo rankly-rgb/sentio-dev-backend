@@ -33,16 +33,15 @@
 //
 // top_urgent_account = compte avec churn_risk_score > 70 au MRR le plus élevé.
 //
-// total_mrr_cents = somme de mrr_cents sur tous les comptes de l'org.
-//   NB : `accounts` n'a pas de colonne `status` (elle existe sur `subscriptions`
-//   et `invoices`, pas sur `accounts`) — un compte churné a déjà mrr_cents = 0
-//   (règle du segment `en_churn`), donc sommer mrr_cents brut donne le même
-//   résultat qu'un filtre "actif" sans dépendre d'une colonne inexistante.
+// total_mrr_cents, champions_count et le ratio at-risk/scored proviennent du
+// RPC partagé `get_portfolio_snapshot` (chantier 5.1 — couche d'agrégation
+// portefeuille, consommée aussi par accounts-api et dashboard-api pour éviter
+// que ces totaux divergent d'un écran à l'autre). Voir
+// supabase/migrations/20260712000001_portfolio_snapshot_rpc.sql.
 //
-// champions_count = nombre de memberships actifs du segment système
-//   `account_segments.segment_type = 'champions'` (valeur exacte de la
-//   CHECK constraint — `accounts` n'a pas de colonne `segment` directe,
-//   l'appartenance passe par la table de jointure `segment_memberships`).
+// NB : la sélection de top_urgent_account reste basée sur un fetch `accounts`
+// plafonné à 500 lignes (limitation connue, non traitée par ce chantier —
+// c'est une sélection par compte, pas un total portefeuille).
 //
 // Auth : JWT utilisateur vérifié dans le code (ES256 via verifyUserAuth)
 // ============================================================
@@ -54,7 +53,6 @@ import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 
 const AT_RISK_CHURN_THRESHOLD = 70
 const AT_RISK_RATIO_THRESHOLD = 0.3
-const CHAMPIONS_SEGMENT_TYPE = 'champions'
 
 interface AccountRow {
   id: string
@@ -98,8 +96,13 @@ export function selectTopInsightTitle(insights: InsightRow[]): string {
   return sorted[0].title
 }
 
-export function calcTotalMrrCents(accounts: AccountRow[]): number {
-  return accounts.reduce((sum, a) => sum + (a.mrr_cents ?? 0), 0)
+interface PortfolioSnapshot {
+  total_accounts: number
+  total_mrr_cents: number
+  avg_health_score: number | null
+  champions_count: number
+  at_risk_count: number
+  scored_accounts_count: number
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -127,7 +130,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const orgId = auth.organizationId
 
-  const [criticalRes, accountsRes, championsSegmentRes] = await Promise.all([
+  const [criticalRes, accountsRes, snapshotRes] = await Promise.all([
     supabase
       .from('ai_insights')
       .select('id', { count: 'exact', head: true })
@@ -139,12 +142,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .select('id, display_name, mrr_cents, churn_risk_score')
       .eq('organization_id', orgId)
       .limit(500),
-    supabase
-      .from('account_segments')
-      .select('id')
-      .eq('organization_id', orgId)
-      .eq('segment_type', CHAMPIONS_SEGMENT_TYPE)
-      .maybeSingle(),
+    supabase.rpc('get_portfolio_snapshot', { p_organization_id: orgId }).maybeSingle(),
   ])
 
   if (criticalRes.error) {
@@ -157,34 +155,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Failed to fetch accounts', 500)
   }
 
-  if (championsSegmentRes.error) {
-    console.error(JSON.stringify({ level: 'error', function_name: 'get-today-status', message: championsSegmentRes.error.message }))
-    return errorResponse('Failed to fetch champions segment', 500)
+  if (snapshotRes.error) {
+    console.error(JSON.stringify({ level: 'error', function_name: 'get-today-status', message: snapshotRes.error.message }))
+    return errorResponse('Failed to fetch portfolio snapshot', 500)
   }
 
-  let championsCount = 0
-  if (championsSegmentRes.data) {
-    const { count, error } = await supabase
-      .from('segment_memberships')
-      .select('id', { count: 'exact', head: true })
-      .eq('organization_id', orgId)
-      .eq('segment_id', championsSegmentRes.data.id)
-      .eq('status', 'active')
-
-    if (error) {
-      console.error(JSON.stringify({ level: 'error', function_name: 'get-today-status', message: error.message }))
-      return errorResponse('Failed to fetch champions count', 500)
-    }
-    championsCount = count ?? 0
-  }
+  const snapshot = snapshotRes.data as PortfolioSnapshot | null
+  const championsCount = snapshot?.champions_count ?? 0
+  const totalMrrCents = snapshot?.total_mrr_cents ?? 0
 
   const typedAccounts = (accountsRes.data ?? []) as AccountRow[]
   const scoredAccounts = typedAccounts.filter((a) => a.churn_risk_score !== null)
-  const atRiskAccounts = scoredAccounts.filter((a) => (a.churn_risk_score ?? 0) > AT_RISK_CHURN_THRESHOLD)
 
   const criticalInsightCount = criticalRes.count ?? 0
-  const status = determineTodayStatus(criticalInsightCount, atRiskAccounts.length, scoredAccounts.length)
-  const totalMrrCents = calcTotalMrrCents(typedAccounts)
+  const status = determineTodayStatus(
+    criticalInsightCount,
+    snapshot?.at_risk_count ?? 0,
+    snapshot?.scored_accounts_count ?? 0,
+  )
 
   const topAccount = selectTopUrgentAccount(scoredAccounts)
 

@@ -12,7 +12,9 @@
 //   Response 200 :
 //     {
 //       data: Array<Account & { priority_label: 'critical' | 'watch' | 'new' | 'stable' }>,
-//       pagination: { limit: number, next_cursor: string | null, has_more: boolean }
+//       pagination: { limit: number, next_cursor: string | null, has_more: boolean },
+//       total_count: number,       // total de comptes de l'org, indépendant de la pagination
+//       total_mrr_cents: number    // idem, source : RPC get_portfolio_snapshot (chantier 5.1)
 //     }
 //   priority_label calculé côté SQL (vue accounts_with_priority) :
 //     critical : churn_risk_score >= 80 OU health_score <= 30
@@ -128,11 +130,19 @@ async function handleList(
     )
   }
 
-  const { data, error } = await query
+  const [{ data, error }, snapshotRes] = await Promise.all([
+    query,
+    supabase.rpc('get_portfolio_snapshot', { p_organization_id: orgId }).maybeSingle(),
+  ])
 
   if (error) {
     console.error(JSON.stringify({ level: 'error', function_name: 'accounts-api', organization_id: orgId, message: error.message }))
     return errorResponse('Failed to fetch accounts', 500)
+  }
+
+  if (snapshotRes.error) {
+    console.error(JSON.stringify({ level: 'error', function_name: 'accounts-api', organization_id: orgId, message: snapshotRes.error.message }))
+    return errorResponse('Failed to fetch portfolio snapshot', 500)
   }
 
   const rows = data ?? []
@@ -140,9 +150,13 @@ async function handleList(
   const items = hasMore ? rows.slice(0, limit) : rows
   const nextCursor = hasMore ? items[items.length - 1]?.created_at ?? null : null
 
+  const snapshot = snapshotRes.data as { total_accounts: number; total_mrr_cents: number } | null
+
   return jsonResponse({
     data: items,
     pagination: { limit, next_cursor: nextCursor, has_more: hasMore },
+    total_count: snapshot?.total_accounts ?? 0,
+    total_mrr_cents: snapshot?.total_mrr_cents ?? 0,
   })
 }
 
