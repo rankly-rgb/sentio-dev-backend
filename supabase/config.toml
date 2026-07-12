@@ -147,6 +147,10 @@ verify_jwt = false
 [functions.get-today-status]
 verify_jwt = false
 
+# score-feedback : JWT vérifié dans le code (ES256 — chantier 7)
+[functions.score-feedback]
+verify_jwt = false
+
 [functions.save-org-preferences]
 verify_jwt = false
 
