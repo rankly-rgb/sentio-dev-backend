@@ -30,6 +30,17 @@ export interface InvoiceStatus {
   overdue_count: number
 }
 
+export interface SubscriptionStatus {
+  hasAny: boolean
+}
+
+export interface SignalsAvailable {
+  financial: boolean
+  engagement: boolean
+  contract: boolean
+  product_usage: boolean
+}
+
 // ── Calcul Usage Score (35%) ──────────────────────────────────
 export function calcUsageScore(stats: UsageStats): number {
   if (stats.total_events === 0) return 50  // Neutre quand pas de données (cohérent avec engagement/contrat)
@@ -42,11 +53,19 @@ export function calcUsageScore(stats: UsageStats): number {
 }
 
 // ── Calcul Financial Score (25%) ──────────────────────────────
+// v2-explicit-no-data : un compte n'ayant JAMAIS eu de subscription Stripe
+// (subscriptionStatus.hasAny=false) est un signal manquant (neutre, 50),
+// pas un risque financier. Un compte ayant déjà eu une subscription mais
+// dont le mrr_cents actuel est 0 (canceled/past_due) reste un vrai churn (0)
+// — comportement inchangé, comme le cas overdue_count>=5 (retombe dans le
+// calcul normal ci-dessous, penaltyFactor tombe à 0 exactement à ce seuil).
 export function calcFinancialScore(
   mrrCents: number | null,
   invoiceStatus: InvoiceStatus,
   maxMrr: number,
+  subscriptionStatus: SubscriptionStatus,
 ): number {
+  if (!subscriptionStatus.hasAny) return 50
   if (!mrrCents || mrrCents <= 0) return 0
 
   const mrrScore = maxMrr > 0 ? Math.min(100, (mrrCents / maxMrr) * 100) : 50
@@ -136,6 +155,30 @@ export function calcHealthScore(
   return Math.round(
     (usageScore * 0.35 + financialScore * 0.25 + engagementScore * 0.20 + contractScore * 0.20) * 100,
   ) / 100
+}
+
+// ── Indicateur de complétude des données ──────────────────────
+// signals_available / data_completeness_pct : pas un calcul de score, juste
+// un état des lieux "quels signaux étaient réellement disponibles pour ce
+// run" — alimente le futur badge UI "Calculé sur X/4 signaux" (chantier 5.4).
+export function computeSignalsAvailable(
+  usage: UsageStats,
+  hubspot: HubspotData | null,
+  account: Account,
+  subscriptionStatus: SubscriptionStatus,
+): SignalsAvailable {
+  return {
+    financial: subscriptionStatus.hasAny,
+    engagement: hubspot !== null,
+    contract: account.contract_end_date !== null,
+    product_usage: usage.total_events > 0,
+  }
+}
+
+export function computeDataCompletenessPct(signals: SignalsAvailable): number {
+  const values = Object.values(signals)
+  const present = values.filter(Boolean).length
+  return Math.round((present / values.length) * 1000) / 10
 }
 
 // ── Churn Risk Score ──────────────────────────────────────────

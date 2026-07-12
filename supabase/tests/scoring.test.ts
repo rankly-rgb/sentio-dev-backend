@@ -8,10 +8,14 @@ import {
   calcHealthScore,
   calcChurnRiskScore,
   determineSegmentTypes,
+  computeSignalsAvailable,
+  computeDataCompletenessPct,
   type Account,
   type UsageStats,
   type HubspotData,
   type InvoiceStatus,
+  type SubscriptionStatus,
+  type SignalsAvailable,
 } from '../functions/_shared/scoring'
 
 // ── Usage Score ───────────────────────────────────────────────
@@ -65,37 +69,103 @@ describe('calcUsageScore', () => {
 
 describe('calcFinancialScore', () => {
   const noOverdue: InvoiceStatus = { has_overdue: false, overdue_count: 0 }
+  const hasSubscription: SubscriptionStatus = { hasAny: true }
+  const neverSubscribed: SubscriptionStatus = { hasAny: false }
 
-  it('returns 0 for null MRR', () => {
-    expect(calcFinancialScore(null, noOverdue, 10000)).toBe(0)
+  it('returns 0 for null MRR (a déjà eu une subscription)', () => {
+    expect(calcFinancialScore(null, noOverdue, 10000, hasSubscription)).toBe(0)
   })
 
-  it('returns 0 for zero MRR', () => {
-    expect(calcFinancialScore(0, noOverdue, 10000)).toBe(0)
+  it('returns 0 for zero MRR (a déjà eu une subscription)', () => {
+    expect(calcFinancialScore(0, noOverdue, 10000, hasSubscription)).toBe(0)
   })
 
   it('returns 100 for top account with no overdue', () => {
-    expect(calcFinancialScore(10000, noOverdue, 10000)).toBe(100)
+    expect(calcFinancialScore(10000, noOverdue, 10000, hasSubscription)).toBe(100)
   })
 
   it('returns 50 for half MRR', () => {
-    expect(calcFinancialScore(5000, noOverdue, 10000)).toBe(50)
+    expect(calcFinancialScore(5000, noOverdue, 10000, hasSubscription)).toBe(50)
   })
 
   it('applies 20% penalty per overdue invoice', () => {
     const oneOverdue: InvoiceStatus = { has_overdue: true, overdue_count: 1 }
-    const baseScore = calcFinancialScore(10000, noOverdue, 10000)
-    const penalizedScore = calcFinancialScore(10000, oneOverdue, 10000)
+    const baseScore = calcFinancialScore(10000, noOverdue, 10000, hasSubscription)
+    const penalizedScore = calcFinancialScore(10000, oneOverdue, 10000, hasSubscription)
     expect(penalizedScore).toBe(baseScore * 0.8)
   })
 
-  it('caps penalty at 100% (5+ overdue invoices)', () => {
+  it('caps penalty at 100% (5+ overdue invoices) — risque réel, inchangé', () => {
     const fiveOverdue: InvoiceStatus = { has_overdue: true, overdue_count: 5 }
-    expect(calcFinancialScore(10000, fiveOverdue, 10000)).toBe(0)
+    expect(calcFinancialScore(10000, fiveOverdue, 10000, hasSubscription)).toBe(0)
   })
 
   it('returns 50 when maxMrr is 0', () => {
-    expect(calcFinancialScore(5000, noOverdue, 0)).toBe(50)
+    expect(calcFinancialScore(5000, noOverdue, 0, hasSubscription)).toBe(50)
+  })
+
+  // ── v2-explicit-no-data : signal manquant vs vrai churn ──────
+
+  it('returns 50 (neutre) si le compte n\'a jamais eu de subscription, quel que soit mrrCents', () => {
+    expect(calcFinancialScore(null, noOverdue, 10000, neverSubscribed)).toBe(50)
+    expect(calcFinancialScore(0, noOverdue, 10000, neverSubscribed)).toBe(50)
+  })
+
+  it('returns 50 même si un overdue existe (jamais eu de subscription — signal manquant prioritaire)', () => {
+    const fiveOverdue: InvoiceStatus = { has_overdue: true, overdue_count: 5 }
+    expect(calcFinancialScore(null, fiveOverdue, 10000, neverSubscribed)).toBe(50)
+  })
+
+  it('reste à 0 (pas neutre) pour un compte ayant déjà eu une subscription, mrr=0 — vrai churn', () => {
+    expect(calcFinancialScore(0, noOverdue, 10000, hasSubscription)).toBe(0)
+  })
+})
+
+// ── Indicateur de complétude des données ───────────────────────
+
+describe('computeSignalsAvailable', () => {
+  const account: Account = {
+    id: 'a1', organization_id: 'o1', mrr_cents: 1000, seat_count: null,
+    seat_limit: null, contract_end_date: null, health_score: null, churn_risk_score: null,
+  }
+  const usage: UsageStats = { login_count: 0, feature_count: 0, total_events: 0, distinct_features: 0, days_active: 0 }
+  const hubspot: HubspotData = { nps_score: null, open_ticket_count: 0, open_deal_count: 0, last_meeting_date: null }
+
+  it('tous absents quand aucune donnée n\'est disponible', () => {
+    expect(computeSignalsAvailable(usage, null, account, { hasAny: false })).toEqual({
+      financial: false, engagement: false, contract: false, product_usage: false,
+    })
+  })
+
+  it('tous présents quand toutes les données sont disponibles', () => {
+    const fullUsage: UsageStats = { ...usage, total_events: 10 }
+    const fullAccount: Account = { ...account, contract_end_date: '2027-01-01' }
+    expect(computeSignalsAvailable(fullUsage, hubspot, fullAccount, { hasAny: true })).toEqual({
+      financial: true, engagement: true, contract: true, product_usage: true,
+    })
+  })
+
+  it('détecte financial indépendamment des autres signaux', () => {
+    const result = computeSignalsAvailable(usage, hubspot, account, { hasAny: true })
+    expect(result.financial).toBe(true)
+    expect(result.product_usage).toBe(false)
+  })
+})
+
+describe('computeDataCompletenessPct', () => {
+  it('retourne 0 quand aucun signal n\'est disponible', () => {
+    const signals: SignalsAvailable = { financial: false, engagement: false, contract: false, product_usage: false }
+    expect(computeDataCompletenessPct(signals)).toBe(0)
+  })
+
+  it('retourne 100 quand tous les signaux sont disponibles', () => {
+    const signals: SignalsAvailable = { financial: true, engagement: true, contract: true, product_usage: true }
+    expect(computeDataCompletenessPct(signals)).toBe(100)
+  })
+
+  it('retourne 50 pour 2 signaux sur 4', () => {
+    const signals: SignalsAvailable = { financial: true, engagement: true, contract: false, product_usage: false }
+    expect(computeDataCompletenessPct(signals)).toBe(50)
   })
 })
 

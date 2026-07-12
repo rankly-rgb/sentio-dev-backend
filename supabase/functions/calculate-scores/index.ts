@@ -22,6 +22,8 @@ import {
   type HubspotData,
   type InvoiceStatus,
   type SegmentType,
+  type SubscriptionStatus,
+  type SignalsAvailable,
   SYSTEM_SEGMENT_TYPES,
   calcUsageScore,
   calcFinancialScore,
@@ -31,6 +33,8 @@ import {
   calcHealthScore,
   calcChurnRiskScore,
   determineSegmentTypes,
+  computeSignalsAvailable,
+  computeDataCompletenessPct,
 } from '../_shared/scoring.ts'
 import { generateNarratives } from '../_shared/score-narratives.ts'
 
@@ -135,8 +139,10 @@ const MAX_BATCHES = 200 // Safety guard: 200 * 500 = 100k accounts max per org
 
 const DEFAULT_USAGE: UsageStats = { login_count: 0, feature_count: 0, total_events: 0, distinct_features: 0, days_active: 0 }
 const DEFAULT_INVOICE: InvoiceStatus = { has_overdue: false, overdue_count: 0 }
+const DEFAULT_SUBSCRIPTION_STATUS: SubscriptionStatus = { hasAny: false }
+const MODEL_VERSION = 'v2-explicit-no-data'
 
-// ── Pre-fetch scoring data for a batch of accounts (3 parallel queries instead of 3N) ──
+// ── Pre-fetch scoring data for a batch of accounts (4 parallel queries instead of 4N) ──
 async function prefetchScoringData(
   supabase: SupabaseClient,
   accountIds: string[],
@@ -145,10 +151,11 @@ async function prefetchScoringData(
   hubspotMap: Map<string, HubspotData | null>
   invoiceStatusMap: Map<string, InvoiceStatus>
   overdueAmountMap: Map<string, number>
+  subscriptionAccountIds: Set<string>
 }> {
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]
 
-  const [usageResult, hubspotResult, invoiceResult] = await Promise.all([
+  const [usageResult, hubspotResult, invoiceResult, subscriptionResult] = await Promise.all([
     supabase
       .from('usage_events')
       .select('account_id, event_type, feature_name, event_count, event_date')
@@ -164,7 +171,19 @@ async function prefetchScoringData(
       .select('account_id, amount_cents')
       .in('account_id', accountIds)
       .in('status', ['open', 'uncollectible']),
+    // Existence uniquement — savoir si le compte a JAMAIS eu une subscription
+    // Stripe, pour distinguer "signal manquant" de "mrr=0 réel" dans
+    // calcFinancialScore (v2-explicit-no-data).
+    supabase
+      .from('subscriptions')
+      .select('account_id')
+      .in('account_id', accountIds)
+      .limit(50000),
   ])
+
+  const subscriptionAccountIds = new Set<string>(
+    (subscriptionResult.data ?? []).map((row: { account_id: string }) => row.account_id),
+  )
 
   // Build usage stats per account
   const usageMap = new Map<string, UsageStats>()
@@ -219,7 +238,7 @@ async function prefetchScoringData(
     }
   }
 
-  return { usageMap, hubspotMap, invoiceStatusMap, overdueAmountMap }
+  return { usageMap, hubspotMap, invoiceStatusMap, overdueAmountMap, subscriptionAccountIds }
 }
 
 // ── Scoring d'un compte (pure — no DB calls) ────────────────────
@@ -229,15 +248,24 @@ function scoreAccountPure(
   usage: UsageStats,
   hubspot: HubspotData | null,
   invoiceStatus: InvoiceStatus,
-): ScoreResult & { invoiceStatus: InvoiceStatus; daysActive: number } {
+  subscriptionStatus: SubscriptionStatus,
+): ScoreResult & {
+  invoiceStatus: InvoiceStatus
+  daysActive: number
+  signalsAvailable: SignalsAvailable
+  dataCompletenessPct: number
+} {
   const usageScore = calcUsageScore(usage)
-  const financialScore = calcFinancialScore(account.mrr_cents, invoiceStatus, maxMrrCents)
+  const financialScore = calcFinancialScore(account.mrr_cents, invoiceStatus, maxMrrCents, subscriptionStatus)
   const engagementScore = calcEngagementScore(hubspot)
   const contractScore = calcContractScore(account)
 
   const healthScore = calcHealthScore(usageScore, financialScore, engagementScore, contractScore)
   const churnRiskScore = calcChurnRiskScore(healthScore, invoiceStatus, usage.days_active, account)
   const expansionScore = calcExpansionScore(account, usage)
+
+  const signalsAvailable = computeSignalsAvailable(usage, hubspot, account, subscriptionStatus)
+  const dataCompletenessPct = computeDataCompletenessPct(signalsAvailable)
 
   return {
     health_score: Math.max(0, Math.min(100, healthScore)),
@@ -249,6 +277,8 @@ function scoreAccountPure(
     contract_score: Math.max(0, Math.min(100, contractScore)),
     invoiceStatus,
     daysActive: usage.days_active,
+    signalsAvailable,
+    dataCompletenessPct,
   }
 }
 
@@ -487,9 +517,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
           allAccounts.push(...(batch as AccountWithCreatedAt[]))
 
-          // Pre-fetch all scoring data in 3 parallel bulk queries (instead of 3N sequential)
+          // Pre-fetch all scoring data in 4 parallel bulk queries (instead of 4N sequential)
           const batchIds = batch.map((a: { id: string }) => a.id)
-          const { usageMap, hubspotMap, invoiceStatusMap, overdueAmountMap } = await prefetchScoringData(supabase, batchIds)
+          const { usageMap, hubspotMap, invoiceStatusMap, overdueAmountMap, subscriptionAccountIds } = await prefetchScoringData(supabase, batchIds)
 
           // Score each account (pure — no DB calls)
           const historyRows: Array<Record<string, unknown>> = []
@@ -499,8 +529,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
               const usage = usageMap.get(account.id) ?? DEFAULT_USAGE
               const hubspot = hubspotMap.get(account.id) ?? null
               const invoiceStatus = invoiceStatusMap.get(account.id) ?? DEFAULT_INVOICE
+              const subscriptionStatus: SubscriptionStatus = subscriptionAccountIds.has(account.id)
+                ? { hasAny: true }
+                : DEFAULT_SUBSCRIPTION_STATUS
 
-              const result = scoreAccountPure(account, maxMrrCents, usage, hubspot, invoiceStatus)
+              const result = scoreAccountPure(account, maxMrrCents, usage, hubspot, invoiceStatus, subscriptionStatus)
               const scores: ScoreResult = {
                 health_score: result.health_score,
                 churn_risk_score: result.churn_risk_score,
@@ -532,6 +565,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 last_meeting_date: hubspot?.last_meeting_date ?? null,
               })
 
+              const inputsMissing = (Object.entries(result.signalsAvailable) as Array<[string, boolean]>)
+                .filter(([, present]) => !present)
+                .map(([signal]) => signal)
+
               historyRows.push({
                 organization_id: organizationId,
                 account_id: account.id,
@@ -544,6 +581,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 engagement_score: scores.engagement_score,
                 contract_score: scores.contract_score,
                 mrr_cents: account.mrr_cents ?? 0,
+                model_version: MODEL_VERSION,
+                signals_available: result.signalsAvailable,
+                data_completeness_pct: result.dataCompletenessPct,
+                inputs_missing: inputsMissing,
+                inputs_used: {
+                  mrr_cents: account.mrr_cents ?? 0,
+                  has_subscription: subscriptionStatus.hasAny,
+                  overdue_count: invoiceStatus.overdue_count,
+                  total_events: usage.total_events,
+                  distinct_features: usage.distinct_features,
+                  days_active: usage.days_active,
+                  open_ticket_count: hubspot?.open_ticket_count ?? null,
+                  last_meeting_date: hubspot?.last_meeting_date ?? null,
+                  contract_end_date: account.contract_end_date ?? null,
+                },
               })
 
               // Update account current scores + narratives
