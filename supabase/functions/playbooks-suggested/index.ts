@@ -107,10 +107,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const orgId = auth.organizationId
 
-  // 1. Charger les segments avec leurs comptes
+  // 1. Charger les segments (comptage live via segment_memberships, pas le cache
+  //    dénormalisé account_segments.account_count — voir chantier 5.10, peut dériver
+  //    du comptage réel selon le chemin de mise à jour des memberships)
   const { data: segments, error: segErr } = await supabase
     .from('account_segments')
-    .select('id, segment_type, account_count')
+    .select('id, segment_type')
     .eq('organization_id', orgId)
     .in('segment_type', SUGGESTION_RULES.map((r) => r.segment_type).filter(Boolean))
 
@@ -119,9 +121,30 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Failed to fetch segments', 500)
   }
 
+  const segmentIds = (segments ?? []).map((s: { id: string }) => s.id)
+  const liveCountBySegmentId = new Map<string, number>()
+
+  if (segmentIds.length > 0) {
+    const { data: memberships, error: memErr } = await supabase
+      .from('segment_memberships')
+      .select('segment_id')
+      .in('segment_id', segmentIds)
+      .eq('status', 'active')
+      .limit(10000)
+
+    if (memErr) {
+      console.error(JSON.stringify({ level: 'error', function_name: 'playbooks-suggested', message: memErr.message }))
+      return errorResponse('Failed to fetch segment memberships', 500)
+    }
+
+    for (const m of (memberships ?? [])) {
+      liveCountBySegmentId.set(m.segment_id, (liveCountBySegmentId.get(m.segment_id) ?? 0) + 1)
+    }
+  }
+
   const segmentByType = new Map(
-    (segments ?? []).map((s: { segment_type: string; id: string; account_count: number | null }) =>
-      [s.segment_type, s]
+    (segments ?? []).map((s: { segment_type: string; id: string }) =>
+      [s.segment_type, { ...s, account_count: liveCountBySegmentId.get(s.id) ?? 0 }]
     ),
   )
 
