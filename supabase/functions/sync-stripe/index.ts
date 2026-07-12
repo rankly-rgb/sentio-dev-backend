@@ -14,6 +14,7 @@ import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
 import { CircuitBreaker } from '../_shared/circuit-breaker.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
+import { detectMrrCollapseAnomaly, type AccountMrrUpdate } from '../_shared/sync-anomaly-guard.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
@@ -252,7 +253,7 @@ async function syncSubscriptions(
   organizationId: string,
   apiKey: string,
   logger: DataSyncLogger,
-): Promise<void> {
+): Promise<{ anomalyDetected: boolean }> {
   const extraParams: Record<string, string> = { status: 'all' }
 
   // Pre-build stripe_customer_id → account.id Map (eliminates N+1 queries)
@@ -385,6 +386,31 @@ async function syncSubscriptions(
     accountUpdateRows.push(row)
   }
 
+  // Garde-fou anomalie : si une part anormale de comptes passerait à
+  // mrr_cents=0 dans ce run, bloquer l'écriture accounts plutôt que
+  // d'appliquer aveuglément des données potentiellement corrompues
+  // (incident documenté : -55,3% de MRR en quelques jours). subscriptions
+  // (Phase 1) est déjà écrite — acceptée comme limitation, auto-corrective
+  // au prochain run full-sync une fois la cause traitée.
+  const anomaly = detectMrrCollapseAnomaly(
+    prevMrrByAccount,
+    accountUpdateRows as unknown as AccountMrrUpdate[],
+  )
+  if (anomaly.isAnomaly) {
+    const pct = Math.round(anomaly.ratio * 100)
+    console.error(JSON.stringify({
+      level: 'error',
+      function_name: 'sync-stripe',
+      organization_id: organizationId,
+      message: `Anomalie MRR détectée : ${anomaly.affectedCount}/${anomaly.totalCount} comptes passent à mrr=0 (${pct}%) — écriture accounts bloquée pour cet org`,
+    }))
+    await alertSlack(
+      `sync-stripe: anomalie MRR détectée sur l'org ${organizationId} — ${anomaly.affectedCount}/${anomaly.totalCount} comptes (${pct}%) passeraient à 0€ dans ce run. Écriture accounts bloquée, subscriptions déjà synchronisées (auto-corrective au prochain run).`,
+      { level: 'critical' },
+    )
+    return { anomalyDetected: true }
+  }
+
   const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id')
   logger.increment('records_failed', acctFail)
 
@@ -440,6 +466,8 @@ async function syncSubscriptions(
       logger.increment('movements_processed', movementRows.length)
     }
   }
+
+  return { anomalyDetected: false }
 }
 
 // ── Sync invoices ─────────────────────────────────────────────
@@ -656,8 +684,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   try {
     await syncCustomers(supabase, organizationId, apiKey, logger, createdAfter)
-    await syncSubscriptions(supabase, organizationId, apiKey, logger)
+    const { anomalyDetected } = await syncSubscriptions(supabase, organizationId, apiKey, logger)
     await syncInvoices(supabase, organizationId, apiKey, logger, createdAfter)
+
+    if (anomalyDetected) {
+      // 'validation_error' — CHECK data_syncs_error_type_check n'inclut pas de valeur
+      // dédiée aux anomalies de données, c'est la plus proche sémantiquement.
+      await logger.fail('MRR anomaly detected — accounts write blocked for this run', 'validation_error')
+      return errorResponse('Sync completed with MRR anomaly — accounts write blocked, see logs/Slack', 409)
+    }
 
     await supabase
       .from('organizations')
