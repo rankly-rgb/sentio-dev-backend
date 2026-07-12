@@ -48,10 +48,6 @@ function selectTopInsightTitle(insights: InsightRow[]): string {
   return sorted[0].title
 }
 
-function calcTotalMrrCents(accounts: AccountRow[]): number {
-  return accounts.reduce((sum, a) => sum + (a.mrr_cents ?? 0), 0)
-}
-
 // ── Helpers de test ─────────────────────────────────────────
 
 function account(overrides: Partial<AccountRow>): AccountRow {
@@ -135,27 +131,5 @@ describe('get-today-status: selectTopInsightTitle', () => {
 
   it('retourne le seul insight présent', () => {
     expect(selectTopInsightTitle([{ title: 'Solo', priority: 'medium' }])).toBe('Solo')
-  })
-})
-
-// ── Tests calcTotalMrrCents ──────────────────────────────────
-
-describe('get-today-status: calcTotalMrrCents', () => {
-  it('retourne 0 pour une liste vide', () => {
-    expect(calcTotalMrrCents([])).toBe(0)
-  })
-
-  it('somme le mrr_cents de tous les comptes', () => {
-    const accounts = [
-      account({ id: 'a1', mrr_cents: 10000 }),
-      account({ id: 'a2', mrr_cents: 25000 }),
-      account({ id: 'a3', mrr_cents: 0 }),
-    ]
-    expect(calcTotalMrrCents(accounts)).toBe(35000)
-  })
-
-  it('traite mrr_cents null comme 0', () => {
-    const accounts = [account({ id: 'a1', mrr_cents: null }), account({ id: 'a2', mrr_cents: 5000 })]
-    expect(calcTotalMrrCents(accounts)).toBe(5000)
   })
 })

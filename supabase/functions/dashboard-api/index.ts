@@ -175,8 +175,9 @@ async function handleBriefing(
     yesterdayScoresRes,
     riskSegmentsRes,
     p0InsightsRes,
+    snapshotRes,
   ] = await Promise.all([
-    // Scores actuels (source de vérité : table accounts)
+    // Scores actuels par compte (nécessaire pour insight_du_jour, pas pour la moyenne)
     supabase.from('accounts')
       .select('id, stripe_customer_id, display_name, health_score, product_usage_score, financial_score, engagement_score, contract_score')
       .eq('organization_id', orgId)
@@ -209,6 +210,9 @@ async function handleBriefing(
       .eq('organization_id', orgId)
       .eq('status', 'active')
       .eq('priority', 'critical'),
+
+    // Snapshot portefeuille partagé (chantier 5.1) — source de current_avg_health
+    supabase.rpc('get_portfolio_snapshot', { p_organization_id: orgId }).maybeSingle(),
   ])
 
   // ── Portfolio health delta ────────────────────────────────
@@ -217,13 +221,9 @@ async function handleBriefing(
     (weekAgoScoresRes.data ?? []).map((s: { account_id: string; health_score: number | null }) => [s.account_id, s]),
   )
 
-  let currentAvgHealth: number | null = null
+  const snapshot = snapshotRes.data as { avg_health_score: number | null } | null
+  const currentAvgHealth: number | null = snapshot?.avg_health_score ?? null
   let weekAgoAvgHealth: number | null = null
-
-  if (currentAccounts.length > 0) {
-    const totalCurrent = currentAccounts.reduce((sum: number, a: { health_score: number | null }) => sum + (a.health_score ?? 0), 0)
-    currentAvgHealth = Math.round((totalCurrent / currentAccounts.length) * 10) / 10
-  }
 
   const weekAgoScores = weekAgoScoresRes.data ?? []
   if (weekAgoScores.length > 0) {
@@ -444,13 +444,9 @@ async function handleBenchmarks(
     .toISOString()
     .split('T')[0]
 
-  const [currentMrrRes, movements12mRes, peersRes] = await Promise.all([
-    supabase
-      .from('accounts')
-      .select('mrr_cents')
-      .eq('organization_id', orgId)
-      .gt('mrr_cents', 0)
-      .limit(5000),
+  const [snapshotRes, movements12mRes, peersRes] = await Promise.all([
+    // Snapshot portefeuille partagé (chantier 5.1) — source de MRR actuel
+    supabase.rpc('get_portfolio_snapshot', { p_organization_id: orgId }).maybeSingle(),
 
     supabase
       .from('mrr_movements')
@@ -469,10 +465,7 @@ async function handleBenchmarks(
   ])
 
   // MRR actuel total
-  const currentMrr = (currentMrrRes.data ?? []).reduce(
-    (sum: number, a: { mrr_cents: number | null }) => sum + (a.mrr_cents ?? 0),
-    0,
-  )
+  const currentMrr = (snapshotRes.data as { total_mrr_cents: number } | null)?.total_mrr_cents ?? 0
 
   // Agréger les mouvements par type
   let new12m = 0, expansion12m = 0, contraction12m = 0, churn12m = 0, reactivation12m = 0
