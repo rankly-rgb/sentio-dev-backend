@@ -23,6 +23,7 @@ BEGIN
   PERFORM cron.unschedule('sync-stripe-all-orgs')    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'sync-stripe-all-orgs');
   PERFORM cron.unschedule('calculate-scores-safety') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'calculate-scores-safety');
   PERFORM cron.unschedule('generate-insights-daily') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'generate-insights-daily');
+  PERFORM cron.unschedule('reconciliation-daily')    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'reconciliation-daily');
   PERFORM cron.unschedule('churn-alert-daily')       WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'churn-alert-daily');
   PERFORM cron.unschedule('weekly-digest-monday')    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'weekly-digest-monday');
 
@@ -79,6 +80,25 @@ BEGIN
     )
   );
 
+  -- ── Job : reconciliation-check quotidien — 05:00 UTC ──────
+  -- Après calculate-scores (03:00), qui met à jour account_segments.account_count :
+  -- vérifie que ce cache reste cohérent avec segment_memberships et alerte Slack sinon.
+  PERFORM cron.schedule(
+    'reconciliation-daily',
+    '0 5 * * *',
+    format(
+      $$
+      SELECT net.http_post(
+        url     := %L,
+        headers := %L::jsonb,
+        body    := '{}'::jsonb
+      )
+      $$,
+      v_url || '/functions/v1/reconciliation-check',
+      jsonb_build_object('Content-Type', 'application/json', 'Authorization', 'Bearer ' || v_key)::text
+    )
+  );
+
   -- ── Job 4 : churn-alert quotidien — 06:00 UTC ─────────────
   -- Après calculate-scores (03:00) : alerte si comptes churn_risk >= 70 mis à jour dans les 24h
   PERFORM cron.schedule(
@@ -114,7 +134,7 @@ BEGIN
     )
   );
 
-  RAISE NOTICE 'Cron jobs créés : sync-stripe-all-orgs (02:00), calculate-scores-safety (03:00), generate-insights-daily (04:00), churn-alert-daily (06:00), weekly-digest-monday (lun 07:00)';
+  RAISE NOTICE 'Cron jobs créés : sync-stripe-all-orgs (02:00), calculate-scores-safety (03:00), generate-insights-daily (04:00), reconciliation-daily (05:00), churn-alert-daily (06:00), weekly-digest-monday (lun 07:00)';
 END;
 $$;
 
@@ -125,6 +145,7 @@ WHERE jobname IN (
   'sync-stripe-all-orgs',
   'calculate-scores-safety',
   'generate-insights-daily',
+  'reconciliation-daily',
   'churn-alert-daily',
   'weekly-digest-monday'
 );
