@@ -4,10 +4,16 @@
 // pour chaque account, assigne les segments, et persiste
 // dans score_history + account_segments.
 //
-// Formules (CLAUDE.md) :
-//   Health  = (Usage×35%) + (Financial×25%) + (Engagement×20%) + (Contract×20%)
-//   Churn   = 100 - Health + facteurs additifs (capped 100)
-//   Expansion = (seat_usage_pct×60%) + (feature_ceiling×40%)
+// Scoring Engine V2 (model_version 'v3' — voir migration
+// 20260725000001_scoring_engine_v3.sql) :
+//   Health  = Σ(dimension_score × poids org) sur payment_health(35)/
+//             revenue_dynamics(35)/contract_renewal(30), dimensions
+//             disponibles uniquement — pas de renormalisation entre
+//             dimensions, pas de défaut 50 si donnée absente (S1/S4).
+//   Churn   = score additif de signaux de risque déterministes,
+//             découplé du Health Score (S5) — plus de "100 - health".
+//   Expansion = seat_usage_pct seul (via stripe_product_mappings),
+//             NULL explicite si non configuré — jamais de cap silencieux (S6).
 // ============================================================
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
@@ -18,31 +24,41 @@ import { acquireCronLock, releaseCronLock } from '../_shared/cron-lock.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import {
   type Account,
-  type UsageStats,
-  type HubspotData,
-  type InvoiceStatus,
   type SegmentType,
-  type SubscriptionStatus,
-  type SignalsAvailable,
+  type InvoiceRecord,
+  type MrrMovementRecord,
+  type ScoringWeights,
+  type SegmentInputV3,
+  type SegmentTypeV3,
+  type ChurnSignalInputs,
+  type ScoreBreakdown,
   SYSTEM_SEGMENT_TYPES,
-  calcUsageScore,
-  calcFinancialScore,
-  calcEngagementScore,
-  calcContractScore,
-  calcExpansionScore,
-  calcHealthScore,
-  calcChurnRiskScore,
-  determineSegmentTypes,
-  computeSignalsAvailable,
-  computeDataCompletenessPct,
+  DEFAULT_SCORING_WEIGHTS,
+  validateScoringWeights,
+  calcPaymentHealthDimension,
+  calcRevenueDynamicsDimension,
+  calcContractRenewalDimension,
+  calcHealthScoreV3,
+  calcChurnRiskV2,
+  buildChurnSignals,
+  countPaymentFailures90d,
+  calcExpansionScoreV2,
+  calcExpansionSignals,
+  determineSegmentTypesV3,
+  buildScoreBreakdown,
+  computeTrend30d,
 } from '../_shared/scoring.ts'
-import { generateNarratives } from '../_shared/score-narratives.ts'
+import { generateNarrativesV3 } from '../_shared/score-narratives.ts'
 
 // ── Types internes ──────────────────────────────────────────
 interface AccountWithCreatedAt extends Account {
   created_at: string
   stripe_customer_id?: string
-  expansion_score?: number
+  seat_count: number | null
+  billing_interval: string | null
+  contract_start_date: string | null
+  churn_risk_band?: 'low' | 'watch' | 'high' | null
+  health_score_status?: 'complete' | 'partial' | 'insufficient' | null
 }
 
 interface DispatchTask {
@@ -53,23 +69,53 @@ interface DispatchTask {
   hasOverdue: boolean
 }
 
+// Scoring Engine V2 (model_version 'v3') — 3 dimensions Stripe-only, plus
+// tous les champs "no data ≠ neutral" (S1) qui remplacent les anciens
+// defaults 50/100 déguisés en scores réels.
 interface ScoreResult {
-  health_score: number
+  health_score: number | null
+  health_score_status: 'complete' | 'partial' | 'insufficient'
+  health_score_max_points: number
+  health_score_band: 'healthy' | 'watch' | 'at_risk' | null
   churn_risk_score: number
-  expansion_score: number
-  product_usage_score: number
-  financial_score: number
-  engagement_score: number
-  contract_score: number
+  churn_risk_band: 'low' | 'watch' | 'high'
+  risk_signals_triggered: Array<{ code: string; label: string; severity: string; points: number }>
+  risk_signals_evaluated: number
+  expansion_score: number | null
+  expansion_score_status: 'available' | 'unavailable'
+  expansion_unavailable_reason: string | null
+  payment_health_score: number | null
+  revenue_dynamics_score: number | null
+  contract_renewal_score: number | null
+  score_breakdown: ScoreBreakdown
+  trend_30d: 'up' | 'flat' | 'down'
 }
 
 // ── Helper : segment primaire (hors 'nouveaux' non-exclusif) ────────────────
-function getPrimarySegment(segTypes: SegmentType[]): string {
+function getPrimarySegment(segTypes: SegmentTypeV3[]): string {
   const nonNew = segTypes.filter((t) => t !== 'nouveaux')
   return (nonNew[0] ?? segTypes[0] ?? 'stables') as string
 }
 
+// Segment primaire "avant ce run", dérivé du dernier churn_risk_band/
+// health_score_status persistés sur accounts (pas de recalcul complet — on
+// ne rejoue pas l'historique des factures/mouvements passés). Un compte
+// jamais scoré (colonnes NULL) reçoit le sentinel 'jamais_score' plutôt que
+// le défaut déguisé `?? 50` de l'implémentation V1 — ce qui déclenche
+// naturellement le dispatch webhook/playbook au premier scoring réussi.
+function getPreviousPrimarySegment(account: AccountWithCreatedAt): string {
+  if ((account.mrr_cents ?? 0) === 0) return 'en_churn'
+  if (account.churn_risk_band === null || account.churn_risk_band === undefined) return 'jamais_score'
+  if (account.churn_risk_band === 'high') return 'en_danger_critique'
+  if (account.churn_risk_band === 'watch') return 'a_risque_leger'
+  return 'stables'
+}
+
 // ── Segment definitions (mirrored in migration) ─────────────
+// 'en_expansion' n'est plus assigné par determineSegmentTypesV3 (fusionné
+// dans 'champions', voir scoring.ts) mais la définition reste ici pour ne
+// pas casser un éventuel lien existant depuis account_segments — la ligne
+// n'accumulera simplement plus jamais de nouveaux memberships.
 const SEGMENT_DEFINITIONS: Array<{
   segment_name: string
   segment_type: SegmentType
@@ -77,14 +123,15 @@ const SEGMENT_DEFINITIONS: Array<{
   criteria: Record<string, unknown>
   description: string
 }> = [
-  { segment_name: 'Champions', segment_type: 'champions', priority: 'high', criteria: { health_score_gte: 80 }, description: 'Accounts in excellent health' },
-  { segment_name: 'Expanding', segment_type: 'en_expansion', priority: 'medium', criteria: { expansion_score_gte: 70, health_score_gte: 60 }, description: 'Accounts with expansion potential' },
-  { segment_name: 'Stable', segment_type: 'stables', priority: 'low', criteria: { health_score_gte: 40, churn_risk_lt: 50 }, description: 'Stable accounts with no risk' },
-  { segment_name: 'Slightly at Risk', segment_type: 'a_risque_leger', priority: 'medium', criteria: { churn_risk_gte: 50, churn_risk_lt: 70 }, description: 'Accounts showing signs of risk' },
-  { segment_name: 'Critical Danger', segment_type: 'en_danger_critique', priority: 'critical', criteria: { churn_risk_gte: 70 }, description: 'Accounts in imminent danger of churning' },
+  { segment_name: 'Champions', segment_type: 'champions', priority: 'high', criteria: { health_score_band: 'healthy', has_expansion_signal: true }, description: 'Accounts in excellent health with active expansion signals' },
+  { segment_name: 'Expanding', segment_type: 'en_expansion', priority: 'medium', criteria: { retired_v3: true }, description: '[Retired in Scoring V2 — merged into Champions]' },
+  { segment_name: 'Stable', segment_type: 'stables', priority: 'low', criteria: { churn_risk_band: 'low' }, description: 'Stable accounts with no risk' },
+  { segment_name: 'Slightly at Risk', segment_type: 'a_risque_leger', priority: 'medium', criteria: { churn_risk_band: 'watch' }, description: 'Accounts showing signs of risk' },
+  { segment_name: 'Critical Danger', segment_type: 'en_danger_critique', priority: 'critical', criteria: { churn_risk_band: 'high' }, description: 'Accounts in imminent danger of churning' },
   { segment_name: 'Unpaid', segment_type: 'impayes', priority: 'critical', criteria: { has_overdue_invoices: true }, description: 'Accounts with overdue invoices' },
   { segment_name: 'Churned', segment_type: 'en_churn', priority: 'critical', criteria: { mrr_cents_eq: 0 }, description: 'Accounts that have churned' },
   { segment_name: 'New (< 90d)', segment_type: 'nouveaux', priority: 'low', criteria: { days_since_creation_lt: 90 }, description: 'Accounts created less than 90 days ago' },
+  { segment_name: 'Insufficient Data', segment_type: 'donnees_insuffisantes', priority: 'medium', criteria: { health_score_status: 'insufficient' }, description: 'Accounts with less than 50% of health score dimensions available — never appears alongside another health segment' },
 ]
 
 // ── Ensure system segments exist for an org ──────────────────
@@ -137,148 +184,270 @@ async function ensureSystemSegments(
 const SCORING_BATCH_SIZE = 500
 const MAX_BATCHES = 200 // Safety guard: 200 * 500 = 100k accounts max per org
 
-const DEFAULT_USAGE: UsageStats = { login_count: 0, feature_count: 0, total_events: 0, distinct_features: 0, days_active: 0 }
-const DEFAULT_INVOICE: InvoiceStatus = { has_overdue: false, overdue_count: 0 }
-const DEFAULT_SUBSCRIPTION_STATUS: SubscriptionStatus = { hasAny: false }
-const MODEL_VERSION = 'v2-explicit-no-data'
+const MODEL_VERSION = 'v3' // Scoring Engine V2 (produit) — voir migration 20260725000001
 
-// ── Pre-fetch scoring data for a batch of accounts (4 parallel queries instead of 4N) ──
+interface SubscriptionInfo {
+  status: string
+  stripe_price_id: string | null
+}
+
+interface SeatMapping {
+  seat_limit: number | null
+  unlimited_seats: boolean
+}
+
+// ── Pre-fetch scoring data for a batch of accounts (parallel bulk queries instead of N+1) ──
 async function prefetchScoringData(
   supabase: SupabaseClient,
   accountIds: string[],
 ): Promise<{
-  usageMap: Map<string, UsageStats>
-  hubspotMap: Map<string, HubspotData | null>
-  invoiceStatusMap: Map<string, InvoiceStatus>
+  invoices90dMap: Map<string, InvoiceRecord[]>
+  invoices12moMap: Map<string, InvoiceRecord[]>
+  movements6moMap: Map<string, MrrMovementRecord[]>
+  subscriptionsMap: Map<string, SubscriptionInfo[]>
+  mrr3moAgoMap: Map<string, number>
+  healthScore30dAgoMap: Map<string, number>
+  overdueCountMap: Map<string, number>
   overdueAmountMap: Map<string, number>
-  subscriptionAccountIds: Set<string>
 }> {
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]
+  const now = new Date()
+  const ninetyDaysAgo = new Date(now.getTime() - 90 * 86400000).toISOString().split('T')[0]
+  const twelveMonthsAgo = new Date(now.getTime() - 365 * 86400000).toISOString().split('T')[0]
+  const sixMonthsAgo = new Date(now.getTime() - 182 * 86400000).toISOString().split('T')[0]
+  // Fenêtre de snapshot "il y a 3 mois" tolérante (83-97j) : le run quotidien
+  // ne tombe pas forcément exactement 90j avant aujourd'hui pour un compte donné.
+  const snapshot3moStart = new Date(now.getTime() - 97 * 86400000).toISOString().split('T')[0]
+  const snapshot3moEnd = new Date(now.getTime() - 83 * 86400000).toISOString().split('T')[0]
+  // Fenêtre "il y a 30 jours" tolérante (27-33j) pour trend_30d (S8).
+  const snapshot30dStart = new Date(now.getTime() - 33 * 86400000).toISOString().split('T')[0]
+  const snapshot30dEnd = new Date(now.getTime() - 27 * 86400000).toISOString().split('T')[0]
 
-  const [usageResult, hubspotResult, invoiceResult, subscriptionResult] = await Promise.all([
-    supabase
-      .from('usage_events')
-      .select('account_id, event_type, feature_name, event_count, event_date')
-      .in('account_id', accountIds)
-      .gte('event_date', thirtyDaysAgo)
-      .limit(50000),
-    supabase
-      .from('hubspot_companies')
-      .select('account_id, nps_score, open_ticket_count, open_deal_count, last_meeting_date')
-      .in('account_id', accountIds),
+  const [invoices12moResult, movementsResult, subscriptionsResult, snapshot3moResult, snapshot30dResult] = await Promise.all([
     supabase
       .from('invoices')
-      .select('account_id, amount_cents')
+      .select('account_id, status, due_date, paid_at, invoice_date, amount_cents')
       .in('account_id', accountIds)
-      .in('status', ['open', 'uncollectible']),
-    // Existence uniquement — savoir si le compte a JAMAIS eu une subscription
-    // Stripe, pour distinguer "signal manquant" de "mrr=0 réel" dans
-    // calcFinancialScore (v2-explicit-no-data).
+      .gte('invoice_date', twelveMonthsAgo)
+      .limit(50000),
+    supabase
+      .from('mrr_movements')
+      .select('account_id, movement_type, amount_cents, movement_date')
+      .in('account_id', accountIds)
+      .gte('movement_date', sixMonthsAgo)
+      .limit(50000),
     supabase
       .from('subscriptions')
-      .select('account_id')
+      .select('account_id, status, stripe_price_id')
       .in('account_id', accountIds)
       .limit(50000),
+    supabase
+      .from('score_history')
+      .select('account_id, mrr_cents, snapshot_date')
+      .in('account_id', accountIds)
+      .gte('snapshot_date', snapshot3moStart)
+      .lte('snapshot_date', snapshot3moEnd)
+      .order('snapshot_date', { ascending: true }),
+    supabase
+      .from('score_history')
+      .select('account_id, health_score, snapshot_date')
+      .in('account_id', accountIds)
+      .gte('snapshot_date', snapshot30dStart)
+      .lte('snapshot_date', snapshot30dEnd)
+      .order('snapshot_date', { ascending: true }),
   ])
 
-  const subscriptionAccountIds = new Set<string>(
-    (subscriptionResult.data ?? []).map((row: { account_id: string }) => row.account_id),
-  )
-
-  // Build usage stats per account
-  const usageMap = new Map<string, UsageStats>()
-  if (usageResult.data) {
-    const grouped = new Map<string, Array<Record<string, unknown>>>()
-    for (const row of usageResult.data) {
-      const list = grouped.get(row.account_id) ?? []
-      list.push(row)
-      grouped.set(row.account_id, list)
-    }
-    for (const [accountId, rows] of grouped) {
-      const stats: UsageStats = { login_count: 0, feature_count: 0, total_events: 0, distinct_features: 0, days_active: 0 }
-      const features = new Set<string>()
-      const dates = new Set<string>()
-      for (const row of rows) {
-        const count = (row.event_count as number) ?? 1
-        stats.total_events += count
-        if (row.event_type === 'login') stats.login_count += count
-        if (row.event_type === 'feature_used') {
-          stats.feature_count += count
-          if (row.feature_name) features.add(row.feature_name as string)
-        }
-        if (row.event_date) dates.add(row.event_date as string)
-      }
-      stats.distinct_features = features.size
-      stats.days_active = dates.size
-      usageMap.set(accountId, stats)
-    }
-  }
-
-  // Build hubspot data map
-  const hubspotMap = new Map<string, HubspotData | null>()
-  if (hubspotResult.data) {
-    for (const row of hubspotResult.data) {
-      hubspotMap.set(row.account_id, row as unknown as HubspotData)
-    }
-  }
-
-  // Build invoice status map + overdue amount map
-  const invoiceStatusMap = new Map<string, InvoiceStatus>()
+  const invoices90dMap = new Map<string, InvoiceRecord[]>()
+  const invoices12moMap = new Map<string, InvoiceRecord[]>()
+  const overdueCountMap = new Map<string, number>()
   const overdueAmountMap = new Map<string, number>()
-  if (invoiceResult.data) {
-    const counts = new Map<string, number>()
-    const amounts = new Map<string, number>()
-    for (const row of invoiceResult.data) {
-      counts.set(row.account_id, (counts.get(row.account_id) ?? 0) + 1)
-      amounts.set(row.account_id, (amounts.get(row.account_id) ?? 0) + (row.amount_cents ?? 0))
+
+  for (const row of (invoices12moResult.data ?? [])) {
+    const rec: InvoiceRecord = {
+      status: row.status,
+      due_date: row.due_date,
+      paid_at: row.paid_at,
+      invoice_date: row.invoice_date,
     }
-    for (const [accountId, count] of counts) {
-      invoiceStatusMap.set(accountId, { has_overdue: true, overdue_count: count })
-      overdueAmountMap.set(accountId, amounts.get(accountId) ?? 0)
+    const list12mo = invoices12moMap.get(row.account_id) ?? []
+    list12mo.push(rec)
+    invoices12moMap.set(row.account_id, list12mo)
+
+    if (row.invoice_date >= ninetyDaysAgo) {
+      const list90d = invoices90dMap.get(row.account_id) ?? []
+      list90d.push(rec)
+      invoices90dMap.set(row.account_id, list90d)
+    }
+
+    if ((row.status === 'open' || row.status === 'uncollectible') && row.due_date && row.due_date < now.toISOString().split('T')[0]) {
+      overdueCountMap.set(row.account_id, (overdueCountMap.get(row.account_id) ?? 0) + 1)
+      overdueAmountMap.set(row.account_id, (overdueAmountMap.get(row.account_id) ?? 0) + (row.amount_cents ?? 0))
     }
   }
 
-  return { usageMap, hubspotMap, invoiceStatusMap, overdueAmountMap, subscriptionAccountIds }
+  const movements6moMap = new Map<string, MrrMovementRecord[]>()
+  for (const row of (movementsResult.data ?? [])) {
+    const list = movements6moMap.get(row.account_id) ?? []
+    list.push({ movement_type: row.movement_type, amount_cents: row.amount_cents, movement_date: row.movement_date })
+    movements6moMap.set(row.account_id, list)
+  }
+
+  const subscriptionsMap = new Map<string, SubscriptionInfo[]>()
+  for (const row of (subscriptionsResult.data ?? [])) {
+    const list = subscriptionsMap.get(row.account_id) ?? []
+    list.push({ status: row.status, stripe_price_id: row.stripe_price_id })
+    subscriptionsMap.set(row.account_id, list)
+  }
+
+  // Premier snapshot dans la fenêtre 83-97j par compte = "MRR il y a 3 mois".
+  const mrr3moAgoMap = new Map<string, number>()
+  for (const row of (snapshot3moResult.data ?? [])) {
+    if (!mrr3moAgoMap.has(row.account_id) && row.mrr_cents !== null) {
+      mrr3moAgoMap.set(row.account_id, row.mrr_cents)
+    }
+  }
+
+  // Premier snapshot dans la fenêtre 27-33j par compte = "health_score il y a 30 jours" (S8 trend_30d).
+  const healthScore30dAgoMap = new Map<string, number>()
+  for (const row of (snapshot30dResult.data ?? [])) {
+    if (!healthScore30dAgoMap.has(row.account_id) && row.health_score !== null) {
+      healthScore30dAgoMap.set(row.account_id, row.health_score)
+    }
+  }
+
+  return { invoices90dMap, invoices12moMap, movements6moMap, subscriptionsMap, mrr3moAgoMap, healthScore30dAgoMap, overdueCountMap, overdueAmountMap }
+}
+
+// ── Seat usage % via stripe_product_mappings (S6 — jamais de cap silencieux) ──
+function computeSeatUsagePct(
+  seatCount: number | null,
+  activePriceId: string | null,
+  mappingsByPriceId: Map<string, SeatMapping>,
+): { seatUsagePct: number | null; reason: string | null } {
+  if (!activePriceId) return { seatUsagePct: null, reason: 'seat_data_not_configured' }
+  const mapping = mappingsByPriceId.get(activePriceId)
+  if (!mapping) return { seatUsagePct: null, reason: 'seat_data_not_configured' }
+  if (mapping.unlimited_seats) return { seatUsagePct: null, reason: 'unlimited_plan_no_ceiling' }
+  if (!mapping.seat_limit || mapping.seat_limit <= 0) return { seatUsagePct: null, reason: 'seat_data_not_configured' }
+  if (seatCount === null) return { seatUsagePct: null, reason: 'seat_data_not_configured' }
+  return { seatUsagePct: Math.min(100, (seatCount / mapping.seat_limit) * 100), reason: null }
 }
 
 // ── Scoring d'un compte (pure — no DB calls) ────────────────────
-function scoreAccountPure(
-  account: Account,
-  maxMrrCents: number,
-  usage: UsageStats,
-  hubspot: HubspotData | null,
-  invoiceStatus: InvoiceStatus,
-  subscriptionStatus: SubscriptionStatus,
-): ScoreResult & {
-  invoiceStatus: InvoiceStatus
-  daysActive: number
-  signalsAvailable: SignalsAvailable
-  dataCompletenessPct: number
-} {
-  const usageScore = calcUsageScore(usage)
-  const financialScore = calcFinancialScore(account.mrr_cents, invoiceStatus, maxMrrCents, subscriptionStatus)
-  const engagementScore = calcEngagementScore(hubspot)
-  const contractScore = calcContractScore(account)
+interface ScoreAccountInput {
+  account: AccountWithCreatedAt
+  invoices90d: InvoiceRecord[]
+  invoices12mo: InvoiceRecord[]
+  movements6mo: MrrMovementRecord[]
+  mrr3moAgoCents: number | null
+  healthScore30dAgo: number | null
+  subscriptions: SubscriptionInfo[]
+  seatUsagePct: number | null
+  seatUsageUnavailableReason: string
+  weights: ScoringWeights
+}
 
-  const healthScore = calcHealthScore(usageScore, financialScore, engagementScore, contractScore)
-  const churnRiskScore = calcChurnRiskScore(healthScore, invoiceStatus, usage.days_active, account)
-  const expansionScore = calcExpansionScore(account, usage)
+interface ScoreAccountOutput {
+  scores: ScoreResult
+  expansionSignals: { has_upgrade_event: boolean; has_expansion_mrr_event: boolean; invoice_growth_detected: boolean }
+  hasOverdueInvoices: boolean
+  subscriptionCanceled: boolean
+}
 
-  const signalsAvailable = computeSignalsAvailable(usage, hubspot, account, subscriptionStatus)
-  const dataCompletenessPct = computeDataCompletenessPct(signalsAvailable)
+function scoreAccountPure(input: ScoreAccountInput, now: number = Date.now()): ScoreAccountOutput {
+  const { account, invoices90d, invoices12mo, movements6mo, mrr3moAgoCents, healthScore30dAgo, subscriptions, seatUsagePct, seatUsageUnavailableReason, weights } = input
+  const mrrCurrentCents = account.mrr_cents ?? 0
+
+  // ── Dimensions ──
+  const paymentHealth = calcPaymentHealthDimension({ invoices90d, invoices12mo }, now)
+  const revenueDynamics = calcRevenueDynamicsDimension({ mrrCurrentCents, mrr3moAgoCents, movements6mo })
+  const contractRenewal = calcContractRenewalDimension(
+    {
+      billingInterval: account.billing_interval === 'monthly' || account.billing_interval === 'annual' ? account.billing_interval : null,
+      contractEndDate: account.contract_end_date,
+      contractStartDate: account.contract_start_date,
+    },
+    now,
+  )
+
+  const health = calcHealthScoreV3({ paymentHealth, revenueDynamics, contractRenewal }, weights)
+  const scoreBreakdown = buildScoreBreakdown({ paymentHealth, revenueDynamics, contractRenewal }, weights)
+  const trend30d = computeTrend30d(health.health_score_points, healthScore30dAgo)
+
+  // ── Churn risk signals ──
+  const overdue = invoices90d.filter((i) => (i.status === 'open' || i.status === 'uncollectible') && i.due_date)
+  const overdueDays = overdue.map((i) => Math.floor((now - new Date(i.due_date as string).getTime()) / 86400000)).filter((d) => d > 0)
+  const hasOverdue15Plus = overdueDays.some((d) => d >= 15)
+  const hasOverdueUnder15 = overdueDays.some((d) => d > 0 && d < 15)
+  const hasOverdueInvoices = hasOverdue15Plus || hasOverdueUnder15
+
+  const movements3mo = movements6mo.filter((m) => (now - new Date(m.movement_date).getTime()) <= 91 * 86400000)
+  const contraction3moTotal = movements3mo.filter((m) => m.movement_type === 'contraction').reduce((s, m) => s + Math.abs(m.amount_cents), 0)
+  const contraction20PctPlus = mrrCurrentCents > 0 ? (contraction3moTotal / mrrCurrentCents) >= 0.20 : contraction3moTotal > 0
+  const contraction6moTotal = movements6mo.filter((m) => m.movement_type === 'contraction').reduce((s, m) => s + Math.abs(m.amount_cents), 0)
+  const hasContraction6mo = contraction6moTotal > 0
+
+  const { total: failures90d } = invoices90d.length > 0 ? countPaymentFailures90d(invoices90d) : { total: null as unknown as number }
+  const paymentFailures2Plus = invoices90d.length > 0 ? failures90d >= 2 : null
+
+  const tenureMonths = account.contract_start_date
+    ? (now - new Date(account.contract_start_date).getTime()) / (30 * 86400000)
+    : null
+  const isMonthly = account.billing_interval === 'monthly'
+  const isAnnual = account.billing_interval === 'annual'
+  const isMonthlyAndYoung = account.billing_interval ? (isMonthly && tenureMonths !== null ? tenureMonths < 6 : (isMonthly ? null : false)) : null
+
+  let annualRenewalSoonWithContraction: boolean | null = null
+  if (isAnnual && account.contract_end_date) {
+    const daysUntilRenewal = Math.floor((new Date(account.contract_end_date).getTime() - now) / 86400000)
+    annualRenewalSoonWithContraction = daysUntilRenewal >= 0 && daysUntilRenewal <= 30 && hasContraction6mo
+  } else if (isAnnual && !account.contract_end_date) {
+    annualRenewalSoonWithContraction = null
+  } else {
+    annualRenewalSoonWithContraction = false
+  }
+
+  const hasDowngrade6mo = movements6mo.some((m) => m.movement_type === 'contraction')
+
+  const signalInputs: ChurnSignalInputs = {
+    hasInvoiceOverdue15Plus: invoices90d.length > 0 ? hasOverdue15Plus : null,
+    contractionMrr20PctPlus3mo: movements6mo.length > 0 || mrrCurrentCents > 0 ? contraction20PctPlus : null,
+    paymentFailures2PlusIn90d: paymentFailures2Plus,
+    isMonthlyAndTenureUnder6mo: isMonthlyAndYoung,
+    annualRenewal30dPlusWithContraction6mo: annualRenewalSoonWithContraction,
+    hasDowngrade6mo: movements6mo.length > 0 ? hasDowngrade6mo : null,
+    hasInvoiceOverdueUnder15: invoices90d.length > 0 ? hasOverdueUnder15 : null,
+  }
+
+  const churn = calcChurnRiskV2(buildChurnSignals(signalInputs))
+
+  // ── Expansion ──
+  const expansion = calcExpansionScoreV2(seatUsagePct, seatUsageUnavailableReason)
+  const expansionSignals = calcExpansionSignals(movements6mo, mrrCurrentCents, mrr3moAgoCents)
+
+  const subscriptionCanceled = subscriptions.length > 0 && subscriptions.every((s) => s.status === 'canceled')
 
   return {
-    health_score: Math.max(0, Math.min(100, healthScore)),
-    churn_risk_score: Math.max(0, Math.min(100, churnRiskScore)),
-    expansion_score: Math.max(0, Math.min(100, expansionScore)),
-    product_usage_score: Math.max(0, Math.min(100, usageScore)),
-    financial_score: Math.max(0, Math.min(100, financialScore)),
-    engagement_score: Math.max(0, Math.min(100, engagementScore)),
-    contract_score: Math.max(0, Math.min(100, contractScore)),
-    invoiceStatus,
-    daysActive: usage.days_active,
-    signalsAvailable,
-    dataCompletenessPct,
+    scores: {
+      health_score: health.health_score_points,
+      health_score_status: health.health_score_status,
+      health_score_max_points: health.health_score_max_points,
+      health_score_band: health.health_score_band,
+      churn_risk_score: churn.churn_risk_score,
+      churn_risk_band: churn.churn_risk_band,
+      risk_signals_triggered: churn.risk_signals_triggered,
+      risk_signals_evaluated: churn.risk_signals_evaluated,
+      expansion_score: expansion.expansion_score,
+      expansion_score_status: expansion.expansion_score_status,
+      expansion_unavailable_reason: expansion.expansion_unavailable_reason,
+      payment_health_score: paymentHealth.score,
+      revenue_dynamics_score: revenueDynamics.score,
+      contract_renewal_score: contractRenewal.score,
+      score_breakdown: scoreBreakdown,
+      trend_30d: trend30d,
+    },
+    expansionSignals,
+    hasOverdueInvoices,
+    subscriptionCanceled,
   }
 }
 
@@ -288,39 +457,34 @@ async function assignSegments(
   organizationId: string,
   accounts: AccountWithCreatedAt[],
   accountScores: Map<string, ScoreResult>,
-  accountInvoiceStatus: Map<string, InvoiceStatus>,
-): Promise<{ segmentsAssigned: number }> {
+  accountSegmentInputs: Map<string, SegmentInputV3>,
+): Promise<{ segmentsAssigned: number; segmentsByAccount: Map<string, SegmentTypeV3[]> }> {
   const segmentMap = await ensureSystemSegments(supabase, organizationId)
   const systemSegmentIds = Array.from(segmentMap.values())
 
-  if (systemSegmentIds.length === 0) return { segmentsAssigned: 0 }
+  if (systemSegmentIds.length === 0) return { segmentsAssigned: 0, segmentsByAccount: new Map() }
 
   // Build new memberships (upsert to avoid delete+insert visibility gap)
   const memberships: Array<Record<string, unknown>> = []
-  const segmentAggs: Record<string, { count: number; mrrTotal: number; healthSum: number; churnSum: number }> = {}
+  const segmentAggs: Record<string, { count: number; mrrTotal: number; healthSum: number; healthCount: number; churnSum: number }> = {}
+  const segmentsByAccount = new Map<string, SegmentTypeV3[]>()
 
   for (const segType of SYSTEM_SEGMENT_TYPES) {
-    segmentAggs[segType] = { count: 0, mrrTotal: 0, healthSum: 0, churnSum: 0 }
+    segmentAggs[segType] = { count: 0, mrrTotal: 0, healthSum: 0, healthCount: 0, churnSum: 0 }
   }
 
   const now = new Date().toISOString()
 
   for (const account of accounts) {
     const scores = accountScores.get(account.id)
-    if (!scores) continue
+    const segInput = accountSegmentInputs.get(account.id)
+    if (!scores || !segInput) continue
 
-    const invoiceStatus = accountInvoiceStatus.get(account.id)
-    const hasOverdue = invoiceStatus?.has_overdue ?? false
-
-    const segTypes = determineSegmentTypes(
-      scores,
-      account.mrr_cents ?? 0,
-      hasOverdue,
-      account.created_at,
-    )
+    const segTypes = determineSegmentTypesV3(segInput)
+    segmentsByAccount.set(account.id, segTypes)
 
     for (const segType of segTypes) {
-      const segId = segmentMap.get(segType)
+      const segId = segmentMap.get(segType as SegmentType)
       if (!segId) continue
 
       memberships.push({
@@ -333,10 +497,16 @@ async function assignSegments(
         last_evaluated_at: now,
       })
 
-      segmentAggs[segType].count++
-      segmentAggs[segType].mrrTotal += account.mrr_cents ?? 0
-      segmentAggs[segType].healthSum += scores.health_score
-      segmentAggs[segType].churnSum += scores.churn_risk_score
+      const agg = segmentAggs[segType]
+      agg.count++
+      agg.mrrTotal += account.mrr_cents ?? 0
+      agg.churnSum += scores.churn_risk_score
+      // health_score peut être null (status='insufficient') — exclu de la
+      // moyenne plutôt que compté comme 0 (S1 : no data ≠ neutral data).
+      if (scores.health_score !== null) {
+        agg.healthSum += scores.health_score
+        agg.healthCount++
+      }
     }
   }
 
@@ -394,14 +564,14 @@ async function assignSegments(
       .update({
         account_count: agg.count,
         mrr_total_cents: agg.mrrTotal,
-        avg_health_score: agg.count > 0 ? Math.round((agg.healthSum / agg.count) * 100) / 100 : null,
+        avg_health_score: agg.healthCount > 0 ? Math.round((agg.healthSum / agg.healthCount) * 100) / 100 : null,
         avg_churn_risk: agg.count > 0 ? Math.round((agg.churnSum / agg.count) * 100) / 100 : null,
         last_calculated_at: now,
       })
       .eq('id', segId)
   }
 
-  return { segmentsAssigned: memberships.length }
+  return { segmentsAssigned: memberships.length, segmentsByAccount }
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
@@ -471,20 +641,35 @@ Deno.serve(async (req: Request): Promise<Response> => {
       await logger.start()
 
       try {
-        // Récupérer le MRR max de l'org (pour normalisation relative)
-        const { data: maxMrrRow } = await supabase
-          .from('accounts')
-          .select('mrr_cents')
-          .eq('organization_id', organizationId)
-          .order('mrr_cents', { ascending: false })
-          .limit(1)
+        // Poids de scoring de l'org (S11) — fallback défaut produit si absent/non validé.
+        // (Le modèle v3 n'a plus besoin du MRR max de l'org : aucune des 3
+        // dimensions payment_health/revenue_dynamics/contract_renewal ne
+        // normalise par rapport au plus gros compte du portefeuille.)
+        const { data: orgWeightsRow } = await supabase
+          .from('organizations')
+          .select('scoring_weights')
+          .eq('id', organizationId)
           .maybeSingle()
 
-        const maxMrrCents = maxMrrRow?.mrr_cents || 1
+        const rawWeights = orgWeightsRow?.scoring_weights as ScoringWeights | undefined
+        const scoringWeights: ScoringWeights = rawWeights && validateScoringWeights(rawWeights)
+          ? rawWeights
+          : DEFAULT_SCORING_WEIGHTS
+
+        // Mapping seat_limit par stripe_price_id (S6) — fetch unique par org.
+        const { data: mappingRows } = await supabase
+          .from('stripe_product_mappings')
+          .select('stripe_price_id, seat_limit, unlimited_seats')
+          .eq('organization_id', organizationId)
+
+        const mappingsByPriceId = new Map<string, SeatMapping>()
+        for (const row of (mappingRows ?? [])) {
+          mappingsByPriceId.set(row.stripe_price_id, { seat_limit: row.seat_limit, unlimited_seats: row.unlimited_seats })
+        }
 
         // Scorer les accounts par batch paginé (évite OOM et timeout N+1)
         const accountScores = new Map<string, ScoreResult>()
-        const accountInvoiceStatus = new Map<string, InvoiceStatus>()
+        const accountSegmentInputs = new Map<string, SegmentInputV3>()
         const allAccounts: AccountWithCreatedAt[] = []
         const dispatchQueue: DispatchTask[] = []
         let batchOffset = 0
@@ -495,7 +680,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           batchCount++
           const { data: batch, error: batchError } = await supabase
             .from('accounts')
-            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, contract_start_date, billing_interval, health_score, churn_risk_score, expansion_score, stripe_customer_id, created_at')
+            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, contract_start_date, billing_interval, health_score, churn_risk_score, expansion_score, churn_risk_band, health_score_status, stripe_customer_id, created_at')
             .eq('organization_id', organizationId)
             .range(batchOffset, batchOffset + SCORING_BATCH_SIZE - 1)
 
@@ -517,102 +702,130 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
           allAccounts.push(...(batch as AccountWithCreatedAt[]))
 
-          // Pre-fetch all scoring data in 4 parallel bulk queries (instead of 4N sequential)
+          // Pre-fetch all scoring data in parallel bulk queries (instead of N+1)
           const batchIds = batch.map((a: { id: string }) => a.id)
-          const { usageMap, hubspotMap, invoiceStatusMap, overdueAmountMap, subscriptionAccountIds } = await prefetchScoringData(supabase, batchIds)
+          const { invoices90dMap, invoices12moMap, movements6moMap, subscriptionsMap, mrr3moAgoMap, healthScore30dAgoMap, overdueCountMap, overdueAmountMap } =
+            await prefetchScoringData(supabase, batchIds)
 
           // Score each account (pure — no DB calls)
           const historyRows: Array<Record<string, unknown>> = []
 
           for (const account of batch as AccountWithCreatedAt[]) {
             try {
-              const usage = usageMap.get(account.id) ?? DEFAULT_USAGE
-              const hubspot = hubspotMap.get(account.id) ?? null
-              const invoiceStatus = invoiceStatusMap.get(account.id) ?? DEFAULT_INVOICE
-              const subscriptionStatus: SubscriptionStatus = subscriptionAccountIds.has(account.id)
-                ? { hasAny: true }
-                : DEFAULT_SUBSCRIPTION_STATUS
+              const invoices90d = invoices90dMap.get(account.id) ?? []
+              const invoices12mo = invoices12moMap.get(account.id) ?? []
+              const movements6mo = movements6moMap.get(account.id) ?? []
+              const subscriptions = subscriptionsMap.get(account.id) ?? []
+              const mrr3moAgoCents = mrr3moAgoMap.get(account.id) ?? null
+              const healthScore30dAgo = healthScore30dAgoMap.get(account.id) ?? null
 
-              const result = scoreAccountPure(account, maxMrrCents, usage, hubspot, invoiceStatus, subscriptionStatus)
-              const scores: ScoreResult = {
-                health_score: result.health_score,
-                churn_risk_score: result.churn_risk_score,
-                expansion_score: result.expansion_score,
-                product_usage_score: result.product_usage_score,
-                financial_score: result.financial_score,
-                engagement_score: result.engagement_score,
-                contract_score: result.contract_score,
-              }
+              const activePriceId = subscriptions.find((s) => s.status === 'active' || s.status === 'past_due')?.stripe_price_id ?? null
+              const { seatUsagePct, reason: seatUsageUnavailableReason } = computeSeatUsagePct(account.seat_count, activePriceId, mappingsByPriceId)
 
-              accountScores.set(account.id, scores)
-              accountInvoiceStatus.set(account.id, result.invoiceStatus)
-
-              // Narratives déterministes (FR) — persistées pour accès direct du frontend
-              const narratives = generateNarratives({
-                health_score: scores.health_score,
-                financial_score: scores.financial_score,
-                product_usage_score: scores.product_usage_score,
-                engagement_score: scores.engagement_score,
-                contract_score: scores.contract_score,
-                mrr_cents: account.mrr_cents ?? 0,
-                contract_start_date: (account as Record<string, unknown>).contract_start_date as string | null ?? null,
-                contract_end_date: account.contract_end_date ?? null,
-                billing_interval: (account as Record<string, unknown>).billing_interval as string | null ?? null,
-                overdue_count: invoiceStatus.overdue_count,
-                overdue_amount_cents: overdueAmountMap.get(account.id) ?? 0,
-                total_events_30d: usage.total_events,
-                open_ticket_count: hubspot?.open_ticket_count ?? null,
-                last_meeting_date: hubspot?.last_meeting_date ?? null,
+              const { scores, expansionSignals, hasOverdueInvoices, subscriptionCanceled } = scoreAccountPure({
+                account,
+                invoices90d,
+                invoices12mo,
+                movements6mo,
+                mrr3moAgoCents,
+                healthScore30dAgo,
+                subscriptions,
+                seatUsagePct,
+                seatUsageUnavailableReason: seatUsageUnavailableReason ?? 'seat_data_not_configured',
+                weights: scoringWeights,
               })
 
-              const inputsMissing = (Object.entries(result.signalsAvailable) as Array<[string, boolean]>)
-                .filter(([, present]) => !present)
-                .map(([signal]) => signal)
+              accountScores.set(account.id, scores)
+
+              const hasExpansionSignal = expansionSignals.has_upgrade_event || expansionSignals.has_expansion_mrr_event || expansionSignals.invoice_growth_detected
+              const segInput: SegmentInputV3 = {
+                healthScoreStatus: scores.health_score_status,
+                healthScoreBand: scores.health_score_band,
+                churnRiskBand: scores.churn_risk_band,
+                hasExpansionSignal,
+                mrrCents: account.mrr_cents ?? 0,
+                hasOverdueInvoices,
+                subscriptionCanceled,
+                accountCreatedAt: account.created_at,
+              }
+              accountSegmentInputs.set(account.id, segInput)
+
+              // Narratives déterministes (EN) — persistées pour accès direct du frontend.
+              // usage_narrative/engagement_narrative ne sont plus régénérées (dimensions
+              // retirées du modèle v3) — omises de l'update ci-dessous, restent figées.
+              const overdueCount = overdueCountMap.get(account.id) ?? 0
+              const narratives = generateNarrativesV3({
+                health_score_points: scores.health_score,
+                health_score_status: scores.health_score_status,
+                payment_health_score: scores.payment_health_score,
+                revenue_dynamics_score: scores.revenue_dynamics_score,
+                contract_renewal_score: scores.contract_renewal_score,
+                mrr_cents: account.mrr_cents ?? 0,
+                overdue_count: overdueCount,
+                overdue_amount_cents: overdueAmountMap.get(account.id) ?? 0,
+                contract_end_date: account.contract_end_date ?? null,
+                billing_interval: account.billing_interval ?? null,
+              })
 
               historyRows.push({
                 organization_id: organizationId,
                 account_id: account.id,
                 snapshot_date: snapshotDate,
                 health_score: scores.health_score,
+                health_score_status: scores.health_score_status,
+                health_score_max_points: scores.health_score_max_points,
+                health_score_band: scores.health_score_band,
                 churn_risk_score: scores.churn_risk_score,
+                churn_risk_band: scores.churn_risk_band,
+                risk_signals_triggered: scores.risk_signals_triggered,
+                risk_signals_evaluated: scores.risk_signals_evaluated,
                 expansion_score: scores.expansion_score,
-                product_usage_score: scores.product_usage_score,
-                financial_score: scores.financial_score,
-                engagement_score: scores.engagement_score,
-                contract_score: scores.contract_score,
+                expansion_score_status: scores.expansion_score_status,
+                expansion_unavailable_reason: scores.expansion_unavailable_reason,
+                payment_health_score: scores.payment_health_score,
+                revenue_dynamics_score: scores.revenue_dynamics_score,
+                contract_renewal_score: scores.contract_renewal_score,
+                score_breakdown: scores.score_breakdown,
+                trend_30d: scores.trend_30d,
                 mrr_cents: account.mrr_cents ?? 0,
                 model_version: MODEL_VERSION,
-                signals_available: result.signalsAvailable,
-                data_completeness_pct: result.dataCompletenessPct,
-                inputs_missing: inputsMissing,
                 inputs_used: {
                   mrr_cents: account.mrr_cents ?? 0,
-                  has_subscription: subscriptionStatus.hasAny,
-                  overdue_count: invoiceStatus.overdue_count,
-                  total_events: usage.total_events,
-                  distinct_features: usage.distinct_features,
-                  days_active: usage.days_active,
-                  open_ticket_count: hubspot?.open_ticket_count ?? null,
-                  last_meeting_date: hubspot?.last_meeting_date ?? null,
+                  mrr_3mo_ago_cents: mrr3moAgoCents,
+                  overdue_count: overdueCount,
+                  invoices_90d: invoices90d.length,
+                  invoices_12mo: invoices12mo.length,
+                  movements_6mo: movements6mo.length,
+                  billing_interval: account.billing_interval ?? null,
                   contract_end_date: account.contract_end_date ?? null,
+                  contract_start_date: account.contract_start_date ?? null,
+                  seat_usage_pct: seatUsagePct,
                 },
               })
 
-              // Update account current scores + narratives
+              // Update account current scores + narratives (usage_narrative/
+              // engagement_narrative volontairement omis — dimensions retirées).
               const { error: updateError } = await supabase
                 .from('accounts')
                 .update({
                   health_score: scores.health_score,
+                  health_score_status: scores.health_score_status,
+                  health_score_max_points: scores.health_score_max_points,
+                  health_score_band: scores.health_score_band,
                   churn_risk_score: scores.churn_risk_score,
+                  churn_risk_band: scores.churn_risk_band,
+                  risk_signals_triggered: scores.risk_signals_triggered,
+                  risk_signals_evaluated: scores.risk_signals_evaluated,
                   expansion_score: scores.expansion_score,
-                  product_usage_score: scores.product_usage_score,
-                  financial_score: scores.financial_score,
-                  engagement_score: scores.engagement_score,
-                  contract_score: scores.contract_score,
+                  expansion_score_status: scores.expansion_score_status,
+                  expansion_unavailable_reason: scores.expansion_unavailable_reason,
+                  payment_health_score: scores.payment_health_score,
+                  revenue_dynamics_score: scores.revenue_dynamics_score,
+                  contract_renewal_score: scores.contract_renewal_score,
+                  score_breakdown: scores.score_breakdown,
+                  trend_30d: scores.trend_30d,
                   health_narrative: narratives.health_narrative,
                   financial_narrative: narratives.financial_narrative,
-                  usage_narrative: narratives.usage_narrative,
-                  engagement_narrative: narratives.engagement_narrative,
                   contract_narrative: narratives.contract_narrative,
                   scores_calculated_at: new Date().toISOString(),
                 })
@@ -634,29 +847,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
               accountsScored++
               logger.increment('records_processed')
 
-              // Détecter changement de segment ou seuil churn (pour dispatch outbound)
-              const hasOverdue = invoiceStatus.has_overdue
-              const oldSegTypes = determineSegmentTypes(
-                {
-                  health_score: account.health_score ?? 50,
-                  churn_risk_score: account.churn_risk_score ?? 50,
-                  expansion_score: account.expansion_score ?? 50,
-                },
-                account.mrr_cents ?? 0,
-                hasOverdue,
-                account.created_at,
-              )
-              const newSegTypes = determineSegmentTypes(
-                scores,
-                account.mrr_cents ?? 0,
-                hasOverdue,
-                account.created_at,
-              )
-              const oldSegment = getPrimarySegment(oldSegTypes)
+              // Détecter changement de segment ou seuil churn (pour dispatch outbound).
+              // Ancien état = dernier churn_risk_band/health_score_status persistés sur
+              // le compte (pas de défaut ?? 50 — un compte jamais scoré part du sentinel
+              // 'jamais_score', ce qui déclenche naturellement le dispatch au premier run).
+              const oldSegment = getPreviousPrimarySegment(account)
+              const newSegTypes = determineSegmentTypesV3(segInput)
               const newSegment = getPrimarySegment(newSegTypes)
 
-              if (oldSegment !== newSegment || scores.churn_risk_score >= 60) {
-                dispatchQueue.push({ account, scores, oldSegment, newSegment, hasOverdue })
+              // churn_risk_band (pas un seuil numérique hardcodé) : sous le
+              // modèle additif v3, churn_risk_score n'a plus la même
+              // distribution que l'ancien "100-health+additifs" — un seuil
+              // magique comme ">= 60" hérité du V1 serait mal calibré ici.
+              if (oldSegment !== newSegment || scores.churn_risk_band === 'high') {
+                dispatchQueue.push({ account, scores, oldSegment, newSegment, hasOverdue: hasOverdueInvoices })
               }
             } catch (err) {
               console.error(JSON.stringify({
@@ -760,7 +964,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             organizationId,
             allAccounts,
             accountScores,
-            accountInvoiceStatus,
+            accountSegmentInputs,
           )
           segmentsAssigned = segResult.segmentsAssigned
         } catch (err) {

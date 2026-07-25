@@ -158,9 +158,12 @@ async function syncInsights(
           description: candidate.description,
           recommended_action: candidate.recommended_action,
           priority: candidate.priority,
+          // confidence_score toujours null (S5) — règles déterministes, pas de
+          // probabilité. severity/signals (metadata) la remplacent.
           confidence_score: candidate.confidence_score,
           mrr_impact_cents: candidate.mrr_impact_cents,
           source_scores: candidate.source_scores,
+          metadata: { severity: candidate.severity, signals: candidate.signals },
           ai_model_version: 'rules-v1',
         })
         .eq('id', existingId)
@@ -191,6 +194,7 @@ async function syncInsights(
           confidence_score: candidate.confidence_score,
           mrr_impact_cents: candidate.mrr_impact_cents,
           source_scores: candidate.source_scores,
+          metadata: { severity: candidate.severity, signals: candidate.signals },
           status: 'active',
           ai_model_version: 'rules-v1',
         })

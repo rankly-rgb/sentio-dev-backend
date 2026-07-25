@@ -7,7 +7,8 @@
 //   1. en_danger_critique → churn_prevention
 //   2. impayes            → payment_recovery
 //   3. en_churn           → winback
-//   4. en_expansion       → expansion
+//   4. champions          → expansion (Scoring V2 : champions implique déjà
+//                            des expansion_signals actifs, voir scoring.ts)
 //   5. a_risque_leger     → health_monitoring (si >= 3 comptes)
 //   6. renewal_alert insights actifs → renewal
 //
@@ -67,7 +68,11 @@ const SUGGESTION_RULES: SuggestionRule[] = [
     suggested_title: 'Winback Playbook',
   },
   {
-    segment_type: 'en_expansion',
+    // Scoring Engine V2 (2026-07-25) : 'en_expansion' n'est plus assigné par
+    // calculate-scores (fusionné dans 'champions', qui exige désormais des
+    // expansion_signals actifs — voir _shared/scoring.ts determineSegmentTypesV3).
+    // Repointé sur 'champions' pour continuer à alimenter cette suggestion.
+    segment_type: 'champions',
     template_category: 'expansion',
     min_accounts: 1,
     reason: (n) => `${n} account(s) with high expansion potential identified.`,

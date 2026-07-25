@@ -8,10 +8,41 @@ interface CriticalAccount {
   display_name: string | null
   mrr_cents: number
   churn_risk_score: number
-  health_score: number
+  health_score: number | null
 }
 
-// ── Mirror helpers ────────────────────────────────────────────
+interface TriggeredSignal {
+  code: string
+  label: string
+  severity: 'CRITIQUE' | 'MAJEUR' | 'MINEUR'
+  points: number
+}
+
+interface AlertEligibilityInput {
+  churnRiskBand: 'low' | 'watch' | 'high' | null
+  lastChurnAlertAt: string | null
+  lastAlertSignalCodes: string[] | null
+  riskSignalsTriggered: TriggeredSignal[]
+  now: number
+}
+
+const COOLDOWN_MS = 14 * 24 * 60 * 60 * 1000
+
+// ── Mirror helpers (churn-alert/index.ts — S9) ────────────────
+
+function isEligibleForChurnAlert(input: AlertEligibilityInput): boolean {
+  if (input.churnRiskBand !== 'high') return false
+  if (!input.lastChurnAlertAt) return true
+
+  const elapsed = input.now - new Date(input.lastChurnAlertAt).getTime()
+  if (elapsed >= COOLDOWN_MS) return true
+
+  const previousCodes = new Set(input.lastAlertSignalCodes ?? [])
+  const hasNewCritical = input.riskSignalsTriggered.some(
+    (s) => s.severity === 'CRITIQUE' && !previousCodes.has(s.code),
+  )
+  return hasNewCritical
+}
 
 function maskCustomerId(stripeCustomerId: string): string {
   return 'cus_***' + stripeCustomerId.slice(-3)
@@ -26,11 +57,12 @@ function buildChurnAlertEmail(accounts: CriticalAccount[]): string {
   const rows = accounts.map(a => {
     const label = formatAccountLabel(a)
     const mrr = Math.round(a.mrr_cents / 100)
+    const healthLabel = a.health_score === null ? 'N/A' : `${a.health_score}/100`
     return `
     <tr>
       <td>${label}</td>
       <td>${mrr}€/mo</td>
-      <td>${a.health_score}/100</td>
+      <td>${healthLabel}</td>
       <td>${a.churn_risk_score}/100</td>
       <td><a href="https://app.sentioapp.io/dashboard/accounts/${a.id}">View →</a></td>
     </tr>`
@@ -175,5 +207,61 @@ describe('no email if the list is empty', () => {
     const html = buildChurnAlertEmail([])
     expect(html).toContain('0 account')
     expect(html).toContain('<tbody></tbody>')
+  })
+})
+
+describe('buildChurnAlertEmail — null health_score (health_score_status=insufficient)', () => {
+  it('renders N/A instead of "null/100"', () => {
+    const html = buildChurnAlertEmail([{ ...baseAccount, health_score: null }])
+    expect(html).toContain('N/A')
+    expect(html).not.toContain('null/100')
+  })
+})
+
+describe('isEligibleForChurnAlert (S9 triage)', () => {
+  const now = new Date('2026-07-25T00:00:00Z').getTime()
+  const criticalSignal: TriggeredSignal = { code: 'invoice_overdue_15d', label: 'x', severity: 'CRITIQUE', points: 35 }
+  const minorSignal: TriggeredSignal = { code: 'plan_downgrade_6mo', label: 'x', severity: 'MINEUR', points: 10 }
+
+  it('returns false when band is not high', () => {
+    expect(isEligibleForChurnAlert({
+      churnRiskBand: 'watch', lastChurnAlertAt: null, lastAlertSignalCodes: null, riskSignalsTriggered: [], now,
+    })).toBe(false)
+  })
+
+  it('returns true on first-ever alert (never alerted before)', () => {
+    expect(isEligibleForChurnAlert({
+      churnRiskBand: 'high', lastChurnAlertAt: null, lastAlertSignalCodes: null, riskSignalsTriggered: [criticalSignal], now,
+    })).toBe(true)
+  })
+
+  it('returns false within the 14-day cooldown with no new CRITIQUE signal', () => {
+    const lastAlert = new Date(now - 5 * 86400000).toISOString()
+    expect(isEligibleForChurnAlert({
+      churnRiskBand: 'high', lastChurnAlertAt: lastAlert, lastAlertSignalCodes: ['invoice_overdue_15d'], riskSignalsTriggered: [criticalSignal], now,
+    })).toBe(false)
+  })
+
+  it('returns true once the 14-day cooldown has elapsed', () => {
+    const lastAlert = new Date(now - 15 * 86400000).toISOString()
+    expect(isEligibleForChurnAlert({
+      churnRiskBand: 'high', lastChurnAlertAt: lastAlert, lastAlertSignalCodes: ['invoice_overdue_15d'], riskSignalsTriggered: [criticalSignal], now,
+    })).toBe(true)
+  })
+
+  it('bypasses the cooldown when a new CRITIQUE signal appears', () => {
+    const lastAlert = new Date(now - 2 * 86400000).toISOString()
+    expect(isEligibleForChurnAlert({
+      churnRiskBand: 'high', lastChurnAlertAt: lastAlert, lastAlertSignalCodes: ['invoice_overdue_15d'],
+      riskSignalsTriggered: [criticalSignal, { code: 'mrr_contraction_20pct_3mo', label: 'x', severity: 'CRITIQUE', points: 30 }], now,
+    })).toBe(true)
+  })
+
+  it('does not bypass the cooldown for a new MINEUR signal', () => {
+    const lastAlert = new Date(now - 2 * 86400000).toISOString()
+    expect(isEligibleForChurnAlert({
+      churnRiskBand: 'high', lastChurnAlertAt: lastAlert, lastAlertSignalCodes: ['invoice_overdue_15d'],
+      riskSignalsTriggered: [criticalSignal, minorSignal], now,
+    })).toBe(false)
   })
 })

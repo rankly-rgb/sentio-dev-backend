@@ -65,9 +65,11 @@ describe('evaluateChurnPrediction', () => {
     expect(result!.priority).toBe('critical')
   })
 
-  it('confidence is capped at 95', () => {
+  it('confidence_score is always null (S5 — no false probabilistic precision on a deterministic rule)', () => {
     const result = evaluateChurnPrediction({ ...baseInput, churn_risk_score: 100 })
-    expect(result!.confidence_score).toBe(95)
+    expect(result!.confidence_score).toBeNull()
+    expect(result!.severity).toBe('CRITIQUE')
+    expect(result!.signals).toContain('churn_risk_score >= 80')
   })
 
   it('mrr_impact_cents equals account MRR', () => {
@@ -96,11 +98,13 @@ describe('evaluateExpansionOpportunity', () => {
     const result = evaluateExpansionOpportunity({ ...baseInput, expansion_score: 75, health_score: 70 })
     expect(result).not.toBeNull()
     expect(result!.priority).toBe('medium')
+    expect(result!.confidence_score).toBeNull()
   })
 
   it('returns high priority when expansion >= 85', () => {
     const result = evaluateExpansionOpportunity({ ...baseInput, expansion_score: 90, health_score: 80 })
     expect(result!.priority).toBe('high')
+    expect(result!.severity).toBe('MAJEUR')
   })
 
   it('mrr_impact is 30% of MRR', () => {
@@ -124,21 +128,23 @@ describe('evaluateRenewalAlert', () => {
     const result = evaluateRenewalAlert({ ...baseInput, contract_end_date: futureDateStr(45) })
     expect(result).not.toBeNull()
     expect(result!.priority).toBe('high')
-    expect(result!.confidence_score).toBe(75)
+    expect(result!.confidence_score).toBeNull()
+    expect(result!.severity).toBe('MAJEUR')
   })
 
   it('returns critical priority when days <= 30', () => {
     const result = evaluateRenewalAlert({ ...baseInput, contract_end_date: futureDateStr(20) })
     expect(result).not.toBeNull()
     expect(result!.priority).toBe('critical')
-    expect(result!.confidence_score).toBe(90)
+    expect(result!.confidence_score).toBeNull()
+    expect(result!.severity).toBe('CRITIQUE')
   })
 
   it('returns critical insight when contract already expired (days < 0)', () => {
     const result = evaluateRenewalAlert({ ...baseInput, contract_end_date: '2026-02-01' })
     expect(result).not.toBeNull()
     expect(result!.priority).toBe('critical')
-    expect(result!.confidence_score).toBe(95)
+    expect(result!.confidence_score).toBeNull()
     expect(result!.insight_type).toBe('renewal_alert')
   })
 })
@@ -158,13 +164,15 @@ describe('evaluatePaymentRisk', () => {
     const result = evaluatePaymentRisk({ ...baseInput, has_overdue_invoices: true, overdue_days: 20 })
     expect(result).not.toBeNull()
     expect(result!.priority).toBe('high')
-    expect(result!.confidence_score).toBe(70)
+    expect(result!.confidence_score).toBeNull()
+    expect(result!.severity).toBe('MAJEUR')
   })
 
   it('returns critical priority when overdue_days > 30', () => {
     const result = evaluatePaymentRisk({ ...baseInput, has_overdue_invoices: true, overdue_days: 45 })
     expect(result!.priority).toBe('critical')
-    expect(result!.confidence_score).toBe(85)
+    expect(result!.confidence_score).toBeNull()
+    expect(result!.severity).toBe('CRITIQUE')
   })
 
   it('mrr_impact equals account MRR', () => {
@@ -200,21 +208,19 @@ describe('evaluateUsageDrop', () => {
     expect(result!.priority).toBe('high')
   })
 
-  it('confidence is proportional to drop percentage', () => {
+  it('confidence_score is always null regardless of drop severity', () => {
     const result35 = evaluateUsageDrop({ ...baseInput, usage_score_current: 65, usage_score_previous: 100 })
     const result60 = evaluateUsageDrop({ ...baseInput, usage_score_current: 40, usage_score_previous: 100 })
-    expect(result60!.confidence_score).toBeGreaterThan(result35!.confidence_score)
+    expect(result35!.confidence_score).toBeNull()
+    expect(result60!.confidence_score).toBeNull()
+    expect(result35!.severity).toBe('MINEUR')
+    expect(result60!.severity).toBe('MAJEUR')
   })
 
   it('mrr_impact is proportional to drop', () => {
     const result = evaluateUsageDrop({ ...baseInput, usage_score_current: 50, usage_score_previous: 100, mrr_cents: 200000 })
     // 50% drop → 50% of MRR
     expect(result!.mrr_impact_cents).toBe(100000)
-  })
-
-  it('confidence is capped at 90', () => {
-    const result = evaluateUsageDrop({ ...baseInput, usage_score_current: 5, usage_score_previous: 100 })
-    expect(result!.confidence_score).toBeLessThanOrEqual(90)
   })
 })
 
@@ -327,8 +333,9 @@ describe('evaluateInsightRules', () => {
       expect(insight.description).toBeTruthy()
       expect(insight.recommended_action).toBeTruthy()
       expect(insight.priority).toBeDefined()
-      expect(insight.confidence_score).toBeGreaterThanOrEqual(0)
-      expect(insight.confidence_score).toBeLessThanOrEqual(100)
+      expect(insight.confidence_score).toBeNull()
+      expect(['CRITIQUE', 'MAJEUR', 'MINEUR']).toContain(insight.severity)
+      expect(insight.signals.length).toBeGreaterThan(0)
       expect(typeof insight.mrr_impact_cents).toBe('number')
       expect(insight.source_scores).toBeDefined()
     }

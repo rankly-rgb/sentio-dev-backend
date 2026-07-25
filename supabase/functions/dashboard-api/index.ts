@@ -26,7 +26,7 @@
 //           health_score_yesterday: number,
 //           delta: number,
 //           direction: "improved" | "degraded",
-//           main_dimension: "usage" | "financial" | "engagement" | "contract"
+//           main_dimension: "payment_health" | "revenue_dynamics" | "contract_renewal" | null
 //         } | null
 //       }
 //     }
@@ -41,7 +41,7 @@
 //         health_score_now: number,
 //         health_score_7d_ago: number,
 //         health_delta: number,
-//         main_dimension: "usage" | "financial" | "engagement" | "contract",
+//         main_dimension: "payment_health" | "revenue_dynamics" | "contract_renewal" | null,
 //         segment_before: string | null,
 //         segment_now: string | null,
 //         segment_changed: boolean
@@ -106,18 +106,29 @@ const MAX_WINS = 5
 // Segments considérés "à risque"
 const RISK_SEGMENT_TYPES = ['en_danger_critique', 'a_risque_leger', 'en_churn', 'impayes']
 
-type Dimension = 'usage' | 'financial' | 'engagement' | 'contract'
+// Scoring Engine V2 (model_version 'v3') : payment_health/revenue_dynamics/
+// contract_renewal remplacent usage/financial/engagement/contract. Une
+// dimension `null` (unavailable) d'un côté ou de l'autre est exclue de la
+// comparaison plutôt que remplacée par un défaut 50/0 (S1) — inventer un
+// delta sur une donnée absente produirait un "principal facteur de
+// variation" mensonger.
+type Dimension = 'payment_health' | 'revenue_dynamics' | 'contract_renewal'
 
 function dominantDimension(
   now: Record<string, number | null>,
   before: Record<string, number | null>,
-): Dimension {
-  const deltas: Array<[Dimension, number]> = [
-    ['usage', Math.abs((now.product_usage_score ?? 50) - (before.product_usage_score ?? 50))],
-    ['financial', Math.abs((now.financial_score ?? 0) - (before.financial_score ?? 0))],
-    ['engagement', Math.abs((now.engagement_score ?? 50) - (before.engagement_score ?? 50))],
-    ['contract', Math.abs((now.contract_score ?? 50) - (before.contract_score ?? 50))],
+): Dimension | null {
+  const pairs: Array<[Dimension, number | null, number | null]> = [
+    ['payment_health', now.payment_health_score, before.payment_health_score],
+    ['revenue_dynamics', now.revenue_dynamics_score, before.revenue_dynamics_score],
+    ['contract_renewal', now.contract_renewal_score, before.contract_renewal_score],
   ]
+
+  const deltas = pairs
+    .filter((p): p is [Dimension, number, number] => p[1] !== null && p[2] !== null)
+    .map(([dim, n, b]) => [dim, Math.abs(n - b)] as [Dimension, number])
+
+  if (deltas.length === 0) return null
   deltas.sort(([, a], [, b]) => b - a)
   return deltas[0][0]
 }
@@ -179,21 +190,21 @@ async function handleBriefing(
   ] = await Promise.all([
     // Scores actuels par compte (nécessaire pour insight_du_jour, pas pour la moyenne)
     supabase.from('accounts')
-      .select('id, stripe_customer_id, display_name, health_score, product_usage_score, financial_score, engagement_score, contract_score')
+      .select('id, stripe_customer_id, display_name, health_score, payment_health_score, revenue_dynamics_score, contract_renewal_score')
       .eq('organization_id', orgId)
       .not('health_score', 'is', null)
       .limit(2000),
 
     // Scores J-7 depuis score_history
     supabase.from('score_history')
-      .select('account_id, health_score, product_usage_score, financial_score, engagement_score, contract_score')
+      .select('account_id, health_score, payment_health_score, revenue_dynamics_score, contract_renewal_score')
       .eq('organization_id', orgId)
       .eq('snapshot_date', sevenDaysAgo)
       .limit(2000),
 
     // Scores J-1 pour insight du jour
     supabase.from('score_history')
-      .select('account_id, health_score, product_usage_score, financial_score, engagement_score, contract_score')
+      .select('account_id, health_score, payment_health_score, revenue_dynamics_score, contract_renewal_score')
       .eq('organization_id', orgId)
       .eq('snapshot_date', yesterday)
       .limit(2000),
@@ -309,14 +320,14 @@ async function handleWins(
 
   const [currentAccountsRes, weekAgoScoresRes, currentSegmentsRes, weekAgoSegmentsRes] = await Promise.all([
     supabase.from('accounts')
-      .select('id, stripe_customer_id, display_name, health_score, product_usage_score, financial_score, engagement_score, contract_score')
+      .select('id, stripe_customer_id, display_name, health_score, payment_health_score, revenue_dynamics_score, contract_renewal_score')
       .eq('organization_id', orgId)
       .not('health_score', 'is', null)
       .gte('health_score', WIN_MIN_HEALTH)
       .limit(2000),
 
     supabase.from('score_history')
-      .select('account_id, health_score, product_usage_score, financial_score, engagement_score, contract_score')
+      .select('account_id, health_score, payment_health_score, revenue_dynamics_score, contract_renewal_score')
       .eq('organization_id', orgId)
       .eq('snapshot_date', sevenDaysAgo)
       .limit(2000),
@@ -364,7 +375,7 @@ async function handleWins(
     health_score_now: number
     health_score_7d_ago: number
     health_delta: number
-    main_dimension: Dimension
+    main_dimension: Dimension | null
     segment_before: string | null
     segment_now: string | null
     segment_changed: boolean

@@ -237,17 +237,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
           .order('expansion_score', { ascending: false })
           .limit(5),
 
-        // MRR total + count critiques actuels
+        // MRR total + count critiques actuels. churn_risk_band (Scoring V2, S5)
+        // remplace le seuil hardcodé churn_risk_score>=70 : le score est
+        // désormais additif (0-100 mais bande "high" dès 50), pas un miroir de
+        // health_score — réutiliser l'ancien seuil compterait mal les critiques.
         supabase
           .from('accounts')
-          .select('mrr_cents, churn_risk_score')
+          .select('mrr_cents, churn_risk_band')
           .eq('organization_id', orgId)
           .gt('mrr_cents', 0),
 
         // MRR + critiques semaine précédente depuis score_history
         supabase
           .from('score_history')
-          .select('mrr_cents, churn_risk_score')
+          .select('mrr_cents, churn_risk_band')
           .eq('organization_id', orgId)
           .eq('snapshot_date', prevWeekDateStr),
       ])
@@ -267,9 +270,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
       const prevAccounts = prevStatsRes.data ?? []
 
       const totalMrrCents = accounts.reduce((sum, a) => sum + (a.mrr_cents ?? 0), 0)
-      const criticalCount = accounts.filter(a => (a.churn_risk_score ?? 0) >= 70).length
+      const criticalCount = accounts.filter(a => a.churn_risk_band === 'high').length
       const prevWeekMrrCents = prevAccounts.reduce((sum, a) => sum + (a.mrr_cents ?? 0), 0)
-      const prevWeekCriticalCount = prevAccounts.filter(a => (a.churn_risk_score ?? 0) >= 70).length
+      const prevWeekCriticalCount = prevAccounts.filter(a => a.churn_risk_band === 'high').length
 
       const stats: WeeklyStats = {
         totalMrrCents,
