@@ -2,6 +2,14 @@
 // Edge Function : churn-alert
 // Triggered daily at 06:00 UTC (after calculate-scores at 03:00 UTC)
 //
+// Scoring Engine V2 (S9) — triage anti-spam :
+//   - Ne déclenche que pour churn_risk_band = 'high'.
+//   - Cooldown 14 jours par compte (accounts.last_churn_alert_at), sauf si
+//     un nouveau signal CRITIQUE (risk_signals_triggered) apparaît qui
+//     n'était pas présent lors de la dernière alerte (accounts.last_alert_signals).
+//   - Après envoi réussi, persiste last_churn_alert_at + last_alert_signals
+//     pour le prochain run.
+//
 // CONTRAT API
 // ──────────────────────────────────────────────────────────
 //
@@ -11,7 +19,7 @@
 //   Response 200 :
 //     {
 //       sent: number,     // nombre d'emails envoyés
-//       skipped: number,  // orgs sans comptes critiques ou sans email
+//       skipped: number,  // orgs sans comptes éligibles ou sans email
 //       errors: number
 //     }
 // ============================================================
@@ -29,10 +37,43 @@ export interface CriticalAccount {
   display_name: string | null
   mrr_cents: number
   churn_risk_score: number
-  health_score: number
+  health_score: number | null
 }
 
+export interface TriggeredSignal {
+  code: string
+  label: string
+  severity: 'CRITIQUE' | 'MAJEUR' | 'MINEUR'
+  points: number
+}
+
+export interface AlertEligibilityInput {
+  churnRiskBand: 'low' | 'watch' | 'high' | null
+  lastChurnAlertAt: string | null
+  lastAlertSignalCodes: string[] | null
+  riskSignalsTriggered: TriggeredSignal[]
+  now: number
+}
+
+const COOLDOWN_MS = 14 * 24 * 60 * 60 * 1000
+
 // ── Helpers exportés pour les tests ──────────────────────────
+
+// S9 : n'alerte que pour band='high', avec cooldown 14j sauf nouveau signal
+// CRITIQUE non présent lors de la dernière alerte envoyée à ce compte.
+export function isEligibleForChurnAlert(input: AlertEligibilityInput): boolean {
+  if (input.churnRiskBand !== 'high') return false
+  if (!input.lastChurnAlertAt) return true
+
+  const elapsed = input.now - new Date(input.lastChurnAlertAt).getTime()
+  if (elapsed >= COOLDOWN_MS) return true
+
+  const previousCodes = new Set(input.lastAlertSignalCodes ?? [])
+  const hasNewCritical = input.riskSignalsTriggered.some(
+    (s) => s.severity === 'CRITIQUE' && !previousCodes.has(s.code),
+  )
+  return hasNewCritical
+}
 
 export function maskCustomerId(stripeCustomerId: string): string {
   return 'cus_***' + stripeCustomerId.slice(-3)
@@ -47,11 +88,12 @@ export function buildChurnAlertEmail(accounts: CriticalAccount[]): string {
   const rows = accounts.map(a => {
     const label = formatAccountLabel(a)
     const mrr = Math.round(a.mrr_cents / 100)
+    const healthLabel = a.health_score === null ? 'N/A' : `${a.health_score}/100`
     return `
     <tr>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0">${label}</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:right">${mrr}€/mo</td>
-      <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:center">${a.health_score}/100</td>
+      <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:center">${healthLabel}</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:center;color:#dc2626;font-weight:600">${a.churn_risk_score}/100</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0">
         <a href="${APP_URL}/dashboard/accounts/${a.id}" style="color:#3b82f6;text-decoration:none">View →</a>
@@ -143,17 +185,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
 
     try {
-      // Comptes passés en zone critique dans les dernières 24h
-      const { data: criticalAccounts, error: acctError } = await supabase
+      // Candidats band='high' — le triage anti-spam (cooldown 14j / bypass
+      // signal CRITIQUE, S9) est appliqué en mémoire via isEligibleForChurnAlert
+      // car il dépend d'une comparaison avant/après par compte, pas exprimable
+      // proprement en un seul filtre SQL.
+      const { data: candidateAccounts, error: acctError } = await supabase
         .from('accounts')
-        .select('id, stripe_customer_id, display_name, mrr_cents, churn_risk_score, health_score')
+        .select('id, stripe_customer_id, display_name, mrr_cents, churn_risk_score, health_score, churn_risk_band, risk_signals_triggered, last_churn_alert_at, last_alert_signals')
         .eq('organization_id', org.id)
-        .gte('churn_risk_score', 70)
-        .gte('updated_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+        .eq('churn_risk_band', 'high')
         .gt('mrr_cents', 0)
         .order('churn_risk_score', { ascending: false })
         .order('mrr_cents', { ascending: false })
-        .limit(20)
+        .limit(50)
 
       if (acctError) {
         const msg = `accounts query error: ${acctError.message}`
@@ -162,21 +206,42 @@ Deno.serve(async (req: Request): Promise<Response> => {
         continue
       }
 
-      if (!criticalAccounts || criticalAccounts.length === 0) {
+      const now = Date.now()
+      const eligible = (candidateAccounts ?? []).filter((a) =>
+        isEligibleForChurnAlert({
+          churnRiskBand: a.churn_risk_band,
+          lastChurnAlertAt: a.last_churn_alert_at,
+          lastAlertSignalCodes: (a.last_alert_signals as { code: string }[] | null)?.map((s) => s.code) ?? null,
+          riskSignalsTriggered: (a.risk_signals_triggered as TriggeredSignal[] | null) ?? [],
+          now,
+        }),
+      ).slice(0, 20)
+
+      if (eligible.length === 0) {
         results.skipped++
         continue
       }
 
-      const n = criticalAccounts.length
+      const n = eligible.length
       const emailResult = await sendEmail({
         to: org.notification_email,
         subject: `🚨 Churn alert: ${n} account${n > 1 ? 's show' : ' shows'} critical risk signals`,
-        html: buildChurnAlertEmail(criticalAccounts as CriticalAccount[]),
+        html: buildChurnAlertEmail(eligible as CriticalAccount[]),
         from_name: 'Sentio AI',
       })
 
       if (emailResult.success) {
         results.sent++
+        const nowIso = new Date(now).toISOString()
+        for (const account of eligible) {
+          await supabase
+            .from('accounts')
+            .update({
+              last_churn_alert_at: nowIso,
+              last_alert_signals: account.risk_signals_triggered ?? [],
+            })
+            .eq('id', account.id)
+        }
         console.log(JSON.stringify({
           level: 'info',
           function_name: 'churn-alert',

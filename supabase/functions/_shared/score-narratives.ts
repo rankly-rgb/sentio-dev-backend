@@ -149,3 +149,65 @@ function narrativeContract(
   if (daysUntil < 90) return `Renewal in ${daysUntil} days — to plan.`
   return `Active contract, renewal in ${daysUntil} days (${contract_end_date}).`
 }
+
+// ── Scoring Engine V2 (model_version 'v3') narratives ─────────
+// Réutilise health_narrative/financial_narrative/contract_narrative
+// (colonnes existantes, non renommées) avec le nouveau sens v3 :
+// financial_narrative ⇐ payment_health, contract_narrative ⇐ contract_renewal.
+// usage_narrative/engagement_narrative ne sont plus régénérés (dimensions
+// retirées du modèle v3, S1/S2) — le caller doit les omettre de l'update
+// pour les laisser figés à leur dernière valeur v2, pas les écraser par une
+// fausse phrase "à venir".
+export interface NarrativeInputsV3 {
+  health_score_points: number | null
+  health_score_status: 'complete' | 'partial' | 'insufficient'
+  payment_health_score: number | null
+  revenue_dynamics_score: number | null
+  contract_renewal_score: number | null
+  mrr_cents: number
+  overdue_count: number
+  overdue_amount_cents: number
+  contract_end_date: string | null
+  billing_interval: string | null
+}
+
+export interface ScoreNarrativesV3 {
+  health_narrative: string
+  financial_narrative: string
+  contract_narrative: string
+}
+
+export function generateNarrativesV3(inputs: NarrativeInputsV3): ScoreNarrativesV3 {
+  return {
+    health_narrative: narrativeHealthV3(inputs.health_score_points, inputs.health_score_status),
+    financial_narrative: narrativePaymentHealth(inputs.payment_health_score, inputs.mrr_cents, inputs.overdue_count, inputs.overdue_amount_cents),
+    contract_narrative: inputs.contract_renewal_score !== null
+      ? narrativeContract(inputs.contract_renewal_score, inputs.contract_end_date, inputs.billing_interval)
+      : 'Contract renewal score not available — missing billing interval or contract dates.',
+  }
+}
+
+function narrativeHealthV3(points: number | null, status: 'complete' | 'partial' | 'insufficient'): string {
+  if (status === 'insufficient' || points === null) {
+    return 'Health score unavailable — fewer than 50% of scoring dimensions have data for this account.'
+  }
+  const label = status === 'partial' ? ' (partial coverage)' : ''
+  if (points >= 70) return `Healthy account${label} (${points} pts).`
+  if (points >= 40) return `Account to watch${label} (${points} pts).`
+  return `At-risk account${label} (${points} pts). Attention required.`
+}
+
+function narrativePaymentHealth(
+  score: number | null,
+  mrrCents: number,
+  overdueCount: number,
+  overdueAmountCents: number,
+): string {
+  if (mrrCents === 0) return 'Account with no active MRR — subscription canceled or suspended.'
+  if (score === null) return 'Payment health score not available — not enough invoice history yet.'
+  const mrrEur = (mrrCents / 100).toFixed(0)
+  if (score >= 90) return `No overdue invoices. MRR: €${mrrEur}.`
+  if (score >= 70) return `Stable billing. MRR: €${mrrEur}.`
+  if (score >= 50) return `Warning: ${overdueCount} overdue invoice(s) (€${(overdueAmountCents / 100).toFixed(0)}).`
+  return `High payment risk: ${overdueCount} overdue invoice(s) totaling €${(overdueAmountCents / 100).toFixed(0)}.`
+}

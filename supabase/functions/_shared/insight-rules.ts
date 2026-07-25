@@ -19,6 +19,13 @@ export type InsightType =
 
 export type InsightPriority = 'low' | 'medium' | 'high' | 'critical'
 
+// Scoring Engine V2 (S5) : les règles ci-dessous évaluent des seuils
+// déterministes sur des données Stripe/produit — pas de modèle probabiliste.
+// `severity` + `signals` remplacent `confidence_score` (toujours null
+// désormais, colonne conservée pour compat descendante — voir migration
+// 20260725000001_scoring_engine_v3.sql).
+export type InsightSeverity = 'CRITIQUE' | 'MAJEUR' | 'MINEUR'
+
 export interface InsightInput {
   account_id: string
   organization_id: string
@@ -40,16 +47,16 @@ export interface InsightCandidate {
   description: string
   recommended_action: string
   priority: InsightPriority
-  confidence_score: number
+  severity: InsightSeverity
+  signals: string[]
+  // Toujours null (S5) : règle déterministe, pas de fausse précision
+  // probabiliste. Champ conservé pour compat de schéma DB uniquement.
+  confidence_score: null
   mrr_impact_cents: number
   source_scores: Record<string, number>
 }
 
 // ── Helpers ──────────────────────────────────────────────────
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value))
-}
 
 function mrrEur(cents: number): string {
   return (cents / 100).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
@@ -68,7 +75,7 @@ export function evaluateChurnPrediction(input: InsightInput): InsightCandidate |
 
   const isCritical = input.churn_risk_score >= 80
   const priority: InsightPriority = isCritical ? 'critical' : 'high'
-  const confidence = clamp(input.churn_risk_score, 0, 95)
+  const severity: InsightSeverity = isCritical ? 'CRITIQUE' : 'MAJEUR'
 
   return {
     insight_type: 'churn_prediction',
@@ -80,7 +87,9 @@ export function evaluateChurnPrediction(input: InsightInput): InsightCandidate |
       ? 'Immediate CSM intervention required. Schedule a retention call within 48h.'
       : 'Schedule a follow-up with the customer within the week.',
     priority,
-    confidence_score: confidence,
+    severity,
+    signals: [isCritical ? 'churn_risk_score >= 80' : 'churn_risk_score >= 70'],
+    confidence_score: null,
     mrr_impact_cents: input.mrr_cents,
     source_scores: {
       churn_risk_score: input.churn_risk_score,
@@ -96,7 +105,7 @@ export function evaluateExpansionOpportunity(input: InsightInput): InsightCandid
 
   const isHigh = input.expansion_score >= 85
   const priority: InsightPriority = isHigh ? 'high' : 'medium'
-  const confidence = clamp(input.expansion_score, 0, 95)
+  const severity: InsightSeverity = isHigh ? 'MAJEUR' : 'MINEUR'
   const estimatedExpansion = Math.round(input.mrr_cents * 0.3)
 
   return {
@@ -109,7 +118,9 @@ export function evaluateExpansionOpportunity(input: InsightInput): InsightCandid
       ? 'Propose a plan upgrade or additional seats at the next check-in.'
       : 'Monitor progress and prepare an upsell proposal.',
     priority,
-    confidence_score: confidence,
+    severity,
+    signals: [isHigh ? 'expansion_score >= 85' : 'expansion_score >= 70', 'health_score >= 60'],
+    confidence_score: null,
     mrr_impact_cents: estimatedExpansion,
     source_scores: {
       expansion_score: input.expansion_score,
@@ -129,7 +140,7 @@ export function evaluateRenewalAlert(input: InsightInput): InsightCandidate | nu
   const isExpired = days < 0
   const isCritical = days <= 30
   const priority: InsightPriority = (isExpired || isCritical) ? 'critical' : 'high'
-  const confidence = isExpired ? 95 : isCritical ? 90 : 75
+  const severity: InsightSeverity = (isExpired || isCritical) ? 'CRITIQUE' : 'MAJEUR'
 
   return {
     insight_type: 'renewal_alert',
@@ -147,7 +158,9 @@ export function evaluateRenewalAlert(input: InsightInput): InsightCandidate | nu
         ? 'Start the renewal process immediately. Contact the decision-maker.'
         : 'Prepare the renewal proposal and schedule a business review.',
     priority,
-    confidence_score: confidence,
+    severity,
+    signals: [isExpired ? 'contract_end_date < today' : isCritical ? 'days_until_renewal <= 30' : 'days_until_renewal <= 60'],
+    confidence_score: null,
     mrr_impact_cents: input.mrr_cents,
     source_scores: {
       health_score: input.health_score,
@@ -163,7 +176,7 @@ export function evaluatePaymentRisk(input: InsightInput): InsightCandidate | nul
 
   const isCritical = input.overdue_days > 30
   const priority: InsightPriority = isCritical ? 'critical' : 'high'
-  const confidence = isCritical ? 85 : 70
+  const severity: InsightSeverity = isCritical ? 'CRITIQUE' : 'MAJEUR'
 
   return {
     insight_type: 'payment_risk',
@@ -175,7 +188,9 @@ export function evaluatePaymentRisk(input: InsightInput): InsightCandidate | nul
       ? 'Escalate to finance. Send a formal reminder and consider suspension.'
       : 'Send a payment reminder to the customer and verify billing details.',
     priority,
-    confidence_score: confidence,
+    severity,
+    signals: [isCritical ? 'overdue_days > 30' : 'overdue_days > 15'],
+    confidence_score: null,
     mrr_impact_cents: input.mrr_cents,
     source_scores: {
       overdue_days: input.overdue_days,
@@ -194,7 +209,7 @@ export function evaluateUsageDrop(input: InsightInput): InsightCandidate | null 
   )
   const isSevere = dropPct >= 50
   const priority: InsightPriority = isSevere ? 'high' : 'medium'
-  const confidence = clamp(Math.round(dropPct * 1.2), 30, 90)
+  const severity: InsightSeverity = isSevere ? 'MAJEUR' : 'MINEUR'
 
   return {
     insight_type: 'usage_drop',
@@ -206,7 +221,9 @@ export function evaluateUsageDrop(input: InsightInput): InsightCandidate | null 
       ? 'Contact the customer urgently to understand the reason for the usage drop.'
       : 'Monitor progress over the next week and schedule a check-in.',
     priority,
-    confidence_score: confidence,
+    severity,
+    signals: [isSevere ? 'usage_drop_pct >= 50' : 'usage_drop_pct >= 30'],
+    confidence_score: null,
     mrr_impact_cents: Math.round(input.mrr_cents * (dropPct / 100)),
     source_scores: {
       usage_score_current: input.usage_score_current,
@@ -227,27 +244,32 @@ export function evaluateAccountHealthSummary(input: InsightInput): InsightCandid
   const churn = input.churn_risk_score
 
   let priority: InsightPriority
+  let severity: InsightSeverity
   let title: string
   let description: string
   let action: string
 
   if (health < 30) {
     priority = 'critical'
+    severity = 'CRITIQUE'
     title = 'Account in critical condition'
     description = `Very low health score (${health}%) with a churn risk of ${churn}%. MRR: €${mrrEur(input.mrr_cents)}. Situation requires immediate attention.`
     action = 'Analyze the causes of the low score and contact the customer within 48h.'
   } else if (health < 50) {
     priority = 'high'
+    severity = 'MAJEUR'
     title = 'At-risk account — monitoring required'
     description = `Health score of ${health}% with a churn risk of ${churn}%. MRR: €${mrrEur(input.mrr_cents)}. Increased follow-up recommended.`
     action = 'Schedule a check-in with the customer within the next 7 days.'
   } else if (health < 70) {
     priority = 'medium'
+    severity = 'MINEUR'
     title = 'Account to watch'
     description = `Health score of ${health}% with a churn risk of ${churn}%. MRR: €${mrrEur(input.mrr_cents)}. Progress to monitor.`
     action = 'Perform a monthly follow-up and monitor how the indicators evolve.'
   } else {
     priority = 'low'
+    severity = 'MINEUR'
     title = 'Account in good health'
     description = `Health score of ${health}% with a low churn risk (${churn}%). MRR: €${mrrEur(input.mrr_cents)}. Stable account.`
     action = 'Maintain current engagement and identify expansion opportunities.'
@@ -259,7 +281,9 @@ export function evaluateAccountHealthSummary(input: InsightInput): InsightCandid
     description,
     recommended_action: action,
     priority,
-    confidence_score: 80,
+    severity,
+    signals: [`health_score in [${health < 30 ? '0,30' : health < 50 ? '30,50' : health < 70 ? '50,70' : '70,100'})`],
+    confidence_score: null,
     mrr_impact_cents: input.mrr_cents,
     source_scores: {
       health_score: health,

@@ -149,6 +149,83 @@ curl -X POST https://upqakxuatlshhqiagbqw.supabase.co/functions/v1/calculate-sco
 
 ---
 
+### 7. Scoring Engine V2 — segment invariant & model validation
+
+**Segment invariant (S12)**: every active account must belong to exactly one
+health segment (`champions`/`stables`/`a_risque_leger`/`en_danger_critique`/
+`impayes`/`en_churn`/`donnees_insuffisantes`) — never zero, never more than
+one. `nouveaux` is the only non-exclusive segment and is excluded from this
+check. This is what closes out the "zero accounts displayed" investigation
+from the V1 audit: if this query returns 0 rows, the assignment logic is
+sound and any empty-segment symptom in the frontend is a read-path issue
+(RLS, query filter), not a backend scoring bug.
+
+**Run monthly, or immediately after any `calculate-scores` deploy**:
+```sql
+-- Accounts with != 1 health segment (excluding the non-exclusive 'nouveaux')
+SELECT a.id, a.organization_id, COUNT(*) AS health_segment_count,
+       array_agg(seg.segment_type) AS segments
+FROM accounts a
+JOIN segment_memberships sm ON sm.account_id = a.id AND sm.status = 'active'
+JOIN account_segments seg ON seg.id = sm.segment_id AND seg.segment_type <> 'nouveaux'
+GROUP BY a.id, a.organization_id
+HAVING COUNT(*) <> 1;
+```
+**Expected**: 0 rows. If any row appears, check `assignSegments()` in
+`calculate-scores/index.ts` — the stale-membership cleanup step may have
+failed for that org (see error logs for `stale membership cleanup error`).
+
+**Also verify no account is simultaneously in `donnees_insuffisantes` and
+another health segment** (should already be impossible given the query
+above, but useful as a targeted check):
+```sql
+SELECT a.id, array_agg(seg.segment_type)
+FROM accounts a
+JOIN segment_memberships sm ON sm.account_id = a.id AND sm.status = 'active'
+JOIN account_segments seg ON seg.id = sm.segment_id
+WHERE seg.segment_type <> 'nouveaux'
+GROUP BY a.id
+HAVING 'donnees_insuffisantes' = ANY(array_agg(seg.segment_type))
+   AND COUNT(*) > 1;
+```
+**Expected**: 0 rows.
+
+**Model validation report (S10)** — recall of the churn model: for accounts
+that churned (subscription canceled) in the last 90 days, what was their
+`churn_risk_band` 30 and 60 days before churn? Run monthly, no UI in V1.
+```sql
+WITH churned AS (
+  SELECT s.account_id, s.organization_id, MAX(s.canceled_at) AS churned_at
+  FROM subscriptions s
+  WHERE s.status = 'canceled'
+    AND s.canceled_at > NOW() - INTERVAL '90 days'
+  GROUP BY s.account_id, s.organization_id
+)
+SELECT
+  c.account_id,
+  c.churned_at,
+  sh30.churn_risk_band AS band_at_j_minus_30,
+  sh60.churn_risk_band AS band_at_j_minus_60
+FROM churned c
+LEFT JOIN LATERAL (
+  SELECT churn_risk_band FROM score_history
+  WHERE account_id = c.account_id AND snapshot_date <= (c.churned_at::date - 30)
+  ORDER BY snapshot_date DESC LIMIT 1
+) sh30 ON true
+LEFT JOIN LATERAL (
+  SELECT churn_risk_band FROM score_history
+  WHERE account_id = c.account_id AND snapshot_date <= (c.churned_at::date - 60)
+  ORDER BY snapshot_date DESC LIMIT 1
+) sh60 ON true
+ORDER BY c.churned_at DESC;
+```
+**Interpretation**: recall_30 = (rows where `band_at_j_minus_30` IN
+('high','watch')) / (total rows). A recall well below ~70% signals the
+7 deterministic churn signals (S5) are missing a real-world pattern — feed
+this back into Phase 3's planned logistic regression over historical churn.
+
+---
+
 ## Monitoring Endpoints
 
 | Endpoint | Purpose | Frequency |
