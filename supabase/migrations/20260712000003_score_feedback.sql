@@ -25,6 +25,7 @@ CREATE INDEX IF NOT EXISTS idx_score_feedback_org ON public.score_feedback USING
 
 ALTER TABLE public.score_feedback ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "score_feedback_org_isolation" ON public.score_feedback;
 CREATE POLICY "score_feedback_org_isolation"
 ON public.score_feedback FOR ALL
 USING (
