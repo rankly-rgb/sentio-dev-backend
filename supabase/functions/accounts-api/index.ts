@@ -6,6 +6,16 @@
 // CONTRAT API
 // ──────────────────────────────────────────────────────────
 //
+// Scoring Engine V2 (model_version 'v3') — voir docs/API_CONTRACTS.md pour le
+// contrat complet des champs scoring. Résumé pertinent ici :
+//   - health_score / payment_health_score / revenue_dynamics_score /
+//     contract_renewal_score / expansion_score peuvent être null (donnée
+//     absente, jamais 0/50 par défaut — S1).
+//   - product_usage_score / financial_score / engagement_score / contract_score
+//     sont gelés (dimensions retirées du modèle v3) : exposés tels quels
+//     pour compat descendante mais à afficher comme "Score à venir" côté UI,
+//     pas comme une valeur à jour.
+//
 // GET /accounts-api
 //   Query params : limit (1-100, défaut 50), cursor (UUID, pagination)
 //                  search (texte libre sur display_name ou stripe_customer_id)
@@ -16,11 +26,14 @@
 //       total_count: number,       // total de comptes de l'org, indépendant de la pagination
 //       total_mrr_cents: number    // idem, source : RPC get_portfolio_snapshot (chantier 5.1)
 //     }
-//   priority_label calculé côté SQL (vue accounts_with_priority) :
-//     critical : churn_risk_score >= 80 OU health_score <= 30
-//     watch    : churn_risk_score >= 50 OU health_score <= 55
-//     new      : created_at < 90j ET churn_risk_score < 50
+//   priority_label calculé côté SQL (vue accounts_with_priority, Scoring V2) :
+//     critical : churn_risk_band = 'high' OU health_score <= 30
+//     watch    : churn_risk_band = 'watch' OU health_score <= 55
+//     new      : created_at < 90j ET churn_risk_band = 'low'
 //     stable   : sinon
+//   (health_score <= 30/55 : seuils numériques hérités, recalibrage
+//   séparé — voir docs/RUNBOOK.md §7. churn_risk_band est déjà calibré par
+//   construction sur le modèle v3, pas de seuil numérique à recalibrer.)
 //
 // GET /accounts-api?id=:uuid
 //   Response 200 :
@@ -29,14 +42,14 @@
 //         ...account fields,
 //         display_name: string | null,
 //         scores: {
-//           health:     { value: number | null, narrative: string },
-//           usage:      { value: number | null, narrative: string },
-//           financial:  { value: number | null, narrative: string },
-//           engagement: { value: number | null, narrative: string },
-//           contract:   { value: number | null, narrative: string },
-//           churn_risk: { value: number | null },
-//           expansion:  { value: number | null }
+//           health:            { value: number | null, status: 'complete'|'partial'|'insufficient', max_points: number, band: 'healthy'|'watch'|'at_risk'|null, narrative: string, trend_30d: 'up'|'flat'|'down' },
+//           payment_health:    { value: number | null, narrative: string },
+//           revenue_dynamics:  { value: number | null },
+//           contract_renewal:  { value: number | null, narrative: string },
+//           churn_risk:        { value: number, band: 'low'|'watch'|'high', signals_triggered: Array<{code,label,severity,points}>, signals_evaluated: number },
+//           expansion:         { value: number | null, status: 'available'|'unavailable', unavailable_reason: string | null }
 //         },
+//         score_breakdown: object,  // voir docs/API_CONTRACTS.md §2bis — décomposition complète par dimension
 //         insights: Array<Insight & { is_new: boolean }>,
 //         segments: Array<{ segment_type: string, priority: string, added_at: string }>,
 //         hubspot:  HubspotCompany | null
@@ -58,7 +71,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
-import { generateNarratives } from '../_shared/score-narratives.ts'
+import { generateNarrativesV3 } from '../_shared/score-narratives.ts'
 
 // ── Entrypoint ───────────────────────────────────────────────
 
@@ -115,8 +128,11 @@ async function handleList(
     .select(
       'id, stripe_customer_id, display_name, plan_tier, billing_interval, mrr_cents, ' +
       'seat_count, seat_limit, ' +
-      'health_score, churn_risk_score, expansion_score, product_usage_score, ' +
-      'financial_score, engagement_score, contract_score, ' +
+      'health_score, health_score_status, health_score_band, trend_30d, ' +
+      'churn_risk_score, churn_risk_band, ' +
+      'expansion_score, expansion_score_status, ' +
+      'payment_health_score, revenue_dynamics_score, contract_renewal_score, ' +
+      'product_usage_score, financial_score, engagement_score, contract_score, ' +
       'contract_end_date, scores_calculated_at, created_at, updated_at, priority_label',
     )
     .eq('organization_id', orgId)
@@ -168,12 +184,9 @@ async function handleGetOne(
   orgId: string,
   userId: string,
 ): Promise<Response> {
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-
   const [
     accountRes,
     invoicesRes,
-    usageRes,
     hubspotRes,
     insightsRes,
     segmentsRes,
@@ -182,8 +195,6 @@ async function handleGetOne(
     supabase.from('accounts').select('*').eq('id', id).eq('organization_id', orgId).maybeSingle(),
     supabase.from('invoices').select('status, amount_cents')
       .eq('account_id', id).in('status', ['open', 'uncollectible']).limit(200),
-    supabase.from('usage_events').select('event_count')
-      .eq('account_id', id).gte('event_date', thirtyDaysAgo).limit(1000),
     supabase.from('hubspot_companies').select('*')
       .eq('account_id', id).eq('organization_id', orgId).maybeSingle(),
     supabase.from('ai_insights').select('*')
@@ -205,7 +216,6 @@ async function handleGetOne(
   const overdueInvoices = invoicesRes.data ?? []
   const overdueCount = overdueInvoices.length
   const overdueAmountCents = overdueInvoices.reduce((sum: number, inv: { amount_cents: number }) => sum + (inv.amount_cents ?? 0), 0)
-  const totalEvents30d = (usageRes.data ?? []).reduce((sum: number, ev: { event_count: number }) => sum + (ev.event_count ?? 0), 0)
   const hubspot = hubspotRes.data ?? null
   const lastSeenAt: string | null = profileRes.data?.last_seen_at ?? null
 
@@ -224,31 +234,48 @@ async function handleGetOne(
     }
   })
 
-  const narratives = generateNarratives({
-    health_score: account.health_score,
-    financial_score: account.financial_score,
-    product_usage_score: account.product_usage_score,
-    engagement_score: account.engagement_score,
-    contract_score: account.contract_score,
+  const narratives = generateNarrativesV3({
+    health_score_points: account.health_score,
+    health_score_status: account.health_score_status ?? 'insufficient',
+    payment_health_score: account.payment_health_score,
+    revenue_dynamics_score: account.revenue_dynamics_score,
+    contract_renewal_score: account.contract_renewal_score,
     mrr_cents: account.mrr_cents ?? 0,
-    contract_start_date: account.contract_start_date ?? null,
-    contract_end_date: account.contract_end_date ?? null,
-    billing_interval: account.billing_interval ?? null,
     overdue_count: overdueCount,
     overdue_amount_cents: overdueAmountCents,
-    total_events_30d: totalEvents30d,
-    open_ticket_count: hubspot?.open_ticket_count ?? null,
-    last_meeting_date: hubspot?.last_meeting_date ?? null,
+    contract_end_date: account.contract_end_date ?? null,
+    billing_interval: account.billing_interval ?? null,
   })
 
+  // usage_frozen_v2/engagement_frozen_v2 : dimensions retirées du modèle v3
+  // (2026-07-25) — plus jamais recalculées par calculate-scores, exposées en
+  // lecture seule pour compat descendante. Le frontend doit afficher
+  // "Score à venir", pas ces valeurs comme si elles étaient à jour.
   const scores = {
-    health:     { value: account.health_score,          narrative: narratives.health_narrative },
-    usage:      { value: account.product_usage_score,   narrative: narratives.usage_narrative },
-    financial:  { value: account.financial_score,       narrative: narratives.financial_narrative },
-    engagement: { value: account.engagement_score,      narrative: narratives.engagement_narrative },
-    contract:   { value: account.contract_score,        narrative: narratives.contract_narrative },
-    churn_risk: { value: account.churn_risk_score },
-    expansion:  { value: account.expansion_score },
+    health: {
+      value: account.health_score,
+      status: account.health_score_status,
+      max_points: account.health_score_max_points,
+      band: account.health_score_band,
+      narrative: narratives.health_narrative,
+      trend_30d: account.trend_30d,
+    },
+    payment_health: { value: account.payment_health_score, narrative: narratives.financial_narrative },
+    revenue_dynamics: { value: account.revenue_dynamics_score },
+    contract_renewal: { value: account.contract_renewal_score, narrative: narratives.contract_narrative },
+    churn_risk: {
+      value: account.churn_risk_score,
+      band: account.churn_risk_band,
+      signals_triggered: account.risk_signals_triggered ?? [],
+      signals_evaluated: account.risk_signals_evaluated ?? 0,
+    },
+    expansion: {
+      value: account.expansion_score,
+      status: account.expansion_score_status,
+      unavailable_reason: account.expansion_unavailable_reason,
+    },
+    usage_frozen_v2: { value: account.product_usage_score },
+    engagement_frozen_v2: { value: account.engagement_score },
   }
 
   return jsonResponse({
@@ -270,6 +297,7 @@ async function handleGetOne(
       created_at: account.created_at,
       updated_at: account.updated_at,
       scores,
+      score_breakdown: account.score_breakdown ?? null,
       insights,
       segments,
       hubspot,

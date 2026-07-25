@@ -121,12 +121,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const userPrompt = buildPrompt({
     health_score: account.health_score,
+    health_score_status: account.health_score_status,
     churn_risk_score: account.churn_risk_score,
+    churn_risk_band: account.churn_risk_band,
+    risk_signals_triggered: account.risk_signals_triggered ?? [],
     expansion_score: account.expansion_score,
-    financial_score: account.financial_score,
-    engagement_score: account.engagement_score,
-    contract_score: account.contract_score,
-    product_usage_score: account.product_usage_score,
+    expansion_score_status: account.expansion_score_status,
+    payment_health_score: account.payment_health_score,
+    revenue_dynamics_score: account.revenue_dynamics_score,
+    contract_renewal_score: account.contract_renewal_score,
     mrr_euros: mrrEuros,
     plan_tier: account.plan_tier,
     billing_interval: account.billing_interval,
@@ -189,12 +192,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 interface PromptData {
   health_score: number | null
+  health_score_status: 'complete' | 'partial' | 'insufficient' | null
   churn_risk_score: number | null
+  churn_risk_band: 'low' | 'watch' | 'high' | null
+  risk_signals_triggered: Array<{ label: string; severity: string }>
   expansion_score: number | null
-  financial_score: number | null
-  engagement_score: number | null
-  contract_score: number | null
-  product_usage_score: number | null
+  expansion_score_status: 'available' | 'unavailable' | null
+  payment_health_score: number | null
+  revenue_dynamics_score: number | null
+  contract_renewal_score: number | null
   mrr_euros: string
   plan_tier: string | null
   billing_interval: string | null
@@ -203,17 +209,27 @@ interface PromptData {
   insights: string[]
 }
 
+// Scoring Engine V2 (model_version 'v3') : payment_health/revenue_dynamics/
+// contract_renewal remplacent financial/engagement/contract/product_usage.
+// Un score `null` est explicitement décrit comme "not enough data" au lieu
+// d'être omis ou affiché comme 0/50 — le prompt IA ne doit jamais halluciner
+// un chiffre absent (contrainte système "never invent information").
 function buildPrompt(data: PromptData): string {
+  const fmtScore = (v: number | null) => (v === null ? 'not enough data' : `${v}/100`)
+
   const lines = [
     "Generate a summary of this customer account's status for a customer success manager.",
     '',
     'Metrics:',
-    `- Overall health score: ${data.health_score ?? 'N/A'}/100`,
-    `- Churn risk: ${data.churn_risk_score ?? 'N/A'}/100`,
-    `- Financial score: ${data.financial_score ?? 'N/A'}/100`,
-    `- Engagement score: ${data.engagement_score ?? 'N/A'}/100`,
-    `- Contract score: ${data.contract_score ?? 'N/A'}/100`,
-    `- Product usage score: ${data.product_usage_score != null ? `${data.product_usage_score}/100` : 'Tracker not connected'}`,
+    `- Overall health score: ${fmtScore(data.health_score)}${data.health_score_status === 'partial' ? ' (partial data coverage)' : ''}`,
+    `- Churn risk: ${data.churn_risk_score ?? 'N/A'}/100 (${data.churn_risk_band ?? 'unknown'} band)`,
+    ...(data.risk_signals_triggered.length > 0
+      ? [`- Churn risk signals: ${data.risk_signals_triggered.map((s) => `${s.label} (${s.severity})`).join('; ')}`]
+      : []),
+    `- Payment health score: ${fmtScore(data.payment_health_score)}`,
+    `- Revenue dynamics score: ${fmtScore(data.revenue_dynamics_score)}`,
+    `- Contract renewal score: ${fmtScore(data.contract_renewal_score)}`,
+    `- Expansion score: ${data.expansion_score_status === 'unavailable' ? 'not available (seat data not configured)' : fmtScore(data.expansion_score)}`,
     `- MRR: €${data.mrr_euros}`,
   ]
 
