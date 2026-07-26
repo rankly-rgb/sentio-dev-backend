@@ -6,7 +6,7 @@
 // CONTRAT API
 // ──────────────────────────────────────────────────────────
 //
-// Scoring Engine V2 (model_version 'v3') — voir docs/API_CONTRACTS.md pour le
+// Scoring Engine V2 (model_version 'v3') — voir docs/SCORING_ENGINE_CONTRACT.md pour le
 // contrat complet des champs scoring. Résumé pertinent ici :
 //   - health_score / payment_health_score / revenue_dynamics_score /
 //     contract_renewal_score / expansion_score peuvent être null (donnée
@@ -23,7 +23,7 @@
 //     {
 //       data: Array<Account & {
 //         priority_label: 'churned' | 'critical' | 'watch' | 'new' | 'stable',
-//         primary_segment: string | null   // voir docs/API_CONTRACTS.md — liste exhaustive des valeurs
+//         primary_segment: string | null   // voir docs/SCORING_ENGINE_CONTRACT.md — liste exhaustive des valeurs
 //       }>,
 //       pagination: { limit: number, next_cursor: string | null, has_more: boolean },
 //       total_count: number,       // total de comptes de l'org, indépendant de la pagination
@@ -57,7 +57,7 @@
 //           churn_risk:        { value: number, band: 'low'|'watch'|'high', signals_triggered: Array<{code,label,severity,points}>, signals_evaluated: number },
 //           expansion:         { value: number | null, status: 'available'|'unavailable', unavailable_reason: string | null }
 //         },
-//         score_breakdown: object,  // voir docs/API_CONTRACTS.md §2bis — décomposition complète par dimension
+//         score_breakdown: object,  // voir docs/SCORING_ENGINE_CONTRACT.md §2bis — décomposition complète par dimension
 //         primary_segment: string | null,  // idem list — lu depuis segments ci-dessous, pas recalculé
 //         insights: Array<Insight & { is_new: boolean }>,
 //         segments: Array<{ segment_type: string, priority: string, added_at: string }>,

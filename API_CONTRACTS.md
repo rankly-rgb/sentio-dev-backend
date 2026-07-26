@@ -1,6 +1,6 @@
 # API Contracts — Sentio AI Backend
 
-**Source de vérité** pour le repo frontend Next.js.  
+**Source de vérité** pour le repo frontend (Vite + React).  
 Projet Supabase : `upqakxuatlshhqiagbqw` (eu-west)  
 Base URL : `https://upqakxuatlshhqiagbqw.supabase.co/functions/v1`
 
