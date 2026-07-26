@@ -43,11 +43,25 @@ WHERE organization_id = :org AND mrr_cents > 0
 ```
 Cohérent avec la convention déjà établie (`docs/CHANGELOG_STABILITY.md` § Today Portfolio Status v1).
 
-## Concept : Alerte de limite (mécanisme à trancher en tasks)
+## Concept : Alerte de limite — décision tranchée (2026-07-26)
 
-Deux options ouvertes, sans décision figée dans ce plan (à trancher en `/speckit-tasks`) :
-1. Réutiliser `ai_insights` avec un nouveau `insight_type` dédié (ex. `plan_limit_warning`) — cohérent avec le système d'insights déjà existant côté organisation.
-2. Nouvelle notification dédiée, hors `ai_insights` (qui concerne aujourd'hui les comptes clients, pas l'organisation elle-même — collision de sens possible).
+Réutilisation du canal `ai_insights` existant, avec un nouveau `insight_type = 'plan_limit_warning'` — décision produit tranchée, plus d'option ouverte.
+
+**Modification de schéma requise** (signalée en audit, pas assumée) : la CHECK constraint `ai_insights_insight_type_check` (migration `20260301000005_phase4_intelligence.sql`) n'autorise aujourd'hui que 5 valeurs (`churn_prediction`, `expansion_opportunity`, `renewal_alert`, `payment_risk`, `usage_drop`). Une migration additive (`DROP CONSTRAINT`/`ADD CONSTRAINT`, pas de valeur retirée) doit ajouter `'plan_limit_warning'`.
+
+**Particularité** : `ai_insights.account_id` est nullable (`ON DELETE SET NULL`) — un insight `plan_limit_warning` est un insight **au niveau organisation**, pas lié à un compte spécifique. `account_id` DOIT être `NULL` pour ce type d'insight (à valider explicitement dans la logique applicative, pas seulement laissé nullable par défaut).
+
+**Format du message** (cohérent avec le format déjà en usage, cf. `generate-insights/index.ts`) :
+```json
+{
+  "insight_type": "plan_limit_warning",
+  "title": "Approche de la limite de comptes actifs suivis",
+  "description": "Votre organisation suit 450 comptes actifs sur une limite de 500 (palier Growth) — 90% atteint.",
+  "priority": "high",
+  "account_id": null,
+  "metadata": { "severity": "MAJEUR", "signals": ["active_accounts_count:450", "max_active_accounts:500", "usage_pct:90"] }
+}
+```
 
 ## Validation
 

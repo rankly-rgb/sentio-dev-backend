@@ -6,7 +6,7 @@ Le repo contient déjà une intégration Stripe complète (`stripe-oauth-initiat
 
 Le nouveau besoin (volet 2) est une **deuxième intégration Stripe, sans rapport** : Sentio facture *ses propres organisations clientes* (l'équivalent d'un abonnement SaaS classique). Ces deux intégrations DOIVENT utiliser :
 - des comptes Stripe distincts (celui de chaque organisation cliente vs le compte Stripe de Sentio lui-même),
-- des clés/secrets distincts (nouvelles variables d'environnement, ex. `SENTIO_BILLING_STRIPE_SECRET_KEY`, `SENTIO_BILLING_STRIPE_WEBHOOK_SECRET` — noms à confirmer, mais explicitement différents de `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` existants),
+- des clés/secrets distincts (variables d'environnement `STRIPE_BILLING_SECRET_KEY`, `STRIPE_BILLING_WEBHOOK_SECRET` — noms confirmés par décision produit le 2026-07-26, explicitement différents de `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` existants, sans fallback silencieux vers ces derniers),
 - des Edge Functions et handlers webhook distincts (ne jamais brancher un nouveau `case` dans `stripe-webhook/index.ts` existant — ce webhook reçoit les événements du compte Stripe **du client**, pas de celui de Sentio).
 
 **Rationale**: une confusion ici serait une faille de sécurité et de facturation critique (ex: traiter un événement `invoice.paid` d'un client comme un paiement de l'abonnement Sentio, ou exposer les clés de facturation Sentio dans un flux pensé pour l'OAuth client). C'est le risque n°1 signalé par cette recherche — SC-005 du spec en fait un critère de succès explicite.

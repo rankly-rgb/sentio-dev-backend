@@ -10,6 +10,11 @@ Implémenter le gating par palier tarifaire (Free/Growth/Scale/Enterprise) basé
 
 **Point d'architecture central** : ce chantier introduit une deuxième intégration Stripe complètement séparée (comptes, clés, webhooks, tables) de celle déjà en production pour les données clients. Toute confusion entre les deux serait une faille de sécurité/facturation — voir Constitution Check et research.md.
 
+**Décisions produit tranchées (2026-07-26)** — les trois points d'attention précédemment ouverts sont désormais résolus :
+1. **Compte Stripe Billing** : compte séparé à créer manuellement par l'utilisateur (Naima), pas encore existant au moment de ce plan. Le code référence exclusivement des secrets par variable d'environnement (`STRIPE_BILLING_SECRET_KEY`, `STRIPE_BILLING_WEBHOOK_SECRET`) — jamais de valeur en dur, **jamais de fallback silencieux** vers `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` existants (une absence de ces variables DOIT produire une erreur explicite au démarrage de la fonction, pas un comportement dégradé silencieux). Voir `docs/stripe-billing-setup.md` pour la checklist de création manuelle.
+2. **Grille finale** : `starter` devient `free` dans `organizations.plan_type`. Grille : `free | growth | scale | enterprise`. Audit préalable confirmé (2026-07-26) : 0 organisation sur 11 utilise `starter` en base — migration `20260726000001_organizations_plan_type_free_grid.sql` (UPDATE + CHECK) écrite, non appliquée à la base de production depuis cette session.
+3. **Alerte de limite** : réutilise le canal `ai_insights` existant, pas de nouveau canal. Nécessite une extension de la CHECK constraint `ai_insights_insight_type_check` (5 valeurs actuelles ne couvrent pas ce cas — signalé en audit, pas assumé) pour ajouter une nouvelle valeur `plan_limit_warning`, avec le format `{ title, description, metadata: { severity, signals } }` déjà en usage pour les autres types d'insights.
+
 ## Technical Context
 
 **Language/Version**: TypeScript 5.x, runtime Deno (Edge Functions Supabase).
@@ -40,13 +45,13 @@ Implémenter le gating par palier tarifaire (Free/Growth/Scale/Enterprise) basé
 | II. RLS obligatoire | ✅ PASS | RLS org_isolation sur `sentio_subscriptions` ; `pricing_tier_limits` est une table de référence globale sans PII, pas de RLS org-scopée nécessaire (lecture seule authentifiée). |
 | III. Multi-tenant strict | ✅ PASS | `organization_id` obligatoire et UNIQUE sur `sentio_subscriptions`. |
 | IV. Identifiants et schéma | ✅ PASS | UUID PK, `created_at`/`updated_at` sur les nouvelles tables. |
-| V. Migrations sûres | ⚠️ Point d'attention | L'élargissement de la CHECK constraint `organizations.plan_type` (suppression de `starter`) doit être vérifié contre les données existantes avant migration — si des organisations sont déjà sur `starter`, une décision de mapping (ex: `starter` → `growth`) doit être validée explicitement avant d'exécuter la migration, pas décidée silencieusement en implémentation. Migration additive sinon (`ADD COLUMN`/`CREATE TABLE`), aucun `DROP`. |
-| VI. Gestion des secrets | ✅ PASS (nouveaux secrets nécessaires) | Nouvelles variables d'environnement dédiées à la facturation Sentio (ex. `SENTIO_BILLING_STRIPE_SECRET_KEY`, `SENTIO_BILLING_STRIPE_WEBHOOK_SECRET`), strictement distinctes de `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` existants — jamais en dur, via Vault/env comme le reste du produit. |
+| V. Migrations sûres | ✅ PASS (résolu) | `starter → free` confirmé no-op sur les données réelles (0/11 organisations concernées, audit 2026-07-26). Migration `20260726000001_organizations_plan_type_free_grid.sql` : `UPDATE` (idempotent) + `DROP CONSTRAINT`/`ADD CONSTRAINT` (pas un `DROP TABLE`/`DROP COLUMN` destructeur). Extension de `ai_insights_insight_type_check` également additive (nouvelle valeur autorisée, aucune valeur existante retirée). |
+| VI. Gestion des secrets | ✅ PASS (résolu) | `STRIPE_BILLING_SECRET_KEY`/`STRIPE_BILLING_WEBHOOK_SECRET`, strictement distincts de `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` existants. **Aucun fallback silencieux** vers les secrets client — leur absence DOIT lever une erreur explicite au premier appel, jamais un comportement dégradé. Compte Stripe à créer manuellement par l'utilisateur — voir `docs/stripe-billing-setup.md`. |
 | VII. Conventions | ✅ PASS | `snake_case`, TypeScript strict, Deno. |
 | VIII. Modifications ciblées | ✅ PASS | Nouvelles tables et nouvelles Edge Functions dédiées ; seule modification d'un fichier existant : extension ciblée de `onboarding-status` (ajout d'un champ) et de `on-user-signup`/`create-organization-with-invitation` si le palier par défaut doit changer de nom. |
-| Gouvernance changements sensibles | ⚠️ Rappel explicite | Ce chantier ne touche pas RLS/helpers existants mais introduit une architecture de facturation externe critique. **Validation utilisateur explicite requise avant `/speckit-implement`** sur : (a) la stricte séparation des deux intégrations Stripe (noms de variables, comptes Stripe, endpoints), (b) la politique de migration `starter → ?` si des données existantes sont concernées, (c) le mécanisme choisi pour l'alerte de limite (`ai_insights` vs nouveau canal, cf. research.md). |
+| Gouvernance changements sensibles | ✅ Résolu | Les trois points précédemment ouverts sont tranchés par décision produit (2026-07-26, voir Summary) : séparation Stripe confirmée avec secrets dédiés sans fallback, grille `free/growth/scale/enterprise` figée avec migration confirmée no-op, alerte via `ai_insights` (extension CHECK requise, additive). Plus aucun point bloquant en attente de validation avant `/speckit-tasks`. |
 
-Aucune violation bloquante. Trois points d'attention explicitement signalés ci-dessus, à confirmer avant `/speckit-tasks`/`/speckit-implement` — cohérent avec la clause de gouvernance de la constitution, pas un blocage du plan lui-même.
+Aucune violation bloquante. Les trois points d'attention précédemment ouverts sont désormais résolus par décision produit (voir Summary) — plan prêt pour `/speckit-tasks`.
 
 ## Project Structure
 
@@ -79,7 +84,8 @@ supabase/
 │   └── _shared/
 │       └── pricing.ts               # NOUVEAU — checkAccountLimitGate(), calcul seuil alerte, validation downgrade (fonctions pures)
 ├── migrations/
-│   └── <timestamp>_pricing_billing_implementation.sql   # NOUVEAU — pricing_tier_limits, sentio_subscriptions, ALTER organizations.plan_type CHECK
+│   ├── 20260726000001_organizations_plan_type_free_grid.sql   # CRÉÉ — UPDATE starter→free (no-op confirmé) + CHECK free/growth/scale/enterprise
+│   └── <timestamp>_pricing_billing_implementation.sql          # NOUVEAU — pricing_tier_limits, sentio_subscriptions, extension ai_insights_insight_type_check (+ 'plan_limit_warning')
 └── tests/
     ├── pricing.test.ts                    # NOUVEAU — fonctions pures _shared/pricing.ts
     ├── pricing-status.test.ts             # NOUVEAU
