@@ -106,6 +106,36 @@ Priorité de segmentation v2 (décroissante, exclusif hors `nouveaux`) :
 `champions` (`health_score_band='healthy'` ET signal d'expansion actif) →
 `stables` (défaut).
 
+## 4bis. `primary_segment` (accounts-api)
+
+Exposé par `accounts-api` sur `GET /accounts-api` (liste) et
+`GET /accounts-api?id=` (détail). **Lu tel quel depuis `segment_memberships`**
+— le dernier résultat écrit par `assignSegments` (cron `calculate-scores`),
+jamais recalculé côté `accounts-api`. Zéro risque de divergence avec la
+logique de segmentation puisque c'est littéralement sa sortie persistée,
+mais léger décalage temporel possible entre deux runs du cron (accepté,
+préférable à dupliquer la logique de `determineSegmentTypesV3`).
+
+**Valeurs possibles** (exhaustif, `string | null`) :
+
+| Valeur | Signification |
+|---|---|
+| `en_churn` | `mrr_cents = 0` ou subscription annulée |
+| `impayes` | Facture(s) en retard actives |
+| `donnees_insuffisantes` | `health_score_status = 'insufficient'` — jamais combiné avec un autre segment de santé |
+| `en_danger_critique` | `churn_risk_band = 'high'` |
+| `a_risque_leger` | `churn_risk_band = 'watch'` |
+| `champions` | `health_score_band = 'healthy'` ET signal d'expansion actif |
+| `stables` | Défaut (aucun autre critère) |
+| `null` | Compte jamais encore segmenté par le cron (pas de membership actif hors `nouveaux`) — **jamais un défaut fabriqué**, absence de donnée honnête |
+
+`en_expansion` **n'apparaît jamais** dans `primary_segment` — segment
+retiré des critères actifs (fusionné dans `champions`), voir §3.
+`nouveaux` n'apparaît jamais non plus dans ce champ : c'est un segment
+non-exclusif (peut coexister avec n'importe quel segment de santé
+ci-dessus) et n'est donc pas éligible comme "segment primaire" — il reste
+consultable via le tableau `segments` complet renvoyé par `GET ?id=`.
+
 ## 5. Poids de scoring configurables par org (S11)
 
 `organizations.scoring_weights` (jsonb) :
@@ -133,6 +163,11 @@ pour un message d'erreur explicite plutôt qu'un 500 SQL.
 | `playbook-engine` (`trigger_conditions`/`eligibility_criteria` sur `churn_risk_score`) | `churn_risk_score` (comparaisons `gte`/`lt` définies par l'utilisateur dans le playbook) | **Non mis à jour** — explicitement hors scope. Voir rapport de fin pour la liste des playbooks à auditer manuellement |
 
 **Chantier de recalibrage restant (post-données réelles, séparé)** : `get_portfolio_snapshot` (`at_risk_count`), `outbound_webhook_dispatch.trigger_churn_threshold`, `playbook-engine.trigger_conditions`, et les seuils numériques `health_score <= 30/55` dans `accounts_with_priority`. Aucun de ces seuils n'est *incohérent* (ils utilisent toujours la bonne colonne), mais leur calibrage numérique hérité du modèle V1 n'a pas été validé contre la nouvelle distribution du modèle additif v3.
+
+**Repo frontend — même famille de dette, non auditée en détail depuis ce repo (documentation seule, à charge du frontend)** :
+- `today-actions.ts` — pattern `?? 0` sur des scores potentiellement absents (même défaut caché que S1 interdit côté backend)
+- `account-detail-helpers.ts` — pattern `?? 100` sur des scores potentiellement absents
+Ces deux fichiers vivent dans le repo frontend, hors de portée d'édition depuis ce repo backend — signalés ici pour que le recalibrage/nettoyage se fasse dans la même vague que les seuils backend ci-dessus plutôt que d'être oubliés séparément.
 
 ## 7. Exemple de payload `score_history` (ligne complète, modèle v2)
 
