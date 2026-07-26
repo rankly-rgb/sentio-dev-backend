@@ -146,6 +146,19 @@ Cette décision est explicite et ne doit pas être remise en cause par un futur 
 - Un commit doit compiler et passer les tests
 - Résumer le diff avant chaque commit (`git diff --stat`)
 
+## Spec Kit
+
+Spec Kit structure le développement des features substantielles en pipeline : constitution → spec → plan → tasks → implement.
+
+- **Constitution** : `.specify/memory/constitution.md` — règles non-négociables du projet (Zero-PII, RLS, multi-tenant, migrations, secrets, conventions), reprises de ce fichier CLAUDE.md.
+- `/speckit-constitution` — crée ou met à jour la constitution du projet.
+- `/speckit-specify` — crée la spécification d'une feature à partir d'une description en langage naturel.
+- `/speckit-plan` — génère le plan d'implémentation technique à partir de la spec.
+- `/speckit-tasks` — génère la liste de tâches ordonnée par dépendances à partir du plan.
+- `/speckit-implement` — exécute les tâches définies dans `tasks.md`.
+
+Toute feature substantielle doit passer par ce pipeline (constitution déjà en place → specify → plan → tasks) avant d'appeler `/speckit-implement`. Toute modification touchant RLS, les helpers multi-tenant ou l'architecture Zero-PII nécessite une validation explicite de l'utilisateur avant implémentation, même via `/speckit-implement` (règle également inscrite dans la constitution).
+
 ## Layout
 
 ```
