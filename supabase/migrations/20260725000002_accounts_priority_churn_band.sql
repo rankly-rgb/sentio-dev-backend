@@ -30,7 +30,15 @@
 -- 'critical'/'watch' à cause d'un health_score NULL, puisque `NULL <= 30`
 -- est NULL (falsy) en SQL, pas une fausse alerte silencieuse.
 
-CREATE OR REPLACE VIEW public.accounts_with_priority
+-- CREATE OR REPLACE VIEW ne peut pas être utilisé ici : Postgres interdit de
+-- repositionner une colonne existante, et `a.*` a gagné de nouvelles colonnes
+-- avec 20260725000001 (ajoutées à la fin de accounts), ce qui décale
+-- priority_label plus loin dans la liste positionnelle — Postgres refuse ça
+-- ("cannot change name of view column ... to ..."). DROP + CREATE évite le
+-- problème ; view = pas de données, pas de perte, GRANT réappliqué juste après.
+DROP VIEW IF EXISTS public.accounts_with_priority;
+
+CREATE VIEW public.accounts_with_priority
 WITH (security_invoker = true) AS
 SELECT
   a.*,
