@@ -234,7 +234,7 @@ Note l'exemple : `payment_health_score = null` alors même que `health_score_sta
 est indisponible, mais `revenue_dynamics` (35) + `contract_renewal` (30) = 65 ≥ 50,
 donc le composite reste calculable (`health_score_max_points: 65`, pas 100).
 
-## 8. Boucle de preuve de résultat des playbooks (chantier C — spec en cours, pas encore livré)
+## Playbook Outcome Tracking (chantier C — spec en cours, pas encore livré)
 
 > Contrat prévisionnel, aligné sur `specs/002-playbook-outcome-tracking/` (spec.md/plan.md/contracts/).
 > À mettre à jour si l'implémentation dévie de ce qui suit.
