@@ -21,7 +21,10 @@
 //                  search (texte libre sur display_name ou stripe_customer_id)
 //   Response 200 :
 //     {
-//       data: Array<Account & { priority_label: 'critical' | 'watch' | 'new' | 'stable' }>,
+//       data: Array<Account & {
+//         priority_label: 'critical' | 'watch' | 'new' | 'stable',
+//         primary_segment: string | null   // voir docs/API_CONTRACTS.md — liste exhaustive des valeurs
+//       }>,
 //       pagination: { limit: number, next_cursor: string | null, has_more: boolean },
 //       total_count: number,       // total de comptes de l'org, indépendant de la pagination
 //       total_mrr_cents: number    // idem, source : RPC get_portfolio_snapshot (chantier 5.1)
@@ -34,6 +37,9 @@
 //   (health_score <= 30/55 : seuils numériques hérités, recalibrage
 //   séparé — voir docs/RUNBOOK.md §7. churn_risk_band est déjà calibré par
 //   construction sur le modèle v3, pas de seuil numérique à recalibrer.)
+//   primary_segment : PAS calculé ici — lu tel quel depuis segment_memberships,
+//   dernier résultat persisté par assignSegments (cron calculate-scores),
+//   'nouveaux' exclu (non-exclusif). null si jamais encore segmenté par le cron.
 //
 // GET /accounts-api?id=:uuid
 //   Response 200 :
@@ -50,6 +56,7 @@
 //           expansion:         { value: number | null, status: 'available'|'unavailable', unavailable_reason: string | null }
 //         },
 //         score_breakdown: object,  // voir docs/API_CONTRACTS.md §2bis — décomposition complète par dimension
+//         primary_segment: string | null,  // idem list — lu depuis segments ci-dessous, pas recalculé
 //         insights: Array<Insight & { is_new: boolean }>,
 //         segments: Array<{ segment_type: string, priority: string, added_at: string }>,
 //         hubspot:  HubspotCompany | null
@@ -168,12 +175,53 @@ async function handleList(
 
   const snapshot = snapshotRes.data as { total_accounts: number; total_mrr_cents: number } | null
 
+  const primarySegmentByAccountId = await fetchPrimarySegments(supabase, orgId, items.map((a: { id: string }) => a.id))
+  const itemsWithSegment = items.map((a: { id: string }) => ({
+    ...a,
+    primary_segment: primarySegmentByAccountId.get(a.id) ?? null,
+  }))
+
   return jsonResponse({
-    data: items,
+    data: itemsWithSegment,
     pagination: { limit, next_cursor: nextCursor, has_more: hasMore },
     total_count: snapshot?.total_accounts ?? 0,
     total_mrr_cents: snapshot?.total_mrr_cents ?? 0,
   })
+}
+
+// primary_segment : lit le résultat déjà persisté par assignSegments (cron
+// calculate-scores) dans segment_memberships — ne recalcule PAS la logique
+// de segmentation ici (source unique de vérité = determineSegmentTypesV3,
+// _shared/scoring.ts). 'nouveaux' est exclu car non-exclusif (peut coexister
+// avec le segment de santé, voir S12) ; le segment de santé restant est
+// garanti unique par l'invariant vérifié dans RUNBOOK.md §7. `null` si le
+// cron n'a jamais encore segmenté ce compte (jamais un défaut fabriqué).
+async function fetchPrimarySegments(
+  supabase: ReturnType<typeof createServiceClient>,
+  orgId: string,
+  accountIds: string[],
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>()
+  if (accountIds.length === 0) return map
+
+  const { data, error } = await supabase
+    .from('segment_memberships')
+    .select('account_id, account_segments!inner(segment_type)')
+    .eq('organization_id', orgId)
+    .eq('status', 'active')
+    .neq('account_segments.segment_type', 'nouveaux')
+    .in('account_id', accountIds)
+
+  if (error) {
+    console.error(JSON.stringify({ level: 'error', function_name: 'accounts-api', organization_id: orgId, message: `primary_segment lookup failed: ${error.message}` }))
+    return map
+  }
+
+  for (const row of (data ?? [])) {
+    const seg = row.account_segments as unknown as { segment_type: string } | null
+    if (seg?.segment_type) map.set(row.account_id, seg.segment_type)
+  }
+  return map
 }
 
 // ── GET one (with narratives + is_new) ───────────────────────
@@ -233,6 +281,11 @@ async function handleGetOne(
       risk_score: sm.risk_score,
     }
   })
+
+  // primary_segment : même source que handleList (memberships persistés par
+  // le cron), pas de recalcul — 'nouveaux' exclu (non-exclusif), le segment
+  // de santé restant est garanti unique par l'invariant S12.
+  const primarySegment = segments.find((s) => s.segment_type !== null && s.segment_type !== 'nouveaux')?.segment_type ?? null
 
   const narratives = generateNarrativesV3({
     health_score_points: account.health_score,
@@ -298,6 +351,7 @@ async function handleGetOne(
       updated_at: account.updated_at,
       scores,
       score_breakdown: account.score_breakdown ?? null,
+      primary_segment: primarySegment,
       insights,
       segments,
       hubspot,
