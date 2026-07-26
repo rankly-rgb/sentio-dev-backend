@@ -226,7 +226,7 @@ async function fetchPrimarySegments(
 
 // ── GET one (with narratives + is_new) ───────────────────────
 
-async function handleGetOne(
+export async function handleGetOne(
   supabase: ReturnType<typeof createServiceClient>,
   id: string,
   orgId: string,
