@@ -8,15 +8,17 @@
 
 Ajouter le marquage manuel "exécuté" d'une exécution de playbook avec fenêtre d'attribution configurable, une détection automatique de résolution en étendant (de façon strictement additive et fire-and-forget) le traitement `invoice.paid` déjà existant dans `stripe-webhook`, et un lien traçable optionnel avec log de clic Zero-PII (`playbook_execution_clicks`). Aucun nouveau pipeline de synchronisation Stripe, réutilisation exclusive de l'existant.
 
+**Alignement frontend (2026-07-26)** : ajout de trois dépendances identifiées par le frontend, comblant des manques du plan initial — (1) un endpoint de lecture d'état/durée de la fenêtre d'attribution après le marquage initial, (2) un endpoint de taux de résolution exécuté vs non-exécuté avec taille d'échantillon (seuil de fiabilité `< 20`, aligné sur la convention déjà retenue pour les benchmarks du chantier A), (3) le stockage de la réponse à un nudge de confirmation (`nudge_response`/`nudge_responded_at` sur `playbook_executions`). Détail complet dans `data-model.md` et `contracts/playbook-outcome-api.md`.
+
 ## Technical Context
 
 **Language/Version**: TypeScript 5.x, runtime Deno (Edge Functions Supabase).
 
 **Primary Dependencies**: `_shared/supabase-client.ts`, `_shared/auth.ts`, code existant de `stripe-webhook/index.ts` (`handleInvoiceEvent`), pattern fire-and-forget déjà utilisé pour `invoice.payment_failed` → `playbook-executor`.
 
-**Storage**: Supabase PostgreSQL — extension de `playbooks` (+1 colonne) et `playbook_executions` (+2 colonnes), nouvelle table `playbook_execution_clicks`.
+**Storage**: Supabase PostgreSQL — extension de `playbooks` (+1 colonne) et `playbook_executions` (+4 colonnes : `attribution_deadline_at`, `resolved_via`, `nudge_response`, `nudge_responded_at`), nouvelle table `playbook_execution_clicks`. Le taux de résolution exécuté vs non-exécuté et le statut d'attribution sont des agrégats/champs dérivés calculés à la lecture, pas de nouvelle table.
 
-**Testing**: Vitest — tests unitaires sur le calcul de `attribution_deadline_at`, la sélection des exécutions "en attente d'attribution", l'idempotence du marquage exécuté, et un test Zero-PII explicite sur le contenu de `playbook_execution_clicks`.
+**Testing**: Vitest — tests unitaires sur le calcul de `attribution_deadline_at`, la sélection des exécutions "en attente d'attribution", l'idempotence du marquage exécuté, le calcul de `attribution_status` dérivé, l'agrégation exécuté/non-exécuté avec `sample_size_warning`, et un test Zero-PII explicite sur le contenu de `playbook_execution_clicks`.
 
 **Target Platform**: Supabase Edge Functions (Deno).
 
@@ -73,15 +75,18 @@ supabase/
 │   ├── playbook-link/                   # NOUVEAU — Edge Function publique, log de clic + redirection 302
 │   │   └── index.ts
 │   ├── playbook-execute/
-│   │   └── index.ts                    # MODIFIÉ (ou nouvel endpoint dédié) — ajout de l'action "mark-executed"
+│   │   └── index.ts                    # MODIFIÉ (ou nouvel endpoint dédié) — ajout des actions "mark-executed", "attribution-status" (GET), "nudge-response"
+│   ├── playbook-outcome-stats/           # NOUVEAU — Edge Function GET, agrégation exécuté vs non-exécuté par playbook
+│   │   └── index.ts
 │   └── _shared/
-│       └── playbook-engine.ts           # MODIFIÉ (ajout ciblé) — helpers calcul attribution_deadline_at, sélection exécutions en attente
+│       └── playbook-engine.ts           # MODIFIÉ (ajout ciblé) — helpers calcul attribution_deadline_at, statut dérivé attribution_status, sélection exécutions en attente
 ├── migrations/
-│   └── <timestamp>_playbook_outcome_tracking.sql   # NOUVEAU — colonnes playbooks/playbook_executions + table playbook_execution_clicks + RLS
+│   └── <timestamp>_playbook_outcome_tracking.sql   # NOUVEAU — colonnes playbooks/playbook_executions (+ nudge_response/nudge_responded_at) + table playbook_execution_clicks + RLS
 └── tests/
     ├── playbook-outcome-detector.test.ts   # NOUVEAU
+    ├── playbook-outcome-stats.test.ts       # NOUVEAU — agrégation, sample_size_warning, division par zéro
     ├── playbook-link.test.ts               # NOUVEAU
-    └── playbook-execute.test.ts             # MODIFIÉ — cas mark-executed
+    └── playbook-execute.test.ts             # MODIFIÉ — cas mark-executed, attribution-status, nudge-response
 ```
 
 **Structure Decision**: Extension du monorepo existant. Le découpage exact entre "nouvelle fonction dédiée" et "extension d'une fonction existante" (ex. `playbook-execute` pour le marquage, plutôt qu'une nouvelle fonction) sera confirmé en `/speckit-tasks` — ce plan pose la contrainte de non-régression (FR-005) et de modification ciblée, pas le découpage final des fichiers.

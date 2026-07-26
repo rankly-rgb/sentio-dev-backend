@@ -233,3 +233,39 @@ Note l'exemple : `payment_health_score = null` alors même que `health_score_sta
 (≠ `insufficient`) — c'est attendu : la dimension `payment_health` (35 pts)
 est indisponible, mais `revenue_dynamics` (35) + `contract_renewal` (30) = 65 ≥ 50,
 donc le composite reste calculable (`health_score_max_points: 65`, pas 100).
+
+## 8. Boucle de preuve de résultat des playbooks (chantier C — spec en cours, pas encore livré)
+
+> Contrat prévisionnel, aligné sur `specs/002-playbook-outcome-tracking/` (spec.md/plan.md/contracts/).
+> À mettre à jour si l'implémentation dévie de ce qui suit.
+
+### 8.1 Statut d'exécution et fenêtre d'attribution — `GET /playbook-execute/{execution_id}/attribution-status`
+
+| Champ | Type | Nullable | Signification |
+|---|---|---|---|
+| `execution_id` | uuid | non | |
+| `executed_at` | timestamptz | **oui** | `null` si l'exécution n'a jamais été marquée exécutée |
+| `attribution_deadline_at` | timestamptz | **oui** | `null` tant que `executed_at` est `null` ; figée au moment du marquage, ne suit jamais une modification ultérieure de `playbooks.attribution_window_days` |
+| `attribution_status` | `'not_executed'\|'active'\|'expired'\|'resolved'` | non | Champ **dérivé**, jamais stocké — recalculé à chaque lecture à partir de `executed_at`/`account_converted`/`attribution_deadline_at` |
+| `time_remaining_seconds` | number | **oui** | `0` si `expired`/`resolved`, `null` si `not_executed` |
+
+### 8.2 Taux de résolution exécuté vs non-exécuté — `GET /playbook-outcome-stats?playbook_id={uuid}`
+
+| Champ | Type | Nullable | Signification |
+|---|---|---|---|
+| `playbook_id` | uuid | non | |
+| `executed.sample_size` | number | non | Nombre d'exécutions marquées exécutées pour ce playbook |
+| `executed.resolved_count` | number | non | Sous-ensemble `account_converted = true` |
+| `executed.resolution_rate` | number (0-1) | **oui** | `null` si `sample_size = 0` — **jamais `0` par défaut** (règle S1 du présent document, appliquée par cohérence à ce nouveau contrat) |
+| `executed.sample_size_warning` | boolean | non | `true` si `sample_size < 20` — seuil identique à la règle "benchmarks 20 comptes minimum" du chantier A (scoring V2, `docs/CHANGELOG_STABILITY.md`). Le frontend DOIT afficher l'avertissement plutôt qu'un pourcentage nu quand `true` |
+| `not_executed.*` | — | — | Même structure que `executed.*`, pour les exécutions jamais marquées exécutées (`executed_at IS NULL`) |
+
+### 8.3 Nudge de confirmation — `POST /playbook-execute/{execution_id}/nudge-response`
+
+| Champ | Type | Nullable | Signification |
+|---|---|---|---|
+| `response` (body) | `'resolved'\|'not_resolved'\|'unsure'` | non | Réponse déclarative du CSM |
+| `nudge_response` (réponse) | idem | **oui** | Persisté sur `playbook_executions.nudge_response` |
+| `nudge_responded_at` (réponse) | timestamptz | **oui** | Persisté sur `playbook_executions.nudge_responded_at` |
+
+**Règle de non-écrasement** : une réponse `nudge_response = 'resolved'` ne modifie **jamais** `account_converted`/`resolved_via` — ce sont deux signaux distincts (déclaratif CSM vs détection automatique factuelle via `invoice.paid`). Le frontend doit les afficher côte à côte, jamais fusionnés en un seul indicateur de résolution.

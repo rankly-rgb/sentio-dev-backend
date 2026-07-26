@@ -58,6 +58,24 @@ Un CSM inclut, dans le message d'un playbook exécuté, un lien traçable option
 
 ---
 
+### User Story 4 - Lecture d'état, taux de résolution et nudge de confirmation (Priority: P2)
+
+*(ajoutée le 2026-07-26 suite à l'alignement avec les dépendances listées par le frontend)*
+
+Un CSM consulte, pour une exécution donnée, l'état courant de sa fenêtre d'attribution (active, expirée, résolue) ; consulte, pour un playbook donné, le taux de résolution comparé entre comptes où le playbook a été marqué exécuté et comptes où il ne l'a pas été, avec la taille d'échantillon associée ; et peut répondre à un nudge de confirmation lui demandant si l'exécution a résolu la situation.
+
+**Why this priority**: Ces trois éléments consomment/complètent les données produites par US1/US2 — ils ne sont utiles qu'une fois US1/US2 en place, mais sont nécessaires pour que le frontend puisse afficher une boucle de preuve complète plutôt qu'un simple horodatage.
+
+**Independent Test**: Peut être testé en consultant l'état d'attribution d'une exécution à différents moments (avant expiration, après expiration, après résolution), en consultant le taux de résolution d'un playbook ayant à la fois des exécutions marquées et non marquées, et en soumettant une réponse à un nudge de confirmation.
+
+**Acceptance Scenarios**:
+
+1. **Given** une exécution marquée exécutée avec une fenêtre d'attribution active, **When** le CSM consulte son état, **Then** le système retourne un statut "active" et le temps restant.
+2. **Given** un playbook avec des exécutions marquées exécutées et d'autres non marquées, **When** le CSM consulte le taux de résolution, **Then** le système retourne un taux distinct pour chaque groupe, accompagné de la taille d'échantillon et d'un avertissement explicite si cette taille est trop faible pour être fiable.
+3. **Given** une exécution marquée exécutée, **When** le CSM répond à un nudge de confirmation, **Then** la réponse est enregistrée avec un horodatage, sans écraser une détection automatique de résolution déjà enregistrée.
+
+---
+
 ### Edge Cases
 
 - Que se passe-t-il si un événement `invoice.paid` concerne un compte ayant plusieurs exécutions de playbook actives en attente d'attribution simultanément (ex: deux playbooks différents exécutés récemment sur le même compte) ? Le système doit attribuer la résolution de façon non-ambiguë (ex: toutes les exécutions en fenêtre active sont marquées résolues, ou seule la plus récente — à trancher en plan technique, cf. Assumptions).
@@ -79,6 +97,9 @@ Un CSM inclut, dans le message d'un playbook exécuté, un lien traçable option
 - **FR-008**: Le log de clic NE DOIT JAMAIS contenir d'email, de nom de personne, de téléphone ou d'adresse IP — uniquement `stripe_customer_id`, `organization_id`, un horodatage, et une référence à l'exécution de playbook.
 - **FR-009**: Toute donnée créée ou modifiée par cette fonctionnalité (exécution marquée, résolution détectée, log de clic) DOIT être scopée par `organization_id`.
 - **FR-010**: Le système DOIT gérer explicitement le cas où plusieurs exécutions actives sont en attente d'attribution pour le même compte au moment d'un événement `invoice.paid`.
+- **FR-011**: Le système DOIT permettre de lire, pour une exécution donnée, l'état courant de sa fenêtre d'attribution (non exécutée, active, expirée, résolue) et le temps restant le cas échéant.
+- **FR-012**: Le système DOIT permettre de calculer, pour un playbook donné, un taux de résolution distinct pour les comptes où le playbook a été marqué exécuté et pour ceux où il ne l'a pas été, accompagné de la taille d'échantillon de chaque groupe et d'un avertissement explicite lorsque cette taille est trop faible pour être fiable.
+- **FR-013**: Le système DOIT permettre d'enregistrer la réponse d'un utilisateur à un nudge de confirmation associé à une exécution marquée exécutée, sans écraser une résolution déjà détectée automatiquement.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -86,6 +107,7 @@ Un CSM inclut, dans le message d'un playbook exécuté, un lien traçable option
 - **Fenêtre d'attribution** : durée configurable (par playbook, avec valeur par défaut) déterminant la période pendant laquelle une résolution externe peut être attribuée à une exécution marquée exécutée.
 - **Lien traçable** : référence unique associée à une exécution de playbook, permettant redirection + log de clic.
 - **Log de clic** : enregistrement horodaté d'une visite d'un lien traçable, contenant uniquement `stripe_customer_id`, `organization_id`, horodatage, référence à l'exécution.
+- **Nudge de confirmation** : sollicitation adressée au CSM pour confirmer si une exécution marquée exécutée a résolu la situation ; la réponse (`resolved`/`not_resolved`/`unsure`) et son horodatage sont stockés sur l'exécution concernée.
 
 ## Success Criteria *(mandatory)*
 
@@ -96,6 +118,7 @@ Un CSM inclut, dans le message d'un playbook exécuté, un lien traçable option
 - **SC-003**: Le traitement existant des événements `invoice.paid` pour les comptes sans exécution en attente reste inchangé (0 régression mesurée sur le comportement actuel).
 - **SC-004**: Un audit du contenu de tout log de clic ne révèle aucune donnée personnelle — vérifiable par contrôle automatisé sur 100% des logs.
 - **SC-005**: Un lien traçable généré redirige correctement vers sa destination dans 100% des visites, y compris après plusieurs clics répétés sur le même lien.
+- **SC-006**: Le taux de résolution affiché pour un groupe (exécuté ou non-exécuté) est systématiquement accompagné de sa taille d'échantillon, avec un avertissement explicite affiché à chaque fois que cette taille est inférieure à 20 — jamais un pourcentage nu sans ce contexte.
 
 ## Assumptions
 

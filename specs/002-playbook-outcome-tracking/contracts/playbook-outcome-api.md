@@ -17,6 +17,70 @@
 
 ---
 
+## `GET /playbook-execute/{execution_id}/attribution-status`
+
+*(nouveau — dépendance frontend : état/durée de la fenêtre d'attribution, lisible après le marquage initial)*
+
+**Auth**: Bearer JWT (ES256), scoping `organization_id` obligatoire.
+
+**Réponse succès (200)** :
+```json
+{
+  "execution_id": "uuid",
+  "executed_at": "2026-07-20T10:00:00Z",
+  "attribution_deadline_at": "2026-08-03T10:00:00Z",
+  "attribution_status": "active",
+  "time_remaining_seconds": 604800
+}
+```
+
+`attribution_status` ∈ `not_executed | active | expired | resolved` (cf. data-model.md, champ dérivé — jamais stocké, toujours recalculé à la lecture). `time_remaining_seconds` est `0` si `expired`/`resolved`, `null` si `not_executed`.
+
+**Erreurs** :
+- `404` — exécution inexistante ou hors organisation de l'appelant.
+
+---
+
+## `GET /playbook-outcome-stats?playbook_id={uuid}`
+
+*(nouveau — dépendance frontend : taux de résolution exécuté vs non-exécuté avec taille d'échantillon)*
+
+**Auth**: Bearer JWT (ES256), scoping `organization_id` obligatoire.
+
+**Réponse succès (200)** :
+```json
+{
+  "playbook_id": "uuid",
+  "executed": { "sample_size": 34, "resolved_count": 21, "resolution_rate": 0.62, "sample_size_warning": false },
+  "not_executed": { "sample_size": 12, "resolved_count": 3, "resolution_rate": 0.25, "sample_size_warning": true }
+}
+```
+
+`sample_size_warning: true` dès que `sample_size < 20`, cohérent avec le seuil déjà retenu pour les benchmarks du chantier A (scoring V2) — le frontend DOIT afficher cet avertissement plutôt qu'un pourcentage nu quand il est `true`. `resolution_rate: null` (pas `0`) si `sample_size = 0`, pour ne jamais laisser croire à un taux de résolution nul mesuré.
+
+**Erreurs** :
+- `404` — playbook inexistant ou hors organisation de l'appelant.
+
+---
+
+## `POST /playbook-execute/{execution_id}/nudge-response`
+
+*(nouveau — dépendance frontend : stockage de la réponse au nudge de confirmation)*
+
+**Auth**: Bearer JWT (ES256), scoping `organization_id` obligatoire.
+
+**Body** : `{ "response": "resolved" | "not_resolved" | "unsure" }`
+
+**Effet** : renseigne `nudge_response` et `nudge_responded_at = now()` sur l'exécution. Si `response = "resolved"` et que l'exécution n'est pas déjà `account_converted = true` via la détection automatique (US2), cette réponse manuelle NE DÉCLENCHE PAS automatiquement `account_converted = true` dans ce V1 (signal déclaratif du CSM, distinct de la détection factuelle via Stripe — éviter de mélanger une auto-déclaration et une preuve transactionnelle sans décision produit explicite sur leur pondération relative).
+
+**Réponse succès (200)** : `{ execution_id, nudge_response, nudge_responded_at }`
+
+**Erreurs** :
+- `404` — exécution inexistante ou hors organisation de l'appelant.
+- `409` — l'exécution n'est pas encore marquée exécutée (`executed_at IS NULL`) — un nudge ne peut concerner qu'une exécution déjà exécutée.
+
+---
+
 ## `POST /playbook-outcome-detector` (interne, appelée en fire-and-forget par `stripe-webhook`)
 
 **Auth**: `service_role` uniquement (appel interne, même pattern que `playbook-executor` existant) — jamais exposée publiquement, `verify_jwt` selon convention interne des fonctions déjà appelées ainsi (`playbook-executor`).
