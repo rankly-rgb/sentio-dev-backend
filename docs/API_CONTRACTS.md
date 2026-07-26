@@ -234,7 +234,7 @@ Note l'exemple : `payment_health_score = null` alors même que `health_score_sta
 est indisponible, mais `revenue_dynamics` (35) + `contract_renewal` (30) = 65 ≥ 50,
 donc le composite reste calculable (`health_score_max_points: 65`, pas 100).
 
-## 8. Mise en œuvre technique du pricing (chantier D — spec en cours, pas encore livré)
+## Pricing & Billing (chantier D — spec en cours, pas encore livré)
 
 > Contrat prévisionnel, aligné sur `specs/003-pricing-billing-implementation/` (spec.md/plan.md/contracts/).
 > Décisions produit tranchées le 2026-07-26 : grille `free/growth/scale/enterprise`
