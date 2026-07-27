@@ -49,3 +49,7 @@ next-env.d.ts
 
 *.swp
 .vscode/
+
+# Spec Kit local state (not shared — points to whichever feature is
+# "active" in this working copy, differs per branch/session)
+.specify/feature.json
