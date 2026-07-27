@@ -253,11 +253,12 @@ Retourne tous les champs bruts (`title_en`, `description_en`) plus les champs r�
   "title": "string (legacy — copié dans title_en si absent)",
   "title_en": "string?",
   "description": "string? (legacy)",
-  "description_en": "string?"
+  "description_en": "string?",
+  "link_redirect_url": "string? (https:// obligatoire si fourni — cf. §8.6)"
 }
 ```
 
-**Règle de validation :** au moins un parmi `title`, `title_en` doit être non-vide.
+**Règle de validation :** au moins un parmi `title`, `title_en` doit être non-vide. `link_redirect_url`, si fourni, doit être une URL `https://` valide (`400` sinon).
 
 **Comportement legacy :** si seul `title` est fourni, il est copié dans `title_en`.
 
@@ -272,9 +273,12 @@ Accepte les mêmes champs que le POST. Seuls les champs fournis sont mis à jour
 ```json
 {
   "title_en": "string?",
-  "description_en": "string?"
+  "description_en": "string?",
+  "link_redirect_url": "string? | null (https:// obligatoire si non-null — cf. §8.6)"
 }
 ```
+
+`link_redirect_url: null` retire la configuration existante (repli sur `NEXT_PUBLIC_APP_URL` pour le lien traçable de ce playbook, cf. §8.5).
 
 ---
 
@@ -756,10 +760,15 @@ Envoie un payload de test vers une destination outbound configurée (sans attend
 
 ---
 
-## Playbook Outcome Tracking (chantier C — spec en cours, pas encore livré)
+## Playbook Outcome Tracking (chantier C)
 
-> Contrat prévisionnel, aligné sur `specs/002-playbook-outcome-tracking/` (spec.md/plan.md/contracts/).
-> À mettre à jour si l'implémentation dévie de ce qui suit.
+> Implémenté sur `feat/playbook-outcome-tracking` (2026-07-27), aligné sur
+> `specs/002-playbook-outcome-tracking/` (spec.md/plan.md/contracts/).
+> Restent en attente : application des migrations + vérification RLS en
+> environnement Supabase réel (T003, T033 de `tasks.md`) — non exécutables
+> dans l'environnement de développement Claude Code (pas de stack Supabase
+> locale). Pas de merge dans `main` tant que ces vérifications manuelles
+> n'ont pas été faites.
 
 ### 8.1 Marquer une exécution comme exécutée — `POST /playbook-execute/{execution_id}/mark-executed`
 
@@ -839,6 +848,38 @@ Envoie un payload de test vers une destination outbound configurée (sans attend
 | `nudge_responded_at` (réponse) | timestamptz | **oui** | Persisté sur `playbook_executions.nudge_responded_at` |
 
 **Règle de non-écrasement** : une réponse `nudge_response = 'resolved'` ne modifie **jamais** `account_converted`/`resolved_via` — ce sont deux signaux distincts (déclaratif CSM vs détection automatique factuelle via `invoice.paid`). Le frontend doit les afficher côte à côte, jamais fusionnés en un seul indicateur de résolution.
+
+### 8.5 Lien traçable — `GET /playbook-link/{execution_id}`
+
+**Auth** : aucune — endpoint public, destiné à être cliqué par un destinataire externe sans session. `verify_jwt = false` (`supabase/config.toml`).
+
+**Effet** :
+1. Vérifie l'existence de `execution_id` dans `playbook_executions` — `404` sans fuite d'information sur l'organisation si absent.
+2. Insère une ligne dans `playbook_execution_clicks` (`organization_id`, `playbook_execution_id`, `stripe_customer_id`, `clicked_at` — Zero-PII, jamais dédupliqué : chaque visite crée une nouvelle ligne, cf. §3 Nouvelle entité `playbook_execution_clicks`).
+3. Répond `302` avec un header `Location` pointant vers la destination résolue.
+
+**Résolution de la destination — exclusivement côté serveur** :
+```
+destination =
+  playbooks.link_redirect_url   (si configurée sur le playbook de cette exécution)
+  SINON NEXT_PUBLIC_APP_URL     (env var produit, défaut https://app.sentioapp.io)
+```
+**Garantie anti-open-redirect** : la requête `GET /playbook-link/{execution_id}` ne porte **aucun paramètre de destination** (ni query string, ni header) — `execution_id` sert uniquement à un `SELECT`, jamais à construire l'URL de redirection. La destination est entièrement déterminée par ce qui est déjà en base (`playbooks.link_redirect_url`, configuré séparément via `playbook-crud` — cf. §8.6 ci-dessous), jamais par la requête de clic elle-même.
+
+**Réponse succès (302)** : header `Location` uniquement, pas de corps.
+
+**Erreurs** :
+- `404` — `execution_id` inexistant, sans distinction avec un `execution_id` d'une autre organisation (pas de fuite d'information).
+
+### 8.6 Configuration de la destination — `playbooks.link_redirect_url` (via `playbook-crud`)
+
+Champ optionnel sur `playbooks`, en écriture uniquement via `POST`/`PUT /playbook-crud` (cf. section Playbooks ci-dessus) — **jamais** modifiable ni lisible depuis `playbook-link`.
+
+| Champ | Type | Validation |
+|---|---|---|
+| `link_redirect_url` | `string \| null` | Optionnel. Si fourni, DOIT être une URL absolue de schéma `https:` (`new URL(value).protocol === 'https:'`) — sinon `400`. `null` accepté (retire la configuration, repli sur `NEXT_PUBLIC_APP_URL`). |
+
+**Scope UI (V1)** : **aucune UI de configuration n'est prévue côté frontend pour ce champ dans cette V1.** Contrairement à `attribution-status`, `playbook-outcome-stats` et `nudge-response` (alignement frontend du 2026-07-26, cf. plan.md), `link_redirect_url` n'a été identifié dans aucune dépendance frontend listée pour ce chantier — la spec (`spec.md`, Assumptions) couvre explicitement le backend uniquement. Ce champ est donc, pour l'instant, configurable **uniquement via un appel API direct à `playbook-crud`** (pas de champ de formulaire prévu dans l'UI playbooks). Une UI de configuration reste à spécifier séparément si un besoin produit émerge.
 
 ---
 
