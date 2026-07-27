@@ -15,6 +15,8 @@ Implémenter le gating par palier tarifaire (Free/Growth/Scale/Enterprise) basé
 2. **Grille finale** : `starter` devient `free` dans `organizations.plan_type`. Grille : `free | growth | scale | enterprise`. Audit préalable confirmé (2026-07-26) : 0 organisation sur 11 utilise `starter` en base — migration `20260726000001_organizations_plan_type_free_grid.sql` (UPDATE + CHECK) écrite, non appliquée à la base de production depuis cette session.
 3. **Alerte de limite** : réutilise le canal `ai_insights` existant, pas de nouveau canal. Nécessite une extension de la CHECK constraint `ai_insights_insight_type_check` (5 valeurs actuelles ne couvrent pas ce cas — signalé en audit, pas assumé) pour ajouter une nouvelle valeur `plan_limit_warning`, avec le format `{ title, description, metadata: { severity, signals } }` déjà en usage pour les autres types d'insights.
 
+**Décision produit du 2026-07-27 — UI de paiement Growth self-serve** : Stripe Checkout Session (page hébergée, redirection) — pas Stripe Elements. **Non implémenté** : dépend de la création du compte Stripe Billing séparé (voir `docs/stripe-billing-setup.md`, checklist non complétée à ce jour). `sentio-billing-subscribe/index.ts` reste en l'état volontairement (statut synchrone via l'API `Subscriptions` directe, pas de collecte de paiement réelle) jusqu'à ce moment-là — cf. `API_CONTRACTS.md` § 8.3 pour le détail du comportement actuel.
+
 ## Technical Context
 
 **Language/Version**: TypeScript 5.x, runtime Deno (Edge Functions Supabase).
