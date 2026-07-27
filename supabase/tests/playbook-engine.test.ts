@@ -7,6 +7,8 @@ import {
   executeAction,
   calculateNextScheduledAt,
   isRecentExecution,
+  calculateAttributionDeadline,
+  deriveAttributionStatus,
   VALID_ACTION_TYPES,
   VALID_COMPARISON_OPERATORS,
   type Condition,
@@ -478,5 +480,57 @@ describe('isRecentExecution', () => {
   it('returns false for exactly at cooldown boundary', () => {
     const exactlyAtCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
     expect(isRecentExecution(exactlyAtCutoff, 24)).toBe(false)
+  })
+})
+
+// ── Playbook Outcome Tracking (chantier C) ───────────────────
+
+describe('calculateAttributionDeadline', () => {
+  it('adds attributionWindowDays days to executedAt', () => {
+    const deadline = calculateAttributionDeadline('2026-07-01T00:00:00.000Z', 7)
+    expect(deadline).toBe('2026-07-08T00:00:00.000Z')
+  })
+
+  it('defaults to 14 days when attributionWindowDays is null/undefined', () => {
+    expect(calculateAttributionDeadline('2026-07-01T00:00:00.000Z', null)).toBe('2026-07-15T00:00:00.000Z')
+    expect(calculateAttributionDeadline('2026-07-01T00:00:00.000Z', undefined)).toBe('2026-07-15T00:00:00.000Z')
+  })
+
+  it('accepts a Date instance', () => {
+    const deadline = calculateAttributionDeadline(new Date('2026-07-01T00:00:00.000Z'), 1)
+    expect(deadline).toBe('2026-07-02T00:00:00.000Z')
+  })
+})
+
+describe('deriveAttributionStatus', () => {
+  const now = new Date('2026-07-10T00:00:00.000Z')
+
+  it('returns not_executed when marked_executed_at is null', () => {
+    const status = deriveAttributionStatus({ marked_executed_at: null, account_converted: false, attribution_deadline_at: null }, now)
+    expect(status).toBe('not_executed')
+  })
+
+  it('returns resolved when account_converted is true, regardless of deadline', () => {
+    const status = deriveAttributionStatus(
+      { marked_executed_at: '2026-07-01T00:00:00Z', account_converted: true, attribution_deadline_at: '2026-07-05T00:00:00Z' },
+      now,
+    )
+    expect(status).toBe('resolved')
+  })
+
+  it('returns active when deadline is in the future and not converted', () => {
+    const status = deriveAttributionStatus(
+      { marked_executed_at: '2026-07-08T00:00:00Z', account_converted: false, attribution_deadline_at: '2026-07-20T00:00:00Z' },
+      now,
+    )
+    expect(status).toBe('active')
+  })
+
+  it('returns expired when deadline is in the past and not converted', () => {
+    const status = deriveAttributionStatus(
+      { marked_executed_at: '2026-06-01T00:00:00Z', account_converted: false, attribution_deadline_at: '2026-07-01T00:00:00Z' },
+      now,
+    )
+    expect(status).toBe('expired')
   })
 })

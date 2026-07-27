@@ -32,9 +32,21 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 
 ---
 
+## Statut d'implémentation (2026-07-27, `/speckit-implement`)
+
+**US1, US2 (partielle), US4 implémentées et testées.** US3 (lien traçable) et le câblage stripe-webhook de US2 **non implémentés** — points de gouvernance non validés dans cette passe :
+
+- **T003, T033** : nécessitent une stack Supabase locale réelle (Docker + `supabase start` + utilisateur de test) pour appliquer la migration et vérifier la RLS / rejouer `quickstart.md` — non disponible dans cet environnement. Non simulées, laissées non cochées.
+- **T015, T022** : points de gouvernance explicitement marqués dans ce fichier — nécessitent une validation utilisateur explicite avant implémentation, non obtenue dans cette passe. Non traitées.
+- **T013, T035** : dépendent de T015 (non faite) — vacuous sans elle, non traitées.
+- **T017-T021, T023** : dépendent de T022 (non faite, gate de conception anti-open-redirect) — US3 non implémentée dans cette passe.
+- **Écart de conception signalé** : `research.md` prévoyait de réutiliser `playbook_executions.executed_at` comme horodatage du marquage manuel. Or cette colonne a `DEFAULT NOW()` et est déjà peuplée par `playbook-execute`/`playbook-scheduler` à la création de **chaque** ligne (elle représente l'instant de déclenchement système, pas une confirmation manuelle a posteriori) — la réutiliser aurait rendu l'état `not_executed` inatteignable et l'idempotence de `mark-executed` sans effet. Implémenté à la place avec une colonne dédiée `manual_executed_at` (cf. migration `20260727000002_playbook_outcome_tracking.sql`), exposée sous le nom `executed_at` dans les réponses JSON pour rester conforme au contrat externe (`API_CONTRACTS.md` § 8.1).
+
+---
+
 ## Phase 1: Setup
 
-- [ ] T001 Vérifier la structure exacte actuelle de `playbook_executions` (`executed_at`, `account_converted`, `conversion_type`, `converted_at`) dans les migrations existantes, pour confirmer qu'aucune colonne de ce chantier n'entre en collision (cf. research.md)
+- [X] T001 Vérifier la structure exacte actuelle de `playbook_executions` (`executed_at`, `account_converted`, `conversion_type`, `converted_at`) dans les migrations existantes, pour confirmer qu'aucune colonne de ce chantier n'entre en collision (cf. research.md)
 
 ---
 
@@ -42,9 +54,9 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 
 **⚠️ CRITICAL**: Aucune story ne peut être implémentée avant la fin de cette phase.
 
-- [ ] T002 Créer la migration `supabase/migrations/<timestamp>_playbook_outcome_tracking.sql` : `ALTER TABLE playbooks ADD COLUMN attribution_window_days integer CHECK (attribution_window_days > 0)` ; `ALTER TABLE playbook_executions ADD COLUMN attribution_deadline_at timestamptz, ADD COLUMN resolved_via text CHECK (resolved_via IN ('invoice_paid_auto','manual')), ADD COLUMN nudge_response text CHECK (nudge_response IN ('resolved','not_resolved','unsure')), ADD COLUMN nudge_responded_at timestamptz` ; `CREATE TABLE playbook_execution_clicks` (`id`, `organization_id`, `playbook_execution_id`, `stripe_customer_id`, `clicked_at`, `created_at`) + RLS org_isolation (cf. data-model.md)
+- [X] T002 Créer la migration `supabase/migrations/<timestamp>_playbook_outcome_tracking.sql` : `ALTER TABLE playbooks ADD COLUMN attribution_window_days integer CHECK (attribution_window_days > 0)` ; `ALTER TABLE playbook_executions ADD COLUMN attribution_deadline_at timestamptz, ADD COLUMN resolved_via text CHECK (resolved_via IN ('invoice_paid_auto','manual')), ADD COLUMN nudge_response text CHECK (nudge_response IN ('resolved','not_resolved','unsure')), ADD COLUMN nudge_responded_at timestamptz` ; `CREATE TABLE playbook_execution_clicks` (`id`, `organization_id`, `playbook_execution_id`, `stripe_customer_id`, `clicked_at`, `created_at`) + RLS org_isolation (cf. data-model.md)
 - [ ] T003 Appliquer la migration T002 en local et vérifier la RLS de `playbook_execution_clicks` avec un utilisateur de test
-- [ ] T004 [P] Implémenter les helpers purs dans `supabase/functions/_shared/playbook-engine.ts` (ajout ciblé) : `calculateAttributionDeadline(executedAt, attributionWindowDays)`, `deriveAttributionStatus(execution, now)` → `'not_executed'|'active'|'expired'|'resolved'` (cf. data-model.md)
+- [X] T004 [P] Implémenter les helpers purs dans `supabase/functions/_shared/playbook-engine.ts` (ajout ciblé) : `calculateAttributionDeadline(executedAt, attributionWindowDays)`, `deriveAttributionStatus(execution, now)` → `'not_executed'|'active'|'expired'|'resolved'` (cf. data-model.md)
 
 **Checkpoint**: Schéma prêt, helpers de calcul disponibles — US1 à US4 peuvent démarrer.
 
@@ -58,16 +70,16 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 
 ### Tests for User Story 1
 
-- [ ] T005 [P] [US1] Test `mark-executed` sur exécution non marquée → `executed_at` renseigné, `attribution_deadline_at = executed_at + attribution_window_days` dans `supabase/tests/playbook-execute.test.ts`
-- [ ] T006 [P] [US1] Test `mark-executed` sans `attribution_window_days` configuré sur le playbook → valeur par défaut 14 jours appliquée dans `supabase/tests/playbook-execute.test.ts`
-- [ ] T007 [P] [US1] Test `mark-executed` idempotent : deuxième appel sur exécution déjà marquée → `200`, pas de nouvel horodatage dans `supabase/tests/playbook-execute.test.ts`
-- [ ] T008 [P] [US1] Test `mark-executed` sur exécution inexistante/hors organisation → `404` dans `supabase/tests/playbook-execute.test.ts`
-- [ ] T008A [P] [US1] Test `unmark-executed` (cf. `API_CONTRACTS.md` § 8.1.1, décision produit du 2026-07-27) : dans les 5 min → `executed_at`/`attribution_deadline_at` remis à `null` ; après 5 min → `409` ; sur exécution non marquée → `200` idempotent ; si `account_converted = true` → `409` ; si `nudge_response IS NOT NULL` → `409` (priment sur l'expiration des 5 min) dans `supabase/tests/playbook-execute.test.ts`
+- [X] T005 [P] [US1] Test `mark-executed` sur exécution non marquée → `executed_at` renseigné, `attribution_deadline_at = executed_at + attribution_window_days` dans `supabase/tests/playbook-execute.test.ts`
+- [X] T006 [P] [US1] Test `mark-executed` sans `attribution_window_days` configuré sur le playbook → valeur par défaut 14 jours appliquée dans `supabase/tests/playbook-execute.test.ts`
+- [X] T007 [P] [US1] Test `mark-executed` idempotent : deuxième appel sur exécution déjà marquée → `200`, pas de nouvel horodatage dans `supabase/tests/playbook-execute.test.ts`
+- [X] T008 [P] [US1] Test `mark-executed` sur exécution inexistante/hors organisation → `404` dans `supabase/tests/playbook-execute.test.ts`
+- [X] T008A [P] [US1] Test `unmark-executed` (cf. `API_CONTRACTS.md` § 8.1.1, décision produit du 2026-07-27) : dans les 5 min → `executed_at`/`attribution_deadline_at` remis à `null` ; après 5 min → `409` ; sur exécution non marquée → `200` idempotent ; si `account_converted = true` → `409` ; si `nudge_response IS NOT NULL` → `409` (priment sur l'expiration des 5 min) dans `supabase/tests/playbook-execute.test.ts`
 
 ### Implementation for User Story 1
 
-- [ ] T009 [US1] Implémenter la sous-route `POST /playbook-execute/{execution_id}/mark-executed` (routage par path dans `supabase/functions/playbook-execute/index.ts`, distincte du corps `POST /playbook-execute` — décision actée, cf. `API_CONTRACTS.md` § 8.1 et plan.md § Structure Decision) : Auth JWT ES256 → scoping `organization_id` → idempotence → écriture `executed_at`/`attribution_deadline_at` via T004 (dépend de T002, T004)
-- [ ] T009A [US1] Implémenter la sous-route `POST /playbook-execute/{execution_id}/unmark-executed` (cf. `API_CONTRACTS.md` § 8.1.1, décision produit du 2026-07-27) : Auth JWT ES256 → scoping `organization_id` → vérifier conflits (`account_converted`/`resolved_via` non nul → `409`, `nudge_response` non nul → `409`) → vérifier fenêtre de 5 min depuis `executed_at` (dépassée → `409`) → idempotence si non marqué → écriture `executed_at = null`/`attribution_deadline_at = null` (dépend de T002, T009)
+- [X] T009 [US1] Implémenter la sous-route `POST /playbook-execute/{execution_id}/mark-executed` (routage par path dans `supabase/functions/playbook-execute/index.ts`, distincte du corps `POST /playbook-execute` — décision actée, cf. `API_CONTRACTS.md` § 8.1 et plan.md § Structure Decision) : Auth JWT ES256 → scoping `organization_id` → idempotence → écriture `executed_at`/`attribution_deadline_at` via T004 (dépend de T002, T004)
+- [X] T009A [US1] Implémenter la sous-route `POST /playbook-execute/{execution_id}/unmark-executed` (cf. `API_CONTRACTS.md` § 8.1.1, décision produit du 2026-07-27) : Auth JWT ES256 → scoping `organization_id` → vérifier conflits (`account_converted`/`resolved_via` non nul → `409`, `nudge_response` non nul → `409`) → vérifier fenêtre de 5 min depuis `executed_at` (dépassée → `409`) → idempotence si non marqué → écriture `executed_at = null`/`attribution_deadline_at = null` (dépend de T002, T009)
 
 **Checkpoint**: US1 fonctionnelle et testable indépendamment.
 
@@ -81,16 +93,16 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 
 ### Tests for User Story 2
 
-- [ ] T010 [P] [US2] Test `playbook-outcome-detector` : exécution en attente + `invoice.paid` dans la fenêtre → `account_converted = true`, `resolved_via = 'invoice_paid_auto'`, `converted_at` renseigné dans `supabase/tests/playbook-outcome-detector.test.ts`
-- [ ] T011 [P] [US2] Test `playbook-outcome-detector` : fenêtre expirée → pas de résolution automatique dans `supabase/tests/playbook-outcome-detector.test.ts`
-- [ ] T012 [P] [US2] Test `playbook-outcome-detector` : plusieurs exécutions actives en attente pour le même compte → toutes marquées résolues (FR-010, cf. Assumptions) dans `supabase/tests/playbook-outcome-detector.test.ts`
+- [X] T010 [P] [US2] Test `playbook-outcome-detector` : exécution en attente + `invoice.paid` dans la fenêtre → `account_converted = true`, `resolved_via = 'invoice_paid_auto'`, `converted_at` renseigné dans `supabase/tests/playbook-outcome-detector.test.ts`
+- [X] T011 [P] [US2] Test `playbook-outcome-detector` : fenêtre expirée → pas de résolution automatique dans `supabase/tests/playbook-outcome-detector.test.ts`
+- [X] T012 [P] [US2] Test `playbook-outcome-detector` : plusieurs exécutions actives en attente pour le même compte → toutes marquées résolues (FR-010, cf. Assumptions) dans `supabase/tests/playbook-outcome-detector.test.ts`
 - [ ] T013 [P] [US2] Test non-régression : `handleInvoiceEvent` existant produit un résultat identique à l'avant-chantier pour un compte sans exécution en attente (SC-003) dans `supabase/tests/stripe-webhook.test.ts` (fichier existant, ajout de cas)
 
 ### Implementation for User Story 2
 
-- [ ] T014 [US2] Implémenter `supabase/functions/playbook-outcome-detector/index.ts` : Auth `service_role` uniquement → body `{ organization_id, stripe_customer_id }` → résout `account_id` → sélectionne les exécutions en attente (requête data-model.md) → marque résolues (dépend de T002, T004)
+- [X] T014 [US2] Implémenter `supabase/functions/playbook-outcome-detector/index.ts` : Auth `service_role` uniquement → body `{ organization_id, stripe_customer_id }` → résout `account_id` → sélectionne les exécutions en attente (requête data-model.md) → marque résolues (dépend de T002, T004)
 - [ ] T015 [US2] **[Point de gouvernance — validation utilisateur explicite requise avant implémentation]** Ajouter, par modification ciblée (str_replace) du `switch` existant dans `supabase/functions/stripe-webhook/index.ts`, un hook fire-and-forget vers `playbook-outcome-detector` immédiatement après le traitement existant du cas `'invoice.paid'` — sur le modèle exact du hook déjà en place pour `'invoice.payment_failed'` → `playbook-executor` (fetch non-bloquant, `.catch()` + `console.warn`, pas de retry). **Ne pas modifier `handleInvoiceEvent` lui-même.** (dépend de T014)
-- [ ] T016 [US2] Enregistrer `playbook-outcome-detector` dans `supabase/config.toml` (appel interne service_role, non exposé publiquement, cohérent avec `playbook-executor`)
+- [X] T016 [US2] Enregistrer `playbook-outcome-detector` dans `supabase/config.toml` (appel interne service_role, non exposé publiquement, cohérent avec `playbook-executor`)
 
 **Checkpoint**: US1+US2 forment la boucle de preuve minimale — marquage + résolution automatique, sans régression sur le webhook existant.
 
@@ -129,17 +141,17 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 
 ### Tests for User Story 4
 
-- [ ] T024 [P] [US4] Test `GET /playbook-execute/{id}/attribution-status` : retourne `attribution_status` correct pour chacun des 4 états (`not_executed`, `active`, `expired`, `resolved`) et `time_remaining_seconds` cohérent dans `supabase/tests/playbook-execute.test.ts`
-- [ ] T025 [P] [US4] Test `GET /playbook-outcome-stats` : agrégation correcte exécuté/non-exécuté, `sample_size_warning = true` si `sample_size < 20`, `resolution_rate = null` si `sample_size = 0` (jamais `0`) dans `supabase/tests/playbook-outcome-stats.test.ts`
-- [ ] T026 [P] [US4] Test `POST /playbook-execute/{id}/nudge-response` : enregistre `nudge_response`/`nudge_responded_at`, ne modifie jamais `account_converted`/`resolved_via` dans `supabase/tests/playbook-execute.test.ts`
-- [ ] T027 [P] [US4] Test `nudge-response` sur exécution non exécutée (`executed_at IS NULL`) → `409` dans `supabase/tests/playbook-execute.test.ts`
+- [X] T024 [P] [US4] Test `GET /playbook-execute/{id}/attribution-status` : retourne `attribution_status` correct pour chacun des 4 états (`not_executed`, `active`, `expired`, `resolved`) et `time_remaining_seconds` cohérent dans `supabase/tests/playbook-execute.test.ts`
+- [X] T025 [P] [US4] Test `GET /playbook-outcome-stats` : agrégation correcte exécuté/non-exécuté, `sample_size_warning = true` si `sample_size < 20`, `resolution_rate = null` si `sample_size = 0` (jamais `0`) dans `supabase/tests/playbook-outcome-stats.test.ts`
+- [X] T026 [P] [US4] Test `POST /playbook-execute/{id}/nudge-response` : enregistre `nudge_response`/`nudge_responded_at`, ne modifie jamais `account_converted`/`resolved_via` dans `supabase/tests/playbook-execute.test.ts`
+- [X] T027 [P] [US4] Test `nudge-response` sur exécution non exécutée (`executed_at IS NULL`) → `409` dans `supabase/tests/playbook-execute.test.ts`
 
 ### Implementation for User Story 4
 
-- [ ] T028 [US4] Implémenter `deriveAttributionStatus` (déjà créé en T004) et l'exposer via `GET /playbook-execute/{id}/attribution-status` dans `supabase/functions/playbook-execute/index.ts` (dépend de T004, T009)
-- [ ] T029 [US4] Implémenter `supabase/functions/playbook-outcome-stats/index.ts` (`GET /playbook-outcome-stats?playbook_id=`) : agrégation SQL groupée par `executed_at IS NOT NULL` (cf. data-model.md), calcul `resolution_rate`/`sample_size_warning` côté applicatif (dépend de T002)
-- [ ] T030 [US4] Implémenter l'action `nudge-response` dans `supabase/functions/playbook-execute/index.ts` : validation `executed_at IS NOT NULL` (409 sinon) → écriture `nudge_response`/`nudge_responded_at`, sans toucher `account_converted`/`resolved_via` (dépend de T009)
-- [ ] T031 [US4] Enregistrer `playbook-outcome-stats` dans `supabase/config.toml`
+- [X] T028 [US4] Implémenter `deriveAttributionStatus` (déjà créé en T004) et l'exposer via `GET /playbook-execute/{id}/attribution-status` dans `supabase/functions/playbook-execute/index.ts` (dépend de T004, T009)
+- [X] T029 [US4] Implémenter `supabase/functions/playbook-outcome-stats/index.ts` (`GET /playbook-outcome-stats?playbook_id=`) : agrégation SQL groupée par `executed_at IS NOT NULL` (cf. data-model.md), calcul `resolution_rate`/`sample_size_warning` côté applicatif (dépend de T002)
+- [X] T030 [US4] Implémenter l'action `nudge-response` dans `supabase/functions/playbook-execute/index.ts` : validation `executed_at IS NOT NULL` (409 sinon) → écriture `nudge_response`/`nudge_responded_at`, sans toucher `account_converted`/`resolved_via` (dépend de T009)
+- [X] T031 [US4] Enregistrer `playbook-outcome-stats` dans `supabase/config.toml`
 
 **Checkpoint**: Les 4 user stories forment la boucle de preuve complète alignée sur les dépendances frontend.
 
@@ -147,9 +159,9 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T032 [P] Exécuter `npm run verify` (typecheck + lint + test + build)
+- [X] T032 [P] Exécuter `npm run verify` (typecheck + lint + test + build)
 - [ ] T033 Exécuter manuellement les scénarios de `quickstart.md` (5 scénarios + validation Zero-PII globale)
-- [ ] T034 [P] Revue Zero-PII finale sur `playbook_execution_clicks` et tous les logs produits par ce chantier (`grep` email/nom/téléphone/IP)
+- [X] T034 [P] Revue Zero-PII finale sur `playbook_execution_clicks` et tous les logs produits par ce chantier (`grep` email/nom/téléphone/IP)
 - [ ] T035 Revue de diff dédiée sur `stripe-webhook/index.ts` (T015) confirmant qu'aucune ligne de `handleInvoiceEvent` n'a été modifiée — uniquement l'ajout du hook fire-and-forget
 
 ---

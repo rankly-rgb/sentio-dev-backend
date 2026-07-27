@@ -187,3 +187,13 @@ verify_jwt = false
 # weekly-digest : cron lundi 07:00 UTC — bilan hebdomadaire rétention/expansion par org
 [functions.weekly-digest]
 verify_jwt = false
+
+# playbook-outcome-detector : appelé par stripe-webhook (service_role fire-and-forget) — chantier C
+# verify_jwt=true : rejette tout appel sans Bearer service_role valide, cohérent avec playbook-executor
+# NB : non encore câblée depuis stripe-webhook (T015 — point de gouvernance en attente de validation)
+[functions.playbook-outcome-detector]
+verify_jwt = true
+
+# playbook-outcome-stats : JWT vérifié dans le code (ES256 — chantier C)
+[functions.playbook-outcome-stats]
+verify_jwt = false
