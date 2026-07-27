@@ -28,7 +28,7 @@ function buildMockSupabase(responses: Record<string, Canned>, calls: Recorded[] 
 
 const growthLimits: TierLimits = {
   plan_tier: 'growth',
-  max_active_accounts: 100,
+  max_active_accounts: 200, // grille confirmée 2026-07-27 (cf. pricing_tier_limits)
   requires_appointment: false,
   alert_threshold_pct: 90,
 }
@@ -38,7 +38,7 @@ describe('GET /pricing-status — handlePricingStatus', () => {
     const supabase = buildMockSupabase({
       'organizations:select': { data: { plan_type: 'growth' }, error: null },
       'pricing_tier_limits:select': { data: growthLimits, error: null },
-      'accounts:select': { data: null, error: null, count: 50 },
+      'accounts:select': { data: null, error: null, count: 100 },
       'ai_insights:select': { data: null, error: null },
     })
 
@@ -56,7 +56,7 @@ describe('GET /pricing-status — handlePricingStatus', () => {
     const supabase = buildMockSupabase({
       'organizations:select': { data: { plan_type: 'growth' }, error: null },
       'pricing_tier_limits:select': { data: growthLimits, error: null },
-      'accounts:select': { data: null, error: null, count: 90 },
+      'accounts:select': { data: null, error: null, count: 180 },
       'ai_insights:select': { data: null, error: null },
       'ai_insights:insert': { data: null, error: null },
     })
@@ -72,7 +72,7 @@ describe('GET /pricing-status — handlePricingStatus', () => {
     const supabase = buildMockSupabase({
       'organizations:select': { data: { plan_type: 'growth' }, error: null },
       'pricing_tier_limits:select': { data: growthLimits, error: null },
-      'accounts:select': { data: null, error: null, count: 40 },
+      'accounts:select': { data: null, error: null, count: 80 },
       'ai_insights:select': { data: { id: 'insight-1' }, error: null }, // alerte précédemment active
     }, calls)
 
@@ -91,7 +91,7 @@ describe('GET /pricing-status — handlePricingStatus', () => {
     const supabase = buildMockSupabase({
       'organizations:select': { data: { plan_type: 'growth' }, error: null },
       'pricing_tier_limits:select': { data: growthLimits, error: null },
-      'accounts:select': { data: null, error: null, count: 95 },
+      'accounts:select': { data: null, error: null, count: 190 },
       'ai_insights:select': { data: null, error: null },
       'ai_insights:insert': { data: null, error: null },
     }, calls)
@@ -105,8 +105,8 @@ describe('GET /pricing-status — handlePricingStatus', () => {
     expect(payload.account_id).toBeNull()
     expect(payload.metadata).toMatchObject({
       signals: expect.arrayContaining([
-        'active_accounts_count:95',
-        'max_active_accounts:100',
+        'active_accounts_count:190',
+        'max_active_accounts:200',
         'usage_pct:95',
       ]),
     })
@@ -117,7 +117,7 @@ describe('GET /pricing-status — handlePricingStatus', () => {
     const supabase = buildMockSupabase({
       'organizations:select': { data: { plan_type: 'growth' }, error: null },
       'pricing_tier_limits:select': { data: growthLimits, error: null },
-      'accounts:select': { data: null, error: null, count: 95 },
+      'accounts:select': { data: null, error: null, count: 190 },
       'ai_insights:select': { data: { id: 'insight-existing' }, error: null },
     }, calls)
 

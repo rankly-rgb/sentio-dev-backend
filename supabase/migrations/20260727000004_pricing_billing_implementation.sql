@@ -70,17 +70,17 @@ ALTER TABLE ai_insights
   );
 
 -- ── Seed pricing_tier_limits ───────────────────────────────────
--- ⚠️ VALEURS PLACEHOLDER — max_active_accounts n'est fixé nulle part
--- dans spec.md/plan.md/data-model.md ("chacun avec une limite... DOIT
--- avoir une limite configurée", sans grille chiffrée). Ce ne sont PAS
--- des valeurs produit validées : à ajuster explicitement via une
--- décision produit avant tout déploiement réel (la table existe
--- précisément pour permettre cet ajustement sans nouveau déploiement
--- de code, cf. research.md § Decision limites de palier).
+-- Grille tarifaire confirmée par décision produit (2026-07-27) :
+-- free=30, growth=200, scale=750, enterprise=illimité (sur demande).
+-- `max_active_accounts = NULL` signifie "illimité" (cf. data-model.md
+-- et _shared/pricing.ts) — pas d'ambiguïté "non configuré" à lever ici
+-- comme sur stripe_product_mappings.unlimited_seats (domaine distinct :
+-- cette table de référence est toujours entièrement seedée pour les 4
+-- paliers, il n'existe pas d'état "pas encore configuré" à distinguer).
 INSERT INTO pricing_tier_limits (plan_tier, max_active_accounts, requires_appointment, alert_threshold_pct)
 VALUES
-  ('free',       10,   false, 90),
-  ('growth',     100,  false, 90),
-  ('scale',      500,  true,  90),
+  ('free',       30,   false, 90),
+  ('growth',     200,  false, 90),
+  ('scale',      750,  true,  90),
   ('enterprise', NULL, true,  90)
 ON CONFLICT (plan_tier) DO NOTHING;

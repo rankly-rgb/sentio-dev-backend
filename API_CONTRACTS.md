@@ -778,13 +778,22 @@ Envoie un payload de test vers une destination outbound configurée (sans attend
 ```json
 {
   "plan_tier": "growth",
-  "active_accounts_count": 450,
-  "max_active_accounts": 500,
+  "active_accounts_count": 180,
+  "max_active_accounts": 200,
   "usage_pct": 90,
   "alert_active": true,
   "requires_appointment": false
 }
 ```
+
+**Grille confirmée (décision produit du 2026-07-27)**, seedée dans `pricing_tier_limits` :
+
+| `plan_tier` | `max_active_accounts` | `requires_appointment` |
+|---|---|---|
+| `free` | 30 | `false` |
+| `growth` | 200 | `false` |
+| `scale` | 750 | `true` |
+| `enterprise` | `null` (illimité, sur demande) | `true` |
 
 ### 8.2 Alerte de limite — `ai_insights` (`insight_type = 'plan_limit_warning'`)
 
@@ -793,7 +802,7 @@ Envoie un payload de test vers une destination outbound configurée (sans attend
 | `insight_type` | `'plan_limit_warning'` | non | Nouvelle valeur — **nécessite l'extension de `ai_insights_insight_type_check`** (migration additive, les 5 valeurs existantes restent inchangées) |
 | `account_id` | uuid | **oui, toujours `null` pour ce type** | Insight au niveau organisation, jamais lié à un compte spécifique — à la différence des 5 types d'insights existants qui référencent toujours un compte |
 | `metadata.severity` | `'CRITIQUE'\|'MAJEUR'\|'MINEUR'` | non | Cohérent avec la convention déjà en place (§3) |
-| `metadata.signals` | `string[]` | non | Ex. `["active_accounts_count:450", "max_active_accounts:500", "usage_pct:90"]` |
+| `metadata.signals` | `string[]` | non | Ex. `["active_accounts_count:180", "max_active_accounts:200", "usage_pct:90"]` |
 
 ### 8.3 Abonnement Sentio — `POST /sentio-billing/subscribe`, webhook `sentio-billing-webhook`
 

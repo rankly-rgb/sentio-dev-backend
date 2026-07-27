@@ -25,8 +25,9 @@ function buildMockSupabase(responses: Record<string, Canned>, calls: Recorded[] 
   } as unknown as Parameters<typeof handleSubscribe>[0]
 }
 
-const growthLimits = { plan_tier: 'growth', max_active_accounts: 100, requires_appointment: false, alert_threshold_pct: 90 }
-const freeLimits = { plan_tier: 'free', max_active_accounts: 10, requires_appointment: false, alert_threshold_pct: 90 }
+// Grille confirmée 2026-07-27 (cf. pricing_tier_limits)
+const growthLimits = { plan_tier: 'growth', max_active_accounts: 200, requires_appointment: false, alert_threshold_pct: 90 }
+const freeLimits = { plan_tier: 'free', max_active_accounts: 30, requires_appointment: false, alert_threshold_pct: 90 }
 
 let mockEnv: Record<string, string> = {}
 
@@ -80,7 +81,7 @@ describe('POST /sentio-billing/subscribe — handleSubscribe', () => {
   // ── T017 ────────────────────────────────────────────────────
   it('T017: incoherent downgrade (active_accounts_count exceeds target tier limit) → 409', async () => {
     const supabase = buildMockSupabase({
-      'accounts:select': { data: null, error: null, count: 15 }, // > free limit (10)
+      'accounts:select': { data: null, error: null, count: 35 }, // > free limit (30)
       'pricing_tier_limits:select': { data: freeLimits, error: null },
     })
     const stripeFetcher = vi.fn()
