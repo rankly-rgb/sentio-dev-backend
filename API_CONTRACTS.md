@@ -778,7 +778,36 @@ Envoie un payload de test vers une destination outbound configurée (sans attend
 
 **Codes d'erreur** : `401`, `404` (exécution inexistante ou hors organisation de l'appelant)
 
-> Portée V1 : aucune action d'« annulation » du marquage n'existe dans la spec actuelle (`specs/002-playbook-outcome-tracking/spec.md`) — pas de besoin produit identifié à ce jour. Si un besoin émerge, suivre le même principe de sous-route dédiée (ex. `POST .../unmark-executed`) plutôt que de le rattacher à `POST /playbook-execute`.
+### 8.1.1 Annuler le marquage — `POST /playbook-execute/{execution_id}/unmark-executed`
+
+*(décision produit actée le 2026-07-27 — symétrique de §8.1, pour rattraper un clic accidentel sur mark-executed)*
+
+**Auth** : `Authorization: Bearer <jwt_utilisateur>`, scoping `organization_id` obligatoire.
+
+**Décision d'architecture** : sous-route dédiée sur `playbook-execute`, même principe que §8.1.
+
+**Fenêtre d'autorisation** : uniquement dans les **5 minutes suivant `executed_at`** — pas pendant toute la fenêtre d'attribution (jusqu'à 14 jours). Choix délibérément restrictif : autoriser l'annulation sur toute la durée de la fenêtre d'attribution permettrait de retirer sélectivement, après coup, les exécutions qui n'ont pas résolu la situation — ce qui fausserait le taux de résolution "exécuté" de §8.3 (SC-006). Ce court délai ne couvre que la correction d'un clic accidentel, pas une réécriture rétroactive de l'historique.
+
+**Effet** :
+- Si l'exécution est marquée exécutée depuis moins de 5 minutes, et sans conflit (voir ci-dessous) : remet `executed_at = null` et `attribution_deadline_at = null`.
+- Si l'exécution n'est pas marquée exécutée (`executed_at IS NULL`) : réponse idempotente (`200`, aucun changement — symétrique de l'idempotence de §8.1).
+
+**Response 200**
+```json
+{ "execution_id": "uuid", "executed_at": null, "attribution_deadline_at": null }
+```
+
+**Codes d'erreur** :
+
+| Code | Cas |
+|------|-----|
+| `401` | JWT invalide |
+| `404` | Exécution inexistante ou hors organisation de l'appelant |
+| `409` | Fenêtre de 5 minutes expirée (`now() > executed_at + 5 min`) |
+| `409` | Résolution déjà détectée automatiquement (`account_converted = true` / `resolved_via = 'invoice_paid_auto'`) — une preuve transactionnelle réelle via Stripe ne doit jamais être effacée par une action manuelle |
+| `409` | Réponse au nudge de confirmation déjà enregistrée (`nudge_response IS NOT NULL`, §8.4) — évite un état incohérent (`nudge_response`/`nudge_responded_at` orphelins sur une exécution redevenue non-exécutée) |
+
+> Les deux cas `409` de conflit priment sur l'expiration de la fenêtre de 5 minutes dans l'ordre de vérification : un statut déjà résolu (auto ou nudge) est bloquant même si techniquement encore dans les 5 minutes.
 
 ### 8.2 Statut d'exécution et fenêtre d'attribution — `GET /playbook-execute/{execution_id}/attribution-status`
 

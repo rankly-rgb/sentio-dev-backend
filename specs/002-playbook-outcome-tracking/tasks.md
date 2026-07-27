@@ -62,10 +62,12 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 - [ ] T006 [P] [US1] Test `mark-executed` sans `attribution_window_days` configuré sur le playbook → valeur par défaut 14 jours appliquée dans `supabase/tests/playbook-execute.test.ts`
 - [ ] T007 [P] [US1] Test `mark-executed` idempotent : deuxième appel sur exécution déjà marquée → `200`, pas de nouvel horodatage dans `supabase/tests/playbook-execute.test.ts`
 - [ ] T008 [P] [US1] Test `mark-executed` sur exécution inexistante/hors organisation → `404` dans `supabase/tests/playbook-execute.test.ts`
+- [ ] T008A [P] [US1] Test `unmark-executed` (cf. `API_CONTRACTS.md` § 8.1.1, décision produit du 2026-07-27) : dans les 5 min → `executed_at`/`attribution_deadline_at` remis à `null` ; après 5 min → `409` ; sur exécution non marquée → `200` idempotent ; si `account_converted = true` → `409` ; si `nudge_response IS NOT NULL` → `409` (priment sur l'expiration des 5 min) dans `supabase/tests/playbook-execute.test.ts`
 
 ### Implementation for User Story 1
 
 - [ ] T009 [US1] Implémenter la sous-route `POST /playbook-execute/{execution_id}/mark-executed` (routage par path dans `supabase/functions/playbook-execute/index.ts`, distincte du corps `POST /playbook-execute` — décision actée, cf. `API_CONTRACTS.md` § 8.1 et plan.md § Structure Decision) : Auth JWT ES256 → scoping `organization_id` → idempotence → écriture `executed_at`/`attribution_deadline_at` via T004 (dépend de T002, T004)
+- [ ] T009A [US1] Implémenter la sous-route `POST /playbook-execute/{execution_id}/unmark-executed` (cf. `API_CONTRACTS.md` § 8.1.1, décision produit du 2026-07-27) : Auth JWT ES256 → scoping `organization_id` → vérifier conflits (`account_converted`/`resolved_via` non nul → `409`, `nudge_response` non nul → `409`) → vérifier fenêtre de 5 min depuis `executed_at` (dépassée → `409`) → idempotence si non marqué → écriture `executed_at = null`/`attribution_deadline_at = null` (dépend de T002, T009)
 
 **Checkpoint**: US1 fonctionnelle et testable indépendamment.
 
@@ -166,7 +168,7 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 
 ### Parallel Opportunities
 
-- T005-T008 (tests US1) en parallèle.
+- T005-T008, T008A (tests US1) en parallèle.
 - T010-T013 (tests US2) en parallèle.
 - T017-T021 (tests US3) en parallèle.
 - T024-T027 (tests US4) en parallèle.
