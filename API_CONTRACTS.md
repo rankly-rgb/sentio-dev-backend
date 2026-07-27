@@ -806,7 +806,38 @@ Envoie un payload de test vers une destination outbound configurée (sans attend
 
 ### 8.3 Abonnement Sentio — `POST /sentio-billing/subscribe`, webhook `sentio-billing-webhook`
 
-Voir `specs/003-pricing-billing-implementation/contracts/pricing-billing-api.md` pour le détail complet. Point de contrat à ne jamais perdre de vue : **aucun champ de ce contrat ne doit jamais être confondu avec les données de facturation des clients de l'organisation** (`subscriptions`, `invoices`, `stripe_product_mappings` — domaine totalement distinct, déjà documenté ailleurs dans ce repo). `sentio_subscriptions` et ses colonnes sont préfixées `sentio_stripe_*` précisément pour lever cette ambiguïté au niveau du schéma.
+Point de contrat à ne jamais perdre de vue : **aucun champ de ce contrat ne doit jamais être confondu avec les données de facturation des clients de l'organisation** (`subscriptions`, `invoices`, `stripe_product_mappings` — domaine totalement distinct, déjà documenté ailleurs dans ce repo). `sentio_subscriptions` et ses colonnes sont préfixées `sentio_stripe_*` précisément pour lever cette ambiguïté au niveau du schéma.
+
+**Body** : `{ "target_plan_tier": "free" | "growth" }` (`scale`/`enterprise` → `403`, pas de self-serve).
+
+**⚠️ Réponse réelle — corrigée le 2026-07-27** : `specs/003-pricing-billing-implementation/contracts/pricing-billing-api.md` décrit encore une réponse "URL de session Stripe Checkout ou Billing Portal" — **ce n'est pas ce que l'implémentation renvoie**. Cette section documente le comportement réel ; le fichier de contrat spec-kit reste, lui, non corrigé (à mettre à jour séparément si besoin).
+
+L'implémentation appelle l'API Stripe `Subscriptions` **directement** (`payment_behavior: default_incomplete`), pas Stripe Checkout ni le Billing Portal — aucune URL de redirection n'est retournée. La réponse est un statut synchrone :
+
+**Réponse succès (200) — `target_plan_tier: "growth"`**
+```json
+{
+  "organization_id": "uuid",
+  "plan_tier": "growth",
+  "status": "active | incomplete | past_due | canceled",
+  "current_period_end": "2026-08-27T00:00:00Z | null"
+}
+```
+`status` est renvoyé tel que Stripe le retourne sur l'objet `Subscription` créé/mis à jour — pas de valeur fabriquée côté Sentio.
+
+**Réponse succès (200) — `target_plan_tier: "free"`** (downgrade/annulation)
+```json
+{
+  "organization_id": "uuid",
+  "plan_tier": "free",
+  "status": "active"
+}
+```
+Pas de `current_period_end` dans ce cas (champ absent, pas `null` — l'objet ne contient pas la clé).
+
+**⚠️ UI de paiement — NON DÉCIDÉE, gap ouvert signalé explicitement** : avec `payment_behavior: default_incomplete`, Stripe attend qu'un moyen de paiement soit confirmé côté client (normalement via le `client_secret` du `PaymentIntent` de la facture initiale, en général avec Stripe Elements). **L'implémentation actuelle ne demande pas l'expansion (`expand=latest_invoice.payment_intent`) et ne retourne donc aucun `client_secret`** — la réponse ci-dessus ne contient rien d'exploitable pour collecter un moyen de paiement. Concrètement : à ce stade, rien ne permet au frontend de finaliser un paiement Growth self-serve bout-en-bout. C'est un point non tranché, pas un oubli de documentation — nécessite une décision produit/technique (Stripe Elements + retour du `client_secret`, ou Stripe Checkout Session avec URLs de succès/annulation, ou autre) avant que ce endpoint soit utilisable en usage réel par le frontend.
+
+**Erreurs** : `400` (`target_plan_tier` invalide), `403` (self-serve non disponible pour `scale`/`enterprise`), `409` (downgrade incohérent, FR-013), `500` (secrets Stripe Billing absents ou erreur Stripe).
 
 ---
 
