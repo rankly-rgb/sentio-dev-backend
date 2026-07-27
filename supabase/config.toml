@@ -184,6 +184,14 @@ verify_jwt = false
 [functions.churn-alert]
 verify_jwt = false
 
+# playbook-export : JWT vérifié dans le code (ES256 — chantier B, export CSV playbook)
+[functions.playbook-export]
+verify_jwt = false
+
+# playbook-templates-crud : JWT vérifié dans le code (ES256 — chantier B, bibliothèque de templates de message)
+[functions.playbook-templates-crud]
+verify_jwt = false
+
 # weekly-digest : cron lundi 07:00 UTC — bilan hebdomadaire rétention/expansion par org
 [functions.weekly-digest]
 verify_jwt = false
