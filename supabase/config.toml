@@ -190,10 +190,15 @@ verify_jwt = false
 
 # playbook-outcome-detector : appelé par stripe-webhook (service_role fire-and-forget) — chantier C
 # verify_jwt=true : rejette tout appel sans Bearer service_role valide, cohérent avec playbook-executor
-# NB : non encore câblée depuis stripe-webhook (T015 — point de gouvernance en attente de validation)
 [functions.playbook-outcome-detector]
 verify_jwt = true
 
 # playbook-outcome-stats : JWT vérifié dans le code (ES256 — chantier C)
 [functions.playbook-outcome-stats]
+verify_jwt = false
+
+# playbook-link : endpoint public sans session (lien traçable cliqué par un
+# destinataire externe) — existence de execution_id vérifiée dans le code,
+# destination résolue exclusivement côté serveur (T022, chantier C)
+[functions.playbook-link]
 verify_jwt = false

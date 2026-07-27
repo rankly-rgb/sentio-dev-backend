@@ -34,13 +34,12 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 
 ## Statut d'implémentation (2026-07-27, `/speckit-implement`)
 
-**US1, US2 (partielle), US4 implémentées et testées.** US3 (lien traçable) et le câblage stripe-webhook de US2 **non implémentés** — points de gouvernance non validés dans cette passe :
+**US1, US2, US3, US4 implémentées et testées.** T015 et T022 ont été présentées en amont (diff exact / conception complète) et validées explicitement avant implémentation, conformément à la clause de gouvernance.
 
-- **T003, T033** : nécessitent une stack Supabase locale réelle (Docker + `supabase start` + utilisateur de test) pour appliquer la migration et vérifier la RLS / rejouer `quickstart.md` — non disponible dans cet environnement. Non simulées, laissées non cochées.
-- **T015, T022** : points de gouvernance explicitement marqués dans ce fichier — nécessitent une validation utilisateur explicite avant implémentation, non obtenue dans cette passe. Non traitées.
-- **T013, T035** : dépendent de T015 (non faite) — vacuous sans elle, non traitées.
-- **T017-T021, T023** : dépendent de T022 (non faite, gate de conception anti-open-redirect) — US3 non implémentée dans cette passe.
+- **T003, T033** : nécessitent une stack Supabase locale réelle (Docker + `supabase start` + utilisateur de test) pour appliquer les migrations et vérifier la RLS / rejouer `quickstart.md` — non disponible dans cet environnement. Non simulées, laissées non cochées.
 - **Écart de conception signalé** : `research.md` prévoyait de réutiliser `playbook_executions.executed_at` comme horodatage du marquage manuel. Or cette colonne a `DEFAULT NOW()` et est déjà peuplée par `playbook-execute`/`playbook-scheduler` à la création de **chaque** ligne (elle représente l'instant de déclenchement système, pas une confirmation manuelle a posteriori) — la réutiliser aurait rendu l'état `not_executed` inatteignable et l'idempotence de `mark-executed` sans effet. Implémenté à la place avec une colonne dédiée `manual_executed_at` (cf. migration `20260727000002_playbook_outcome_tracking.sql`), exposée sous le nom `executed_at` dans les réponses JSON pour rester conforme au contrat externe (`API_CONTRACTS.md` § 8.1).
+- **T013** : `supabase/tests/stripe-webhook.test.ts` n'existait pas avant ce chantier (tasks.md prévoyait "fichier existant, ajout de cas") — créé de novo. `stripe-webhook/index.ts` n'exposant aucun handler exporté (toute la logique vit dans `Deno.serve(...)`, non extraite pour rester dans les limites de l'"ajout ciblé" validé), les tests vérifient par inspection du code source que `handleInvoiceEvent` reste appelé pour les 3 event-types facture et que le hook fire-and-forget ne cible que `invoice.paid` — pas un test d'intégration bout-en-bout du handler complet.
+- **T022 — écart sur le schéma** : ni `data-model.md` ni `research.md` ne définissaient de colonne pour stocker la destination de redirection ("à trancher en tasks"). Ajouté `playbooks.link_redirect_url TEXT NULL` (migration `20260727000003_playbook_link_redirect_url.sql`), validé à l'écriture par `playbook-crud` (`new URL(value).protocol === 'https:'`), jamais lu depuis la requête `playbook-link`.
 
 ---
 
@@ -96,12 +95,12 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 - [X] T010 [P] [US2] Test `playbook-outcome-detector` : exécution en attente + `invoice.paid` dans la fenêtre → `account_converted = true`, `resolved_via = 'invoice_paid_auto'`, `converted_at` renseigné dans `supabase/tests/playbook-outcome-detector.test.ts`
 - [X] T011 [P] [US2] Test `playbook-outcome-detector` : fenêtre expirée → pas de résolution automatique dans `supabase/tests/playbook-outcome-detector.test.ts`
 - [X] T012 [P] [US2] Test `playbook-outcome-detector` : plusieurs exécutions actives en attente pour le même compte → toutes marquées résolues (FR-010, cf. Assumptions) dans `supabase/tests/playbook-outcome-detector.test.ts`
-- [ ] T013 [P] [US2] Test non-régression : `handleInvoiceEvent` existant produit un résultat identique à l'avant-chantier pour un compte sans exécution en attente (SC-003) dans `supabase/tests/stripe-webhook.test.ts` (fichier existant, ajout de cas)
+- [X] T013 [P] [US2] Test non-régression : `handleInvoiceEvent` existant produit un résultat identique à l'avant-chantier pour un compte sans exécution en attente (SC-003) dans `supabase/tests/stripe-webhook.test.ts` (fichier existant, ajout de cas)
 
 ### Implementation for User Story 2
 
 - [X] T014 [US2] Implémenter `supabase/functions/playbook-outcome-detector/index.ts` : Auth `service_role` uniquement → body `{ organization_id, stripe_customer_id }` → résout `account_id` → sélectionne les exécutions en attente (requête data-model.md) → marque résolues (dépend de T002, T004)
-- [ ] T015 [US2] **[Point de gouvernance — validation utilisateur explicite requise avant implémentation]** Ajouter, par modification ciblée (str_replace) du `switch` existant dans `supabase/functions/stripe-webhook/index.ts`, un hook fire-and-forget vers `playbook-outcome-detector` immédiatement après le traitement existant du cas `'invoice.paid'` — sur le modèle exact du hook déjà en place pour `'invoice.payment_failed'` → `playbook-executor` (fetch non-bloquant, `.catch()` + `console.warn`, pas de retry). **Ne pas modifier `handleInvoiceEvent` lui-même.** (dépend de T014)
+- [X] T015 [US2] **[Point de gouvernance — validation utilisateur explicite requise avant implémentation]** Ajouter, par modification ciblée (str_replace) du `switch` existant dans `supabase/functions/stripe-webhook/index.ts`, un hook fire-and-forget vers `playbook-outcome-detector` immédiatement après le traitement existant du cas `'invoice.paid'` — sur le modèle exact du hook déjà en place pour `'invoice.payment_failed'` → `playbook-executor` (fetch non-bloquant, `.catch()` + `console.warn`, pas de retry). **Ne pas modifier `handleInvoiceEvent` lui-même.** (dépend de T014)
 - [X] T016 [US2] Enregistrer `playbook-outcome-detector` dans `supabase/config.toml` (appel interne service_role, non exposé publiquement, cohérent avec `playbook-executor`)
 
 **Checkpoint**: US1+US2 forment la boucle de preuve minimale — marquage + résolution automatique, sans régression sur le webhook existant.
@@ -116,16 +115,16 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 
 ### Tests for User Story 3
 
-- [ ] T017 [P] [US3] Test `playbook-link` : visite → `302` vers la destination prévue + ligne créée dans `playbook_execution_clicks` dans `supabase/tests/playbook-link.test.ts`
-- [ ] T018 [P] [US3] Test Zero-PII : la ligne créée ne contient que `organization_id`, `playbook_execution_id`, `stripe_customer_id`, `clicked_at` (FR-008, SC-004) dans `supabase/tests/playbook-link.test.ts`
-- [ ] T019 [P] [US3] Test anti-open-redirect : la destination de redirection est résolue uniquement depuis l'exécution en base, jamais depuis un paramètre de requête — vérifier qu'aucun paramètre externe n'influence la destination dans `supabase/tests/playbook-link.test.ts`
-- [ ] T020 [P] [US3] Test absence de déduplication : deux visites du même lien → deux lignes distinctes dans `playbook_execution_clicks` dans `supabase/tests/playbook-link.test.ts`
-- [ ] T021 [P] [US3] Test `playbook-link` sur `execution_id` inconnu → `404` sans fuite d'information sur l'organisation dans `supabase/tests/playbook-link.test.ts`
+- [X] T017 [P] [US3] Test `playbook-link` : visite → `302` vers la destination prévue + ligne créée dans `playbook_execution_clicks` dans `supabase/tests/playbook-link.test.ts`
+- [X] T018 [P] [US3] Test Zero-PII : la ligne créée ne contient que `organization_id`, `playbook_execution_id`, `stripe_customer_id`, `clicked_at` (FR-008, SC-004) dans `supabase/tests/playbook-link.test.ts`
+- [X] T019 [P] [US3] Test anti-open-redirect : la destination de redirection est résolue uniquement depuis l'exécution en base, jamais depuis un paramètre de requête — vérifier qu'aucun paramètre externe n'influence la destination dans `supabase/tests/playbook-link.test.ts`
+- [X] T020 [P] [US3] Test absence de déduplication : deux visites du même lien → deux lignes distinctes dans `playbook_execution_clicks` dans `supabase/tests/playbook-link.test.ts`
+- [X] T021 [P] [US3] Test `playbook-link` sur `execution_id` inconnu → `404` sans fuite d'information sur l'organisation dans `supabase/tests/playbook-link.test.ts`
 
 ### Implementation for User Story 3
 
-- [ ] T022 [US3] **[Point de gouvernance — validation utilisateur explicite requise sur la conception anti-open-redirect avant implémentation]** Implémenter `supabase/functions/playbook-link/index.ts` (`GET /playbook-link/{execution_id}`) : vérifier l'existence de l'exécution → insérer le log de clic → résoudre la destination de redirection **exclusivement côté serveur** à partir de l'exécution (jamais un paramètre de requête) → répondre `302` (dépend de T002)
-- [ ] T023 [US3] Enregistrer `playbook-link` dans `supabase/config.toml` (`verify_jwt = false` — endpoint public sans session, cf. contracts/)
+- [X] T022 [US3] **[Point de gouvernance — validation utilisateur explicite requise sur la conception anti-open-redirect avant implémentation]** Implémenter `supabase/functions/playbook-link/index.ts` (`GET /playbook-link/{execution_id}`) : vérifier l'existence de l'exécution → insérer le log de clic → résoudre la destination de redirection **exclusivement côté serveur** à partir de l'exécution (jamais un paramètre de requête) → répondre `302` (dépend de T002)
+- [X] T023 [US3] Enregistrer `playbook-link` dans `supabase/config.toml` (`verify_jwt = false` — endpoint public sans session, cf. contracts/)
 
 **Checkpoint**: US1+US2+US3 fonctionnent ensemble sans dépendance croisée bloquante.
 
@@ -162,7 +161,7 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 - [X] T032 [P] Exécuter `npm run verify` (typecheck + lint + test + build)
 - [ ] T033 Exécuter manuellement les scénarios de `quickstart.md` (5 scénarios + validation Zero-PII globale)
 - [X] T034 [P] Revue Zero-PII finale sur `playbook_execution_clicks` et tous les logs produits par ce chantier (`grep` email/nom/téléphone/IP)
-- [ ] T035 Revue de diff dédiée sur `stripe-webhook/index.ts` (T015) confirmant qu'aucune ligne de `handleInvoiceEvent` n'a été modifiée — uniquement l'ajout du hook fire-and-forget
+- [X] T035 Revue de diff dédiée sur `stripe-webhook/index.ts` (T015) confirmant qu'aucune ligne de `handleInvoiceEvent` n'a été modifiée — uniquement l'ajout du hook fire-and-forget
 
 ---
 

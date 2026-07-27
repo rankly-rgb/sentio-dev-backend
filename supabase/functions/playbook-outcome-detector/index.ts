@@ -1,15 +1,9 @@
 // ============================================================
 // Edge Function : playbook-outcome-detector
 // Interne (service_role uniquement) — appelée en fire-and-forget
-// par stripe-webhook après traitement de 'invoice.paid'.
+// par stripe-webhook après traitement de 'invoice.paid' (T015,
+// validé et câblé le 2026-07-27).
 // cf. specs/002-playbook-outcome-tracking/contracts/playbook-outcome-api.md
-//
-// NOTE (2026-07-27) : le hook fire-and-forget qui invoque cette
-// fonction depuis stripe-webhook/index.ts (T015) est un point de
-// gouvernance nécessitant une validation utilisateur explicite avant
-// implémentation (cf. tasks.md) — NON câblé pour l'instant. Cette
-// fonction est complète et testable de façon autonome, mais n'est
-// encore appelée par aucun autre code du repo.
 // ============================================================
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
