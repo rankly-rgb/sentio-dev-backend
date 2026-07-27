@@ -32,6 +32,13 @@ function determineCurrentStep(
   return 'done'
 }
 
+type PlanTier = 'free' | 'growth' | 'scale' | 'enterprise'
+
+// Chantier D (pricing) — FR-011, cf. onboarding-status/index.ts determineShowCallPrompt
+function determineShowCallPrompt(stripeConnected: boolean, planTier: PlanTier): boolean {
+  return stripeConnected && (planTier === 'free' || planTier === 'growth')
+}
+
 type PatchField = 'first_win_seen' | 'onboarding_completed'
 
 function validatePatchBody(body: unknown): { valid: boolean; error?: string; field?: PatchField } {
@@ -186,5 +193,26 @@ describe('onboarding-status: validation PATCH body', () => {
     const result = validatePatchBody({ value: true })
     expect(result.valid).toBe(false)
     expect(result.error).toContain('Invalid field')
+  })
+})
+
+// ── Tests determineShowCallPrompt (chantier D, T026-T028) ─────
+
+describe('onboarding-status: determineShowCallPrompt', () => {
+  it('T026: false before connecting Stripe (customer data), for a Free/Growth organization', () => {
+    expect(determineShowCallPrompt(false, 'free')).toBe(false)
+    expect(determineShowCallPrompt(false, 'growth')).toBe(false)
+  })
+
+  it('T027: true once stripe_connected is true, for Free/Growth — current_step is unaffected by this field', () => {
+    expect(determineShowCallPrompt(true, 'free')).toBe(true)
+    expect(determineShowCallPrompt(true, 'growth')).toBe(true)
+  })
+
+  it('T028: always false for scale/enterprise (appointment already mandatory elsewhere)', () => {
+    expect(determineShowCallPrompt(true, 'scale')).toBe(false)
+    expect(determineShowCallPrompt(true, 'enterprise')).toBe(false)
+    expect(determineShowCallPrompt(false, 'scale')).toBe(false)
+    expect(determineShowCallPrompt(false, 'enterprise')).toBe(false)
   })
 })

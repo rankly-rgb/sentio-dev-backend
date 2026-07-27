@@ -187,3 +187,19 @@ verify_jwt = false
 # weekly-digest : cron lundi 07:00 UTC — bilan hebdomadaire rétention/expansion par org
 [functions.weekly-digest]
 verify_jwt = false
+
+# pricing-status : JWT vérifié dans le code (ES256 — chantier D, gating par palier)
+[functions.pricing-status]
+verify_jwt = false
+
+# sentio-billing-subscribe : JWT vérifié dans le code (ES256 — chantier D)
+# Compte Stripe Billing DE SENTIO — strictement distinct du compte Stripe des
+# clients de l'organisation (stripe-oauth-*/stripe-webhook/sync-stripe).
+[functions.sentio-billing-subscribe]
+verify_jwt = false
+
+# sentio-billing-webhook : signature Stripe vérifiée dans le code avec
+# STRIPE_BILLING_WEBHOOK_SECRET (secret distinct de STRIPE_WEBHOOK_SECRET)
+# — jamais le même endpoint ni le même secret que stripe-webhook existant.
+[functions.sentio-billing-webhook]
+verify_jwt = false

@@ -29,6 +29,19 @@ Monorepo existant — `supabase/functions/`, `supabase/migrations/`, `supabase/t
 
 ---
 
+## Statut d'implémentation (2026-07-27, `/speckit-implement`)
+
+**US1, US2, US3 implémentées et testées.**
+
+- **T001, T004** : nécessitent une stack Supabase locale réelle (Docker + `supabase start`) pour appliquer les migrations et vérifier la RLS/distribution résultante — non disponible dans cet environnement. Non simulées, laissées non cochées.
+- **T031** : nécessite en plus un vrai compte Stripe Billing (`docs/stripe-billing-setup.md`, checklist §6 non complétée par l'utilisateur — vérifié, toutes les cases sont décochées) — non exécutable ici. Non simulée.
+- **T003 — grille tarifaire PLACEHOLDER** : `max_active_accounts` n'est fixé nulle part dans spec.md/plan.md/data-model.md ("chacun avec une limite... configurée", sans grille chiffrée). Seedé avec des valeurs placeholder (`free=10, growth=100, scale=500, enterprise=NULL`) dans la migration, explicitement commentées comme non-validées côté produit — à ajuster via une décision produit avant tout déploiement réel (la table existe précisément pour permettre cet ajustement sans nouveau déploiement de code).
+- **Écart — mécanisme `sentio-billing-subscribe`** : le contrat (`pricing-billing-api.md`) décrit une réponse "URL de session Stripe Checkout ou Billing Portal". Implémenté à la place via l'API Stripe `Subscriptions` directe (`payment_behavior=default_incomplete`), qui retourne un `status` exploitable synchrone plutôt qu'une redirection — l'UI de checkout étant explicitement hors scope de ce chantier backend (gouvernance §3), le choix exact Checkout Session vs Elements/PaymentIntent est un détail d'intégration frontend non tranché ici.
+- **Écart — `show_call_prompt`** : la spec/research.md décrit une transition "vient de passer de `false` à `true`", mais `organizations` n'a aucune colonne d'horodatage pour `stripe_connected` — impossible de distinguer une connexion récente d'une connexion ancienne. Implémenté en logique de **niveau** (`stripe_connected && plan_tier IN ('free','growth')`), pas de détection de transition ponctuelle. Documenté en commentaire dans `onboarding-status/index.ts`.
+- **Séparation SDK Stripe** : `plan.md` supposait la dépendance npm `stripe` déjà utilisée côté Edge Functions — vérifié, elle n'est importée nulle part dans `supabase/functions/` (seulement listée dans `package.json`, utilisée potentiellement côté frontend). Suivi la convention Deno déjà établie par `sync-stripe`/`stripe-webhook` : appels `fetch()` bruts vers l'API REST Stripe + vérification HMAC manuelle, dupliquée intentionnellement (pas importée de `stripe-webhook`) pour zéro couplage entre les deux intégrations.
+
+---
+
 ## Phase 1: Setup
 
 - [ ] T001 Confirmer que la migration `supabase/migrations/20260726000001_organizations_plan_type_free_grid.sql` (déjà écrite) est bien la seule modification de `organizations.plan_type` nécessaire ; l'appliquer en local (`supabase migration up` ou équivalent) et vérifier la distribution résultante (`free/growth/scale/enterprise` uniquement)
@@ -39,11 +52,11 @@ Monorepo existant — `supabase/functions/`, `supabase/migrations/`, `supabase/t
 
 **⚠️ CRITICAL**: Aucune story ne peut être implémentée avant la fin de cette phase.
 
-- [ ] T002 Créer la migration `supabase/migrations/<timestamp>_pricing_billing_implementation.sql` : `CREATE TABLE pricing_tier_limits` (`plan_tier` PK, `max_active_accounts`, `requires_appointment`, `alert_threshold_pct` défaut 90, `updated_at`) ; `CREATE TABLE sentio_subscriptions` (`id`, `organization_id` UNIQUE, `sentio_stripe_customer_id` UNIQUE, `sentio_stripe_subscription_id`, `plan_tier`, `status`, `current_period_end`, `cancel_at_period_end`, `created_at`, `updated_at`) + RLS org_isolation sur `sentio_subscriptions` ; `ALTER TABLE ai_insights DROP CONSTRAINT ai_insights_insight_type_check` / `ADD CONSTRAINT ... CHECK (insight_type = ANY (ARRAY[..., 'plan_limit_warning']))` (cf. data-model.md)
-- [ ] T003 Seed `pricing_tier_limits` avec les 4 paliers (`free`, `growth`, `scale`, `enterprise` — `max_active_accounts` et `requires_appointment` selon la grille produit, `enterprise.max_active_accounts = NULL`)
+- [X] T002 Créer la migration `supabase/migrations/<timestamp>_pricing_billing_implementation.sql` : `CREATE TABLE pricing_tier_limits` (`plan_tier` PK, `max_active_accounts`, `requires_appointment`, `alert_threshold_pct` défaut 90, `updated_at`) ; `CREATE TABLE sentio_subscriptions` (`id`, `organization_id` UNIQUE, `sentio_stripe_customer_id` UNIQUE, `sentio_stripe_subscription_id`, `plan_tier`, `status`, `current_period_end`, `cancel_at_period_end`, `created_at`, `updated_at`) + RLS org_isolation sur `sentio_subscriptions` ; `ALTER TABLE ai_insights DROP CONSTRAINT ai_insights_insight_type_check` / `ADD CONSTRAINT ... CHECK (insight_type = ANY (ARRAY[..., 'plan_limit_warning']))` (cf. data-model.md)
+- [X] T003 Seed `pricing_tier_limits` avec les 4 paliers (`free`, `growth`, `scale`, `enterprise` — `max_active_accounts` et `requires_appointment` selon la grille produit, `enterprise.max_active_accounts = NULL`)
 - [ ] T004 Appliquer T002/T003 en local et vérifier la RLS de `sentio_subscriptions`
-- [ ] T005 [P] Implémenter les fonctions pures dans `supabase/functions/_shared/pricing.ts` (nouveau fichier) : `checkAccountLimitGate(activeAccountCount, tierLimits)`, `calculateUsagePct()`, `isDowngradeIncoherent(targetTierLimits, activeAccountCount)` (cf. data-model.md, research.md)
-- [ ] T006 [P] Documenter dans un commentaire en tête de tout fichier `sentio-billing-*` la règle de séparation Stripe (rappel de gouvernance §1) — pas de fallback vers les secrets client
+- [X] T005 [P] Implémenter les fonctions pures dans `supabase/functions/_shared/pricing.ts` (nouveau fichier) : `checkAccountLimitGate(activeAccountCount, tierLimits)`, `calculateUsagePct()`, `isDowngradeIncoherent(targetTierLimits, activeAccountCount)` (cf. data-model.md, research.md)
+- [X] T006 [P] Documenter dans un commentaire en tête de tout fichier `sentio-billing-*` la règle de séparation Stripe (rappel de gouvernance §1) — pas de fallback vers les secrets client
 
 **Checkpoint**: Schéma et fonctions pures prêts — US1 à US3 peuvent démarrer.
 
@@ -57,17 +70,17 @@ Monorepo existant — `supabase/functions/`, `supabase/migrations/`, `supabase/t
 
 ### Tests for User Story 1
 
-- [ ] T007 [P] [US1] Test `checkAccountLimitGate` : sous la limite → pas de gating ; au-dessus → gating actif ; palier `enterprise` (`max_active_accounts = null`) → jamais de gating dans `supabase/tests/pricing.test.ts`
-- [ ] T008 [P] [US1] Test `calculateUsagePct` : calcul correct, `null` si `max_active_accounts = null` dans `supabase/tests/pricing.test.ts`
-- [ ] T009 [P] [US1] Test `GET /pricing-status` : `alert_active = true` dès `usage_pct >= alert_threshold_pct` (défaut 90) dans `supabase/tests/pricing-status.test.ts`
-- [ ] T010 [P] [US1] Test `GET /pricing-status` : `alert_active` repasse à `false` quand `active_accounts_count` redescend sous le seuil dans `supabase/tests/pricing-status.test.ts`
-- [ ] T011 [P] [US1] Test génération de l'insight `plan_limit_warning` (`account_id = null`, `metadata.signals` cohérent) dans `supabase/tests/pricing-status.test.ts`
+- [X] T007 [P] [US1] Test `checkAccountLimitGate` : sous la limite → pas de gating ; au-dessus → gating actif ; palier `enterprise` (`max_active_accounts = null`) → jamais de gating dans `supabase/tests/pricing.test.ts`
+- [X] T008 [P] [US1] Test `calculateUsagePct` : calcul correct, `null` si `max_active_accounts = null` dans `supabase/tests/pricing.test.ts`
+- [X] T009 [P] [US1] Test `GET /pricing-status` : `alert_active = true` dès `usage_pct >= alert_threshold_pct` (défaut 90) dans `supabase/tests/pricing-status.test.ts`
+- [X] T010 [P] [US1] Test `GET /pricing-status` : `alert_active` repasse à `false` quand `active_accounts_count` redescend sous le seuil dans `supabase/tests/pricing-status.test.ts`
+- [X] T011 [P] [US1] Test génération de l'insight `plan_limit_warning` (`account_id = null`, `metadata.signals` cohérent) dans `supabase/tests/pricing-status.test.ts`
 
 ### Implementation for User Story 1
 
-- [ ] T012 [US1] Implémenter `supabase/functions/pricing-status/index.ts` (`GET /pricing-status`) : Auth JWT ES256 → scoping `organization_id` → `COUNT(*) FROM accounts WHERE mrr_cents > 0` → jointure `pricing_tier_limits` → calcul gating/alerte via T005 (dépend de T002, T005)
-- [ ] T013 [US1] Implémenter la création de l'insight `ai_insights` (`insight_type: 'plan_limit_warning'`, `account_id: null`) déclenchée quand `alert_active` passe de `false` à `true` (dépend de T012, T002)
-- [ ] T014 [US1] Enregistrer `pricing-status` dans `supabase/config.toml`
+- [X] T012 [US1] Implémenter `supabase/functions/pricing-status/index.ts` (`GET /pricing-status`) : Auth JWT ES256 → scoping `organization_id` → `COUNT(*) FROM accounts WHERE mrr_cents > 0` → jointure `pricing_tier_limits` → calcul gating/alerte via T005 (dépend de T002, T005)
+- [X] T013 [US1] Implémenter la création de l'insight `ai_insights` (`insight_type: 'plan_limit_warning'`, `account_id: null`) déclenchée quand `alert_active` passe de `false` à `true` (dépend de T012, T002)
+- [X] T014 [US1] Enregistrer `pricing-status` dans `supabase/config.toml`
 
 **Checkpoint**: US1 fonctionnelle et testable indépendamment (MVP — gating déclaratif, sans Stripe Billing encore branché).
 
@@ -81,20 +94,20 @@ Monorepo existant — `supabase/functions/`, `supabase/migrations/`, `supabase/t
 
 ### Tests for User Story 2
 
-- [ ] T015 [P] [US2] Test `sentio-billing-subscribe` : organisation Free → souscription Growth → `sentio_subscriptions` créée, `status: active` dans `supabase/tests/sentio-billing-subscribe.test.ts`
-- [ ] T016 [P] [US2] Test `sentio-billing-subscribe` : tentative de souscription/changement vers `scale`/`enterprise` → `403` (FR-012, pas de self-serve) dans `supabase/tests/sentio-billing-subscribe.test.ts`
-- [ ] T017 [P] [US2] Test `sentio-billing-subscribe` : downgrade incohérent avec `active_accounts_count` du palier cible → `409` via `isDowngradeIncoherent` (FR-013) dans `supabase/tests/sentio-billing-subscribe.test.ts`
-- [ ] T018 [P] [US2] Test `sentio-billing-webhook` : `customer.subscription.deleted` → `sentio_subscriptions.status = canceled`, retour au palier Free à l'échéance (cf. Assumptions) dans `supabase/tests/sentio-billing-webhook.test.ts`
-- [ ] T019 [P] [US2] Test `sentio-billing-webhook` : `invoice.payment_failed` → état de grâce appliqué (pas de gating punitif immédiat, cf. Assumptions) dans `supabase/tests/sentio-billing-webhook.test.ts`
-- [ ] T020 [P] [US2] Test de garde-fou de séparation : aucun fichier `sentio-billing-*` ne référence `STRIPE_SECRET_KEY`/`STRIPE_CLIENT_ID`/`STRIPE_WEBHOOK_SECRET` (analyse statique du code source des fonctions du chantier) dans `supabase/tests/sentio-billing-separation.test.ts`
-- [ ] T021 [P] [US2] Test : absence de `STRIPE_BILLING_SECRET_KEY`/`STRIPE_BILLING_WEBHOOK_SECRET` → erreur explicite au démarrage, pas de fallback dans `supabase/tests/sentio-billing-subscribe.test.ts`
+- [X] T015 [P] [US2] Test `sentio-billing-subscribe` : organisation Free → souscription Growth → `sentio_subscriptions` créée, `status: active` dans `supabase/tests/sentio-billing-subscribe.test.ts`
+- [X] T016 [P] [US2] Test `sentio-billing-subscribe` : tentative de souscription/changement vers `scale`/`enterprise` → `403` (FR-012, pas de self-serve) dans `supabase/tests/sentio-billing-subscribe.test.ts`
+- [X] T017 [P] [US2] Test `sentio-billing-subscribe` : downgrade incohérent avec `active_accounts_count` du palier cible → `409` via `isDowngradeIncoherent` (FR-013) dans `supabase/tests/sentio-billing-subscribe.test.ts`
+- [X] T018 [P] [US2] Test `sentio-billing-webhook` : `customer.subscription.deleted` → `sentio_subscriptions.status = canceled`, retour au palier Free à l'échéance (cf. Assumptions) dans `supabase/tests/sentio-billing-webhook.test.ts`
+- [X] T019 [P] [US2] Test `sentio-billing-webhook` : `invoice.payment_failed` → état de grâce appliqué (pas de gating punitif immédiat, cf. Assumptions) dans `supabase/tests/sentio-billing-webhook.test.ts`
+- [X] T020 [P] [US2] Test de garde-fou de séparation : aucun fichier `sentio-billing-*` ne référence `STRIPE_SECRET_KEY`/`STRIPE_CLIENT_ID`/`STRIPE_WEBHOOK_SECRET` (analyse statique du code source des fonctions du chantier) dans `supabase/tests/sentio-billing-separation.test.ts`
+- [X] T021 [P] [US2] Test : absence de `STRIPE_BILLING_SECRET_KEY`/`STRIPE_BILLING_WEBHOOK_SECRET` → erreur explicite au démarrage, pas de fallback dans `supabase/tests/sentio-billing-subscribe.test.ts`
 
 ### Implementation for User Story 2
 
-- [ ] T022 [US2] Implémenter `supabase/functions/sentio-billing-subscribe/index.ts` (`POST /sentio-billing/subscribe`) : Auth JWT ES256 → scoping `organization_id` → lecture stricte de `STRIPE_BILLING_SECRET_KEY` (erreur explicite si absent) → création/màj client+abonnement Stripe (compte Sentio Billing) → upsert `sentio_subscriptions` (dépend de T002, T005)
-- [ ] T023 [US2] Implémenter `supabase/functions/sentio-billing-webhook/index.ts` : vérification de signature avec `STRIPE_BILLING_WEBHOOK_SECRET` (distinct de `STRIPE_WEBHOOK_SECRET`) → traite `customer.subscription.updated/deleted`, `invoice.payment_failed` → met à jour `sentio_subscriptions` (dépend de T002)
-- [ ] T024 [US2] Enregistrer `sentio-billing-subscribe` et `sentio-billing-webhook` dans `supabase/config.toml` (webhook : `verify_jwt = false`, signature Stripe vérifiée dans le code, cohérent avec `stripe-webhook` existant mais secret distinct)
-- [ ] T025 [US2] Vérifier manuellement (checklist `docs/stripe-billing-setup.md`) que le compte Stripe Sentio Billing, les produits/prix, la clé restreinte et l'endpoint webhook sont configurés avant tout test d'intégration réel — documenter dans le PR/commit si cette checklist n'est pas encore complète côté utilisateur
+- [X] T022 [US2] Implémenter `supabase/functions/sentio-billing-subscribe/index.ts` (`POST /sentio-billing/subscribe`) : Auth JWT ES256 → scoping `organization_id` → lecture stricte de `STRIPE_BILLING_SECRET_KEY` (erreur explicite si absent) → création/màj client+abonnement Stripe (compte Sentio Billing) → upsert `sentio_subscriptions` (dépend de T002, T005)
+- [X] T023 [US2] Implémenter `supabase/functions/sentio-billing-webhook/index.ts` : vérification de signature avec `STRIPE_BILLING_WEBHOOK_SECRET` (distinct de `STRIPE_WEBHOOK_SECRET`) → traite `customer.subscription.updated/deleted`, `invoice.payment_failed` → met à jour `sentio_subscriptions` (dépend de T002)
+- [X] T024 [US2] Enregistrer `sentio-billing-subscribe` et `sentio-billing-webhook` dans `supabase/config.toml` (webhook : `verify_jwt = false`, signature Stripe vérifiée dans le code, cohérent avec `stripe-webhook` existant mais secret distinct)
+- [X] T025 [US2] Vérifier manuellement (checklist `docs/stripe-billing-setup.md`) que le compte Stripe Sentio Billing, les produits/prix, la clé restreinte et l'endpoint webhook sont configurés avant tout test d'intégration réel — documenter dans le PR/commit si cette checklist n'est pas encore complète côté utilisateur
 
 **Checkpoint**: US1+US2 rendent la grille tarifaire opérationnelle (gating + facturation réelle), sans aucune interférence avec l'intégration Stripe client existante.
 
@@ -108,13 +121,13 @@ Monorepo existant — `supabase/functions/`, `supabase/migrations/`, `supabase/t
 
 ### Tests for User Story 3
 
-- [ ] T026 [P] [US3] Test `GET /onboarding-status` : `show_call_prompt = false` avant connexion Stripe (données clients) pour une organisation Free/Growth dans `supabase/tests/onboarding-status.test.ts`
-- [ ] T027 [P] [US3] Test `GET /onboarding-status` : `show_call_prompt = true` immédiatement après que `stripe_connected` passe à `true`, `current_step` inchangé/non bloqué dans `supabase/tests/onboarding-status.test.ts`
-- [ ] T028 [P] [US3] Test `GET /onboarding-status` : `show_call_prompt` toujours `false` pour une organisation `scale`/`enterprise` (le RDV est déjà obligatoire par ailleurs, pas de proposition non-bloquante à afficher) dans `supabase/tests/onboarding-status.test.ts`
+- [X] T026 [P] [US3] Test `GET /onboarding-status` : `show_call_prompt = false` avant connexion Stripe (données clients) pour une organisation Free/Growth dans `supabase/tests/onboarding-status.test.ts`
+- [X] T027 [P] [US3] Test `GET /onboarding-status` : `show_call_prompt = true` immédiatement après que `stripe_connected` passe à `true`, `current_step` inchangé/non bloqué dans `supabase/tests/onboarding-status.test.ts`
+- [X] T028 [P] [US3] Test `GET /onboarding-status` : `show_call_prompt` toujours `false` pour une organisation `scale`/`enterprise` (le RDV est déjà obligatoire par ailleurs, pas de proposition non-bloquante à afficher) dans `supabase/tests/onboarding-status.test.ts`
 
 ### Implementation for User Story 3
 
-- [ ] T029 [US3] Étendre `supabase/functions/onboarding-status/index.ts` (ajout ciblé, pas de réécriture) : nouveau champ `show_call_prompt` dans la réponse, calculé selon la règle T026-T028 (dépend de T012 pour lire `plan_tier`)
+- [X] T029 [US3] Étendre `supabase/functions/onboarding-status/index.ts` (ajout ciblé, pas de réécriture) : nouveau champ `show_call_prompt` dans la réponse, calculé selon la règle T026-T028 (dépend de T012 pour lire `plan_tier`)
 
 **Checkpoint**: US1+US2+US3 complètent le chantier — grille tarifaire opérationnelle avec parcours d'acquisition conforme.
 
@@ -122,10 +135,10 @@ Monorepo existant — `supabase/functions/`, `supabase/migrations/`, `supabase/t
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T030 [P] Exécuter `npm run verify` (typecheck + lint + test + build)
+- [X] T030 [P] Exécuter `npm run verify` (typecheck + lint + test + build)
 - [ ] T031 Exécuter manuellement les scénarios de `quickstart.md` (5 scénarios + validation de séparation Stripe SC-005)
-- [ ] T032 [P] Revue de code dédiée confirmant qu'aucun fichier `sentio-billing-*`/`pricing-*` ne partage de secret, d'endpoint ou de table avec `stripe-oauth-*`/`stripe-webhook`/`sync-stripe`/`stripe-product-mappings-api` (rappel de gouvernance §1)
-- [ ] T033 Documenter dans le PR final si `docs/stripe-billing-setup.md` a été complété côté utilisateur ou reste à faire avant un déploiement réel
+- [X] T032 [P] Revue de code dédiée confirmant qu'aucun fichier `sentio-billing-*`/`pricing-*` ne partage de secret, d'endpoint ou de table avec `stripe-oauth-*`/`stripe-webhook`/`sync-stripe`/`stripe-product-mappings-api` (rappel de gouvernance §1)
+- [X] T033 Documenter dans le PR final si `docs/stripe-billing-setup.md` a été complété côté utilisateur ou reste à faire avant un déploiement réel
 
 ---
 

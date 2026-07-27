@@ -45,6 +45,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import type { PlanTier } from '../_shared/pricing.ts'
 
 Deno.serve(async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
@@ -137,7 +138,7 @@ async function handleGetStatus(
   // data_syncs utilisé uniquement pour le statut running du sync en cours
   const [orgRes, stripeSyncRunningRes, accountsCountRes, atRiskCountRes] = await Promise.all([
     supabase.from('organizations')
-      .select('stripe_connected, hubspot_connected, first_score_calculated_at, aha_moment_seen_at, onboarding_completed')
+      .select('stripe_connected, hubspot_connected, first_score_calculated_at, aha_moment_seen_at, onboarding_completed, plan_type')
       .eq('id', orgId)
       .maybeSingle(),
     supabase.from('data_syncs')
@@ -186,6 +187,10 @@ async function handleGetStatus(
   const currentStep = determineCurrentStep(stripeConnected, hubspotConnected, ahaMomentSeen, onboardingCompleted)
   const wizardSteps = buildWizardSteps(stripeConnected, firstScoreCalculated, ahaMomentSeen, hubspotConnected, onboardingCompleted)
 
+  // Chantier D (pricing) — proposition d'appel non-bloquante (FR-011).
+  const planTier = (org?.plan_type as PlanTier) ?? 'free'
+  const showCallPrompt = determineShowCallPrompt(stripeConnected, planTier)
+
   let topRiskAccount = null
   if (ahaMomentReady && !ahaMomentSeen) {
     const { data: riskAccount } = await supabase
@@ -215,8 +220,29 @@ async function handleGetStatus(
       accounts_count: accountsCount,
       at_risk_count: atRiskCount,
       top_risk_account: topRiskAccount,
+      show_call_prompt: showCallPrompt,
     },
   })
+}
+
+/**
+ * FR-011 : proposition d'appel non-bloquante, affichée au moment de la
+ * connexion Stripe (données clients) pour les paliers Free/Growth —
+ * jamais pour Scale/Enterprise (RDV déjà obligatoire par ailleurs).
+ *
+ * Simplification assumée : sans colonne de suivi dédiée (aucune n'existe
+ * dans le schéma actuel pour horodater la transition ou l'affichage déjà
+ * fait), ce champ est recalculé à chaque lecture ("niveau", pas "front" —
+ * vrai tant que Stripe est connecté sur Free/Growth) plutôt que déclenché
+ * une seule fois au moment exact de la transition false→true. Le
+ * frontend reste responsable de ne proposer l'appel qu'une fois par
+ * session/décision utilisateur si un comportement plus fin est requis.
+ */
+export function determineShowCallPrompt(
+  stripeConnected: boolean,
+  planTier: PlanTier,
+): boolean {
+  return stripeConnected && (planTier === 'free' || planTier === 'growth')
 }
 
 export function determineCurrentStep(
