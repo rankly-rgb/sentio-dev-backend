@@ -761,7 +761,26 @@ Envoie un payload de test vers une destination outbound configurée (sans attend
 > Contrat prévisionnel, aligné sur `specs/002-playbook-outcome-tracking/` (spec.md/plan.md/contracts/).
 > À mettre à jour si l'implémentation dévie de ce qui suit.
 
-### 8.1 Statut d'exécution et fenêtre d'attribution — `GET /playbook-execute/{execution_id}/attribution-status`
+### 8.1 Marquer une exécution comme exécutée — `POST /playbook-execute/{execution_id}/mark-executed`
+
+**Décision d'architecture** : sous-route dédiée sur la fonction `playbook-execute` existante (routage par path sur `execution_id`), indépendante du corps `POST /playbook-execute` documenté en section Playbooks (déclenchement d'actions automatisées — email, HubSpot...). Réutiliser cet endpoint de déclenchement avec `execution_source: "manual"` aurait conflaté deux sémantiques distinctes : `execution_source` qualifie l'origine d'une exécution qui *dispatch réellement des actions*, alors que `mark-executed` enregistre a posteriori qu'un CSM a agi **manuellement hors-Sentio** (ex : after l'export CSV du chantier playbooks) — aucune action ne doit être redéclenchée par cet appel.
+
+**Auth** : `Authorization: Bearer <jwt_utilisateur>`, scoping `organization_id` obligatoire.
+
+**Effet** :
+- Si l'exécution n'est pas déjà marquée exécutée : renseigne `executed_at = now()` et calcule `attribution_deadline_at = executed_at + attribution_window_days` du playbook (défaut **14 jours** si non configuré).
+- Si déjà marquée exécutée : réponse idempotente (`200`, aucun nouvel horodatage — cf. spec.md § Assumptions).
+
+**Response 200**
+```json
+{ "execution_id": "uuid", "executed_at": "2026-07-20T10:00:00Z", "attribution_deadline_at": "2026-08-03T10:00:00Z" }
+```
+
+**Codes d'erreur** : `401`, `404` (exécution inexistante ou hors organisation de l'appelant)
+
+> Portée V1 : aucune action d'« annulation » du marquage n'existe dans la spec actuelle (`specs/002-playbook-outcome-tracking/spec.md`) — pas de besoin produit identifié à ce jour. Si un besoin émerge, suivre le même principe de sous-route dédiée (ex. `POST .../unmark-executed`) plutôt que de le rattacher à `POST /playbook-execute`.
+
+### 8.2 Statut d'exécution et fenêtre d'attribution — `GET /playbook-execute/{execution_id}/attribution-status`
 
 | Champ | Type | Nullable | Signification |
 |---|---|---|---|
@@ -771,7 +790,7 @@ Envoie un payload de test vers une destination outbound configurée (sans attend
 | `attribution_status` | `'not_executed'\|'active'\|'expired'\|'resolved'` | non | Champ **dérivé**, jamais stocké — recalculé à chaque lecture à partir de `executed_at`/`account_converted`/`attribution_deadline_at` |
 | `time_remaining_seconds` | number | **oui** | `0` si `expired`/`resolved`, `null` si `not_executed` |
 
-### 8.2 Taux de résolution exécuté vs non-exécuté — `GET /playbook-outcome-stats?playbook_id={uuid}`
+### 8.3 Taux de résolution exécuté vs non-exécuté — `GET /playbook-outcome-stats?playbook_id={uuid}`
 
 | Champ | Type | Nullable | Signification |
 |---|---|---|---|
@@ -782,7 +801,7 @@ Envoie un payload de test vers une destination outbound configurée (sans attend
 | `executed.sample_size_warning` | boolean | non | `true` si `sample_size < 20` — seuil identique à la règle "benchmarks 20 comptes minimum" du chantier A (scoring V2, `docs/CHANGELOG_STABILITY.md`). Le frontend DOIT afficher l'avertissement plutôt qu'un pourcentage nu quand `true` |
 | `not_executed.*` | — | — | Même structure que `executed.*`, pour les exécutions jamais marquées exécutées (`executed_at IS NULL`) |
 
-### 8.3 Nudge de confirmation — `POST /playbook-execute/{execution_id}/nudge-response`
+### 8.4 Nudge de confirmation — `POST /playbook-execute/{execution_id}/nudge-response`
 
 | Champ | Type | Nullable | Signification |
 |---|---|---|---|

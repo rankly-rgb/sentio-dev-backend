@@ -65,7 +65,7 @@ Ces deux points nécessitent une **validation utilisateur explicite avant `/spec
 
 ### Implementation for User Story 1
 
-- [ ] T009 [US1] Implémenter l'action `mark-executed` dans `supabase/functions/playbook-execute/index.ts` (ou endpoint dédié, cf. plan.md § Structure Decision) : Auth JWT ES256 → scoping `organization_id` → idempotence → écriture `executed_at`/`attribution_deadline_at` via T004 (dépend de T002, T004)
+- [ ] T009 [US1] Implémenter la sous-route `POST /playbook-execute/{execution_id}/mark-executed` (routage par path dans `supabase/functions/playbook-execute/index.ts`, distincte du corps `POST /playbook-execute` — décision actée, cf. `API_CONTRACTS.md` § 8.1 et plan.md § Structure Decision) : Auth JWT ES256 → scoping `organization_id` → idempotence → écriture `executed_at`/`attribution_deadline_at` via T004 (dépend de T002, T004)
 
 **Checkpoint**: US1 fonctionnelle et testable indépendamment.
 

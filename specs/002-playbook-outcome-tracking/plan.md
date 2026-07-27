@@ -89,7 +89,7 @@ supabase/
     └── playbook-execute.test.ts             # MODIFIÉ — cas mark-executed, attribution-status, nudge-response
 ```
 
-**Structure Decision**: Extension du monorepo existant. Le découpage exact entre "nouvelle fonction dédiée" et "extension d'une fonction existante" (ex. `playbook-execute` pour le marquage, plutôt qu'une nouvelle fonction) sera confirmé en `/speckit-tasks` — ce plan pose la contrainte de non-régression (FR-005) et de modification ciblée, pas le découpage final des fichiers.
+**Structure Decision**: Extension du monorepo existant. Décidé (2026-07-27, cf. `API_CONTRACTS.md` § 8.1) : `mark-executed` est une sous-route dédiée sur la fonction `playbook-execute` existante (`POST /playbook-execute/{execution_id}/mark-executed`, routage par path), **distincte** du corps `POST /playbook-execute` (déclenchement d'actions automatisées). Ce choix évite de réutiliser l'endpoint de déclenchement — via `execution_source: "manual"` — pour un marquage déclaratif a posteriori, ce qui risquerait de redéclencher des actions réelles (email, HubSpot) au lieu de simplement enregistrer que le CSM a agi manuellement. Ce plan pose par ailleurs la contrainte de non-régression (FR-005) et de modification ciblée sur `stripe-webhook`.
 
 **Point de vigilance explicite pour `/speckit-tasks`** : toute tâche touchant `stripe-webhook/index.ts` doit être formulée comme une modification ciblée additive, avec un rappel explicite de la clause de gouvernance de la constitution nécessitant validation utilisateur avant implémentation de cette tâche spécifique.
 
