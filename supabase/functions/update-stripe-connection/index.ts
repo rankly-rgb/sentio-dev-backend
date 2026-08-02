@@ -19,7 +19,7 @@
 //
 // Stockage : Vault (organization_integrations.vault_access_token_id, provider
 // 'stripe') est la source canonique — remplacée en place via
-// vault_update_secret plutôt qu'accumulée à chaque appel. organizations.
+// vault_replace_secret plutôt qu'accumulée à chaque appel. organizations.
 // stripe_api_key est aussi mis à jour en écriture directe : c'est la colonne
 // que sync-stripe lit réellement aujourd'hui (voir sync-stripe/index.ts), donc
 // sans ce double-write "mettre à jour la clé" ne changerait rien à la
@@ -131,7 +131,7 @@ async function upsertVaultSecret(
     .maybeSingle()
 
   if (existing?.vault_access_token_id) {
-    const { error } = await supabase.rpc('vault_update_secret', {
+    const { error } = await supabase.rpc('vault_replace_secret', {
       p_secret_id: existing.vault_access_token_id,
       p_new_secret: apiKey,
     })
@@ -231,9 +231,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .maybeSingle()
 
     if (existing?.vault_access_token_id) {
-      const { error: deleteErr } = await supabase.rpc('vault_delete_secret', { p_secret_id: existing.vault_access_token_id })
+      const { error: deleteErr } = await supabase.rpc('vault_remove_secret', { p_secret_id: existing.vault_access_token_id })
       if (deleteErr) {
-        console.error(JSON.stringify({ level: 'warn', function_name: 'update-stripe-connection', message: `vault_delete_secret failed: ${deleteErr.message}` }))
+        console.error(JSON.stringify({ level: 'warn', function_name: 'update-stripe-connection', message: `vault_remove_secret failed: ${deleteErr.message}` }))
       }
       await supabase
         .from('organization_integrations')
