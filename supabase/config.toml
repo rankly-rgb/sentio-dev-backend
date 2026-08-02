@@ -180,6 +180,10 @@ verify_jwt = false
 [functions.export-csv]
 verify_jwt = false
 
+# export-playbook-csv : JWT vérifié dans le code (ES256 — export ciblé playbook + transit PII Stripe)
+[functions.export-playbook-csv]
+verify_jwt = false
+
 # churn-alert : cron quotidien 06:00 UTC — alerte si comptes churn_risk >= 70 mis à jour dans les 24h
 [functions.churn-alert]
 verify_jwt = false
