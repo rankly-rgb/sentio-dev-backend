@@ -98,8 +98,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     'metadata[tier]': tier.key,
     'subscription_data[metadata][organization_id]': auth.organizationId,
     'subscription_data[metadata][tier]': tier.key,
-    success_url: `${appUrl}/settings/billing?checkout=success`,
-    cancel_url: `${appUrl}/settings/billing?checkout=cancelled`,
+    success_url: `${appUrl}/settings?tab=billing&checkout=success`,
+    cancel_url: `${appUrl}/settings?tab=billing&checkout=cancelled`,
   })
 
   let res: Response
