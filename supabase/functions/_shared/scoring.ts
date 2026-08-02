@@ -401,9 +401,9 @@ function calcDunningScore(invoices90d: InvoiceRecord[]): number | null {
 
 export function calcPaymentHealthDimension(input: PaymentHealthInput, now: number = Date.now()): DimensionOutcome {
   return combineWeightedSignals([
-    { code: 'invoice_status_score', label: 'Statut des factures (90j)', weight: 0.40, value: calcInvoiceStatusScore(input.invoices90d, now) },
-    { code: 'payment_history_score', label: 'Historique de paiement à temps (12 mois)', weight: 0.35, value: calcPaymentHistoryScore(input.invoices12mo) },
-    { code: 'dunning_score', label: 'Échecs de paiement / relances (90j)', weight: 0.25, value: calcDunningScore(input.invoices90d) },
+    { code: 'invoice_status_score', label: 'Invoice status (90d)', weight: 0.40, value: calcInvoiceStatusScore(input.invoices90d, now) },
+    { code: 'payment_history_score', label: 'On-time payment history (12 months)', weight: 0.35, value: calcPaymentHistoryScore(input.invoices12mo) },
+    { code: 'dunning_score', label: 'Payment failures / dunning (90d)', weight: 0.25, value: calcDunningScore(input.invoices90d) },
   ])
 }
 
@@ -455,9 +455,9 @@ function calcExpansionSignalScore(movements6mo: MrrMovementRecord[]): number {
 
 export function calcRevenueDynamicsDimension(input: RevenueDynamicsInput): DimensionOutcome {
   return combineWeightedSignals([
-    { code: 'mrr_trend_score', label: 'Tendance MRR (3 mois)', weight: 0.45, value: calcMrrTrendScore(input.mrrCurrentCents, input.mrr3moAgoCents) },
-    { code: 'contraction_score', label: 'Contraction MRR (6 mois)', weight: 0.35, value: calcContractionScore(input.mrrCurrentCents, input.movements6mo) },
-    { code: 'expansion_signal_score', label: 'Signal d\'expansion (6 mois)', weight: 0.20, value: calcExpansionSignalScore(input.movements6mo) },
+    { code: 'mrr_trend_score', label: 'MRR trend (3 months)', weight: 0.45, value: calcMrrTrendScore(input.mrrCurrentCents, input.mrr3moAgoCents) },
+    { code: 'contraction_score', label: 'MRR contraction (6 months)', weight: 0.35, value: calcContractionScore(input.mrrCurrentCents, input.movements6mo) },
+    { code: 'expansion_signal_score', label: 'Expansion signal (6 months)', weight: 0.20, value: calcExpansionSignalScore(input.movements6mo) },
   ])
 }
 
@@ -504,9 +504,9 @@ function calcTenureScore(contractStartDate: string | null, now: number): number 
 
 export function calcContractRenewalDimension(input: ContractRenewalInput, now: number = Date.now()): DimensionOutcome {
   return combineWeightedSignals([
-    { code: 'billing_interval_score', label: 'Intervalle de facturation', weight: 0.30, value: calcBillingIntervalScore(input.billingInterval) },
-    { code: 'renewal_proximity_score', label: 'Proximité du renouvellement', weight: 0.40, value: calcRenewalProximityScore(input.billingInterval, input.contractEndDate, now) },
-    { code: 'tenure_score', label: 'Ancienneté du contrat', weight: 0.30, value: calcTenureScore(input.contractStartDate, now) },
+    { code: 'billing_interval_score', label: 'Billing interval', weight: 0.30, value: calcBillingIntervalScore(input.billingInterval) },
+    { code: 'renewal_proximity_score', label: 'Renewal proximity', weight: 0.40, value: calcRenewalProximityScore(input.billingInterval, input.contractEndDate, now) },
+    { code: 'tenure_score', label: 'Contract tenure', weight: 0.30, value: calcTenureScore(input.contractStartDate, now) },
   ])
 }
 
@@ -689,13 +689,13 @@ export interface ChurnSignalInputs {
 
 export function buildChurnSignals(inputs: ChurnSignalInputs): ChurnSignalDefinition[] {
   return [
-    { code: 'invoice_overdue_15d', label: 'Facture impayée depuis 15 jours ou plus', severity: 'CRITIQUE', points: 35, value: inputs.hasInvoiceOverdue15Plus },
-    { code: 'mrr_contraction_20pct_3mo', label: 'Contraction MRR ≥ 20% sur 3 mois', severity: 'CRITIQUE', points: 30, value: inputs.contractionMrr20PctPlus3mo },
-    { code: 'payment_failures_90d', label: '2 échecs de paiement ou plus sur 90 jours', severity: 'MAJEUR', points: 25, value: inputs.paymentFailures2PlusIn90d },
-    { code: 'monthly_young_account', label: 'Contrat mensuel et compte de moins de 6 mois', severity: 'MAJEUR', points: 20, value: inputs.isMonthlyAndTenureUnder6mo },
-    { code: 'annual_renewal_soon_with_contraction', label: 'Renouvellement annuel sous 30 jours avec contraction récente', severity: 'MAJEUR', points: 20, value: inputs.annualRenewal30dPlusWithContraction6mo },
-    { code: 'plan_downgrade_6mo', label: 'Downgrade de plan sur 6 mois', severity: 'MINEUR', points: 10, value: inputs.hasDowngrade6mo },
-    { code: 'invoice_overdue_under_15d', label: 'Facture impayée depuis moins de 15 jours', severity: 'MINEUR', points: 10, value: inputs.hasInvoiceOverdueUnder15 },
+    { code: 'invoice_overdue_15d', label: 'Invoice overdue for 15+ days', severity: 'CRITIQUE', points: 35, value: inputs.hasInvoiceOverdue15Plus },
+    { code: 'mrr_contraction_20pct_3mo', label: 'MRR contraction of 20%+ over 3 months', severity: 'CRITIQUE', points: 30, value: inputs.contractionMrr20PctPlus3mo },
+    { code: 'payment_failures_90d', label: '2 or more payment failures in the last 90 days', severity: 'MAJEUR', points: 25, value: inputs.paymentFailures2PlusIn90d },
+    { code: 'monthly_young_account', label: 'Monthly billing and account under 6 months old', severity: 'MAJEUR', points: 20, value: inputs.isMonthlyAndTenureUnder6mo },
+    { code: 'annual_renewal_soon_with_contraction', label: 'Annual renewal within 30 days with recent contraction', severity: 'MAJEUR', points: 20, value: inputs.annualRenewal30dPlusWithContraction6mo },
+    { code: 'plan_downgrade_6mo', label: 'Plan downgrade within the last 6 months', severity: 'MINEUR', points: 10, value: inputs.hasDowngrade6mo },
+    { code: 'invoice_overdue_under_15d', label: 'Invoice overdue for under 15 days', severity: 'MINEUR', points: 10, value: inputs.hasInvoiceOverdueUnder15 },
   ]
 }
 
