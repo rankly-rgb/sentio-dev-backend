@@ -11,7 +11,6 @@ import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { createLogger } from '../_shared/structured-logger.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import {
-  evaluateConditions,
   calculateStepDueDate,
   type PlaybookAction,
   type WorkflowStep,
@@ -22,6 +21,7 @@ import { executeWorkflowStep } from '../_shared/workflow-executor.ts'
 import { dispatchAction } from '../_shared/action-dispatcher.ts'
 import { getBatchCompanyContacts } from '../_shared/hubspot-client.ts'
 import { resolveHubSpotApiKey } from '../_shared/vault.ts'
+import { resolvePlaybookTargetAccounts } from '../_shared/playbook-targeting.ts'
 
 const MAX_ACCOUNTS_PER_RUN = 200
 
@@ -114,47 +114,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   logger.info('Playbook execution started', { playbook_id: body.playbook_id, playbook_title: playbook.title })
 
-  // ── Resolve target accounts ─────────────────────────────
+  // ── Resolve target accounts (shared with export-playbook-csv) ──
 
-  let accountIds: string[]
+  const eligibleAccounts = await resolvePlaybookTargetAccounts(
+    supabase,
+    playbook,
+    body.organization_id,
+    MAX_ACCOUNTS_PER_RUN,
+    body.account_ids,
+  )
 
-  if (body.account_ids?.length) {
-    accountIds = body.account_ids.slice(0, MAX_ACCOUNTS_PER_RUN)
-  } else {
-    const { data: memberships } = await supabase
-      .from('segment_memberships')
-      .select('account_id')
-      .eq('segment_id', body.segment_id!)
-      .eq('organization_id', body.organization_id)
-      .eq('status', 'active')
-      .limit(MAX_ACCOUNTS_PER_RUN)
-
-    accountIds = (memberships ?? []).map((m: Record<string, unknown>) => m.account_id as string)
-  }
-
-  if (accountIds.length === 0) {
+  if (eligibleAccounts.length === 0) {
     logger.info('No target accounts found')
     return jsonResponse({ success: true, message: 'No eligible accounts', executions_created: 0 })
   }
-
-  // ── Fetch account data ──────────────────────────────────
-
-  const { data: accounts } = await supabase
-    .from('accounts')
-    .select('id, organization_id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, arr_cents, plan_tier, seat_count, seat_limit, contract_start_date, contract_end_date, created_at')
-    .eq('organization_id', body.organization_id)
-    .in('id', accountIds)
-
-  if (!accounts?.length) {
-    return jsonResponse({ success: true, message: 'No accounts found', executions_created: 0 })
-  }
-
-  // ── Filter by eligibility criteria ──────────────────────
-
-  const eligibleAccounts = playbook.eligibility_criteria
-    ? accounts.filter((a: Record<string, unknown>) =>
-        evaluateConditions(playbook.eligibility_criteria, a))
-    : accounts
 
   // ── Idempotency check ───────────────────────────────────
 
