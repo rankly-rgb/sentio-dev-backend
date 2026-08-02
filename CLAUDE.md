@@ -108,6 +108,7 @@ Un compte à `mrr_cents = 0` ou dont l'abonnement est `canceled` reçoit un éta
 | `playbook-execute` | POST (JWT) | Exécution playbooks |
 | `playbook-scheduler` | POST (cron) | Scheduler playbooks |
 | `insights-crud` | REST (JWT) | CRUD insights |
+| `get-today-actions` | GET (JWT) | Liste priorisée d'actions Today (C2.4a) |
 | `health-check` | GET (5 min) | Monitoring |
 | `self-monitor` | POST (15 min) | Auto-recovery |
 | `admin-proxy` | REST (JWT) | Admin API |

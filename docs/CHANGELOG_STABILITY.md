@@ -40,6 +40,20 @@ Audit préalable (audit rétention 2026-08, décision produit D4 — anglais/en-
 
 ---
 
+## Today Actions — source de vérité unique insights + playbooks (2026-08-02, C2.4a)
+
+Audit préalable : la page "Today" affichait deux nombres de deux sources totalement indépendantes sur le même écran — le statut portefeuille (`get-today-status`, basé sur `ai_insights`) et le total "priority actions" (calculé 100% côté client dans `src/lib/types/today-actions.ts`, basé uniquement sur le matching `eligibility_criteria` des playbooks actifs, sans aucune notion d'insight). D'où la contradiction trouvée par l'audit : "portfolio stable" + "0 priority actions" alors que 206 insights critiques étaient actifs — un compte avec un insight critique mais qu'aucun playbook ne ciblait n'apparaissait tout simplement nulle part dans le calcul côté client.
+
+**Changements :**
+- `_shared/today-actions-helpers.ts` (nouveau) : port du calcul `today-actions.ts` frontend, avec une différence de fond — `computeTodayActions` inclut désormais un compte s'il matche un playbook actif **OU** s'il porte au moins un insight actif, les deux mécanismes alimentant la même liste dédupliquée par compte. Réutilise `evaluateConditions`/`ConditionGroup` de `_shared/playbook-engine.ts` (déjà existant, zéro nouvelle implémentation du matching). `computePriority` prend désormais aussi en compte la priorité de l'insight le plus urgent du compte (un insight `critical` ne peut jamais laisser un compte en dessous de P0, quels que soient ses scores). `determinePortfolioStatus(criticalInsightCount, totalActions)` formalise la règle non négociable : `criticalInsightCount > 0` ⇒ jamais `'stable'` ; sinon `totalActions > 0` ⇒ `'attention_needed'` ; sinon `'stable'`.
+- `get-today-actions/index.ts` (nouvelle Edge Function, `GET`, JWT vérifié dans le code) : fetch accounts (comptes churnés exclus, D1) + playbooks actifs + insights actifs de l'org, calcule via le helper ci-dessus, retourne `{ status, total, by_priority, by_category, mrr_at_risk_cents, actions }`. C'est le contrat que consommera la Phase Today du frontend (C2.4b) à la place du calcul client-side actuel.
+
+**Décision de périmètre — `get-today-status`/`dashboard-api` non modifiés.** Leur logique de comptage `critical_count`/`p0_insights_count` (corrigée en C2.2 pour exclure les comptes churnés) reste correcte et testée en l'état — le bug réel n'était pas dans leur calcul mais dans l'absence totale de lien entre le statut portefeuille et le total "priority actions" affiché côté client. Faire consommer ce nouveau helper à ces deux fonctions n'aurait rien corrigé de plus et risquait de régresser du code déjà validé ; réévaluer seulement si un besoin concret apparaît.
+
+**Tests** : `supabase/tests/today-actions-helpers.test.ts` (nouveau, 24 tests) — dont un test de non-régression explicite sur la contradiction trouvée par l'audit (`determinePortfolioStatus(206, 0)` ne peut jamais retourner `'stable'`).
+
+---
+
 ## Churn Risk — exclusion des comptes churnés des KPIs/listes "at risk" (2026-08-02, C2.2)
 
 Suite de C2.1 (état figé `churn_risk_band='churned'`) : audit de tous les points du backend calculant un KPI ou une liste "at risk"/"critical"/"danger", pour confirmer qu'aucun ne pouvait encore afficher un compte churné comme s'il était à risque.
