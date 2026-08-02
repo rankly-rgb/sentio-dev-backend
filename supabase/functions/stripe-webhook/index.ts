@@ -297,6 +297,8 @@ async function handleInvoiceEvent(
     ? new Date(invoice.status_transitions.paid_at * 1000).toISOString()
     : null
 
+  const invoiceCurrency = invoice.currency ?? 'usd'
+
   const { error } = await supabase
     .from('invoices')
     .upsert(
@@ -306,7 +308,7 @@ async function handleInvoiceEvent(
         subscription_id: subscriptionId,
         stripe_invoice_id: invoice.id,
         amount_cents: invoice.amount_due ?? 0,
-        currency: invoice.currency ?? 'eur',
+        currency: invoiceCurrency,
         status: invoice.status ?? 'draft',
         invoice_date: invoiceDate,
         due_date: dueDate,
@@ -320,6 +322,14 @@ async function handleInvoiceEvent(
     logger.increment('records_failed')
     return
   }
+
+  // Même logique que sync-stripe : propage la devise du compte Stripe
+  // connecté vers organizations.currency dès la première invoice reçue
+  // en temps réel, pas seulement lors du sync quotidien.
+  await supabase
+    .from('organizations')
+    .update({ currency: invoiceCurrency })
+    .eq('id', organizationId)
 
   logger.increment('records_processed')
   logger.increment('invoices_processed')

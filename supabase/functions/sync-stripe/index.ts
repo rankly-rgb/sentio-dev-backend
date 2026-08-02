@@ -530,6 +530,28 @@ async function syncInvoices(
   logger.increment('records_processed', processed)
   logger.increment('invoices_processed', processed)
   logger.increment('records_failed', failed)
+
+  // Propage la devise du compte Stripe connecté vers organizations.currency
+  // (affichage $/€/etc. côté frontend) — dérivée des invoices déjà
+  // synchronisées plutôt qu'un appel Stripe API dédié (toutes les invoices
+  // d'un même compte Stripe partagent la même devise dans l'écrasante
+  // majorité des cas). Prend la première ligne de ce batch, pas de
+  // recalcul par invoice.
+  const syncedCurrency = invoiceRows[0]?.currency as string | undefined
+  if (syncedCurrency) {
+    const { error: currencyError } = await supabase
+      .from('organizations')
+      .update({ currency: syncedCurrency })
+      .eq('id', organizationId)
+
+    if (currencyError) {
+      console.error(JSON.stringify({
+        level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
+        message: `Failed to update organizations.currency: ${currencyError.message}`,
+      }))
+    }
+  }
+
   if (orphaned > 0) {
     console.warn(JSON.stringify({
       level: 'warn', function_name: 'sync-stripe',
