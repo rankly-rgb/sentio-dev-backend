@@ -44,6 +44,11 @@ export interface TodayAccountInput {
   plan_tier: string | null
   contract_end_date: string | null
   billing_interval: string | null
+  created_at: string
+  // null si le cron calculate-scores n'a jamais encore segmenté ce compte —
+  // même source/convention que accounts-api (fetchPrimarySegments), 'nouveaux'
+  // exclu (non-exclusif, porté séparément par created_at côté frontend).
+  primary_segment: string | null
 }
 
 export interface TodayPlaybookInput {
@@ -81,6 +86,8 @@ export interface TodayAction {
   days_to_renewal: number | null
   trigger_reasons: string[]
   matching_playbooks: MatchingPlaybook[]
+  created_at: string
+  primary_segment: string | null
 }
 
 export interface TodayActionsSummary {
@@ -185,6 +192,8 @@ export function computeTodayActions(
       days_to_renewal: dtr,
       trigger_reasons: computeTriggerReasons(account, insights.map((i) => i.title)),
       matching_playbooks: [],
+      created_at: account.created_at,
+      primary_segment: account.primary_segment,
     }
     map.set(account.id, action)
     return action

@@ -80,12 +80,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const orgId = auth.organizationId
 
-  const [accountsRes, playbooksRes, insightsRes] = await Promise.all([
+  const [accountsRes, playbooksRes, insightsRes, segmentsRes] = await Promise.all([
     // D1 : exclut les comptes churnés — .or() plutôt que .neq() pour ne pas
     // droper par accident un compte pas encore scoré (churn_risk_band NULL).
     supabase
       .from('accounts')
-      .select('id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, mrr_cents, plan_tier, contract_end_date, billing_interval')
+      .select('id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, mrr_cents, plan_tier, contract_end_date, billing_interval, created_at')
       .eq('organization_id', orgId)
       .or('churn_risk_band.neq.churned,churn_risk_band.is.null')
       .limit(ACCOUNTS_LIMIT),
@@ -102,6 +102,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq('status', 'active')
       .not('account_id', 'is', null)
       .limit(INSIGHTS_LIMIT),
+    // primary_segment : même source/convention que accounts-api
+    // (fetchPrimarySegments) — lu depuis segment_memberships, jamais
+    // recalculé ici. 'nouveaux' exclu (non-exclusif, porté par created_at).
+    supabase
+      .from('segment_memberships')
+      .select('account_id, account_segments!inner(segment_type)')
+      .eq('organization_id', orgId)
+      .eq('status', 'active')
+      .neq('account_segments.segment_type', 'nouveaux')
+      .limit(ACCOUNTS_LIMIT),
   ])
 
   if (accountsRes.error) {
@@ -116,8 +126,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
     console.error(JSON.stringify({ level: 'error', function_name: 'get-today-actions', organization_id: orgId, message: insightsRes.error.message }))
     return errorResponse('Failed to fetch insights', 500)
   }
+  if (segmentsRes.error) {
+    console.error(JSON.stringify({ level: 'error', function_name: 'get-today-actions', organization_id: orgId, message: segmentsRes.error.message }))
+    return errorResponse('Failed to fetch segments', 500)
+  }
 
-  const accounts = (accountsRes.data ?? []) as TodayAccountInput[]
+  const primarySegmentByAccountId = new Map<string, string>()
+  for (const row of (segmentsRes.data ?? []) as { account_id: string; account_segments: { segment_type: string } | null }[]) {
+    if (row.account_segments?.segment_type) primarySegmentByAccountId.set(row.account_id, row.account_segments.segment_type)
+  }
+
+  const accounts = ((accountsRes.data ?? []) as Omit<TodayAccountInput, 'primary_segment'>[]).map((a) => ({
+    ...a,
+    primary_segment: primarySegmentByAccountId.get(a.id) ?? null,
+  }))
   const playbooks = (playbooksRes.data ?? []) as unknown as (Omit<TodayPlaybookInput, 'eligibility_criteria'> & { eligibility_criteria: ConditionGroup | null })[]
 
   const insightsByAccount = new Map<string, TodayInsightInput[]>()

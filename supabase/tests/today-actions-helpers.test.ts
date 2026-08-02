@@ -24,6 +24,8 @@ function account(overrides: Partial<TodayAccountInput> = {}): TodayAccountInput 
     plan_tier: 'growth',
     contract_end_date: null,
     billing_interval: null,
+    created_at: '2026-01-01T00:00:00Z',
+    primary_segment: null,
     ...overrides,
   }
 }
