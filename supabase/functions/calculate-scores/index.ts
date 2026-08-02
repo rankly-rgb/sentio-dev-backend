@@ -468,6 +468,11 @@ async function assignSegments(
   const memberships: Array<Record<string, unknown>> = []
   const segmentAggs: Record<string, { count: number; mrrTotal: number; healthSum: number; healthCount: number; churnSum: number }> = {}
   const segmentsByAccount = new Map<string, SegmentTypeV3[]>()
+  // primary_segment (T0.2, accounts.primary_segment) : premier segment non-'nouveaux'
+  // — même règle de priorité que accounts-api (fetchPrimarySegments). 'nouveaux' est
+  // non-exclusif/additif et n'est jamais le segment primaire. Groupé par valeur pour
+  // limiter le nombre d'UPDATE (un par segment de santé plutôt qu'un par compte).
+  const accountIdsBySegment = new Map<SegmentTypeV3, string[]>()
 
   for (const segType of SYSTEM_SEGMENT_TYPES) {
     segmentAggs[segType] = { count: 0, mrrTotal: 0, healthSum: 0, healthCount: 0, churnSum: 0 }
@@ -482,6 +487,13 @@ async function assignSegments(
 
     const segTypes = determineSegmentTypesV3(segInput)
     segmentsByAccount.set(account.id, segTypes)
+
+    const primarySegType = segTypes.find((s) => s !== 'nouveaux')
+    if (primarySegType) {
+      const ids = accountIdsBySegment.get(primarySegType) ?? []
+      ids.push(account.id)
+      accountIdsBySegment.set(primarySegType, ids)
+    }
 
     for (const segType of segTypes) {
       const segId = segmentMap.get(segType as SegmentType)
@@ -528,6 +540,20 @@ async function assignSegments(
     }
     for (const m of memberships) {
       newAccountSegmentPairs.add(`${m.account_id}:${m.segment_id}`)
+    }
+  }
+
+  // Persist accounts.primary_segment (T0.2) — un UPDATE par valeur de segment
+  // plutôt que par compte (accountIdsBySegment.size <= 7 valeurs de santé possibles).
+  for (const [segType, ids] of accountIdsBySegment) {
+    const { error } = await supabase
+      .from('accounts')
+      .update({ primary_segment: segType })
+      .eq('organization_id', organizationId)
+      .in('id', ids)
+
+    if (error) {
+      console.error('[calculate-scores] accounts.primary_segment update error:', error.message)
     }
   }
 
