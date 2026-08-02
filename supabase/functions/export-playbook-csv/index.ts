@@ -28,6 +28,10 @@
 //   Auth : Bearer token utilisateur (JWT ES256)
 //   Body : { run_id: string }
 //   Response 200 : { success: true, updated: boolean }  -- marque le run 'executed' (idempotent)
+//
+// GET /export-playbook-csv?playbook_id=xxx
+//   Auth : Bearer token utilisateur (JWT ES256)
+//   Response 200 : { data: { runs: PlaybookRun[] } }  -- historique des runs (50 derniers, plus récent d'abord)
 // ============================================================
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
@@ -316,13 +320,39 @@ async function handlePost(req: Request, supabase: SupabaseClient, organizationId
   })
 }
 
+async function handleGet(req: Request, supabase: SupabaseClient, organizationId: string): Promise<Response> {
+  const url = new URL(req.url)
+  const playbookId = url.searchParams.get('playbook_id')
+  if (!playbookId) return errorResponse('playbook_id query param is required', 400)
+
+  const { data: runs, error } = await supabase
+    .from('playbook_runs')
+    .select('id, target_label, accounts_count, mrr_at_risk_cents, status, exported_at, executed_at')
+    .eq('organization_id', organizationId)
+    .eq('playbook_id', playbookId)
+    .order('exported_at', { ascending: false })
+    .limit(50)
+
+  if (error) {
+    console.error(JSON.stringify({
+      level: 'error',
+      function_name: 'export-playbook-csv',
+      organization_id: organizationId,
+      message: `playbook_runs list failed: ${error.message}`,
+    }))
+    return errorResponse('Failed to list runs', 500)
+  }
+
+  return jsonResponse({ data: { runs: runs ?? [] } })
+}
+
 // ── Entrypoint ──────────────────────────────────────────────
 
 Deno.serve(async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
-  if (req.method !== 'POST' && req.method !== 'PATCH') {
+  if (req.method !== 'GET' && req.method !== 'POST' && req.method !== 'PATCH') {
     return errorResponse('Method not allowed', 405)
   }
 
@@ -343,6 +373,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Server configuration error', 500)
   }
 
+  if (req.method === 'GET') {
+    return handleGet(req, supabase, auth.organizationId)
+  }
   if (req.method === 'PATCH') {
     return handlePatch(req, supabase, auth.organizationId)
   }
