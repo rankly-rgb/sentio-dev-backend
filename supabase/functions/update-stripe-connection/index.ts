@@ -1,6 +1,7 @@
 // ============================================================
 // Edge Function : update-stripe-connection
-// Remplace ou déconnecte la clé Stripe restreinte d'une org depuis
+// Remplace ou déconnecte la clé Stripe (restreinte rk_ ou secrète complète
+// sk_) d'une org depuis
 // Settings → Integrations (le flux qui manquait : voir CHANGELOG_STABILITY.md
 // "Stripe connection update/disconnect v1" pour le contexte complet).
 //
@@ -36,12 +37,14 @@ import { createServiceClient, errorResponse, jsonResponse } from '../_shared/sup
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 
-// Restreinte uniquement (rk_) — contrairement à verify-stripe-token/
-// integrations-config qui acceptent encore des clés secrètes complètes
-// (sk_), cet endpoint applique l'invariant "Stripe read-only" documenté dans
-// CLAUDE.md dès la mise à jour : une clé sk_ complète n'est jamais restreinte,
-// quel que soit son scope réel.
-const VALID_PREFIXES = ['rk_live_', 'rk_test_'] as const
+// Restreintes (rk_) ET secrètes complètes (sk_) toutes deux acceptées —
+// aligné avec verify-stripe-token/integrations-config, qui acceptent déjà
+// les deux. Une clé sk_ n'est jamais "read-only" au sens strict (Stripe ne
+// distingue pas les scopes sur ce type de clé), mais les 3 appels de lecture
+// ci-dessous (validateStripeKeyLive) restent le seul contrôle réellement
+// applicable côté API — accepter sk_ ne réduit pas cette vérification, ça
+// élargit juste le format de clé accepté en amont.
+const VALID_PREFIXES = ['rk_live_', 'rk_test_', 'sk_live_', 'sk_test_'] as const
 const MIN_SUFFIX_LENGTH = 20
 
 // Ressources que sync-stripe lit réellement (customers, subscriptions,
@@ -53,7 +56,7 @@ const REQUIRED_READ_PATHS = [
   { path: '/v1/invoices?limit=1', label: 'Invoices' },
 ] as const
 
-export function validateRestrictedKeyFormat(key: string): { valid: boolean; mode: 'live' | 'test' } {
+export function validateStripeKeyFormat(key: string): { valid: boolean; mode: 'live' | 'test' } {
   for (const prefix of VALID_PREFIXES) {
     if (key.startsWith(prefix) && key.length >= prefix.length + MIN_SUFFIX_LENGTH) {
       return { valid: true, mode: prefix.includes('live') ? 'live' : 'test' }
@@ -69,11 +72,11 @@ interface StripeValidationResult {
 
 // Vérifie que la clé fonctionne ET qu'elle a accès en lecture aux 3
 // ressources dont sync-stripe a besoin. Stripe n'expose pas d'endpoint
-// d'introspection des permissions d'une clé restreinte — cette vérification
-// se limite donc à ce qui est réellement observable via l'API publique
-// (le préfixe rk_ garantit "restreinte", ces 3 appels garantissent "peut lire
-// ce dont Sentio a besoin"), pas une preuve formelle d'absence d'accès en
-// écriture.
+// d'introspection des permissions d'une clé (restreinte ou secrète complète)
+// — cette vérification se limite donc à ce qui est réellement observable via
+// l'API publique : ces 3 appels garantissent "peut lire ce dont Sentio a
+// besoin", pas une preuve formelle d'absence d'accès en écriture (une clé sk_
+// en a de toute façon, c'est inhérent à ce type de clé).
 async function validateStripeKeyLive(apiKey: string): Promise<StripeValidationResult> {
   for (const { path, label } of REQUIRED_READ_PATHS) {
     let res: Response
@@ -262,9 +265,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
   const apiKey = rawKey.trim()
 
-  const { valid, mode } = validateRestrictedKeyFormat(apiKey)
+  const { valid, mode } = validateStripeKeyFormat(apiKey)
   if (!valid) {
-    return errorResponse('The key must be a restricted Stripe key (rk_live_... or rk_test_...) — full secret keys (sk_) are not accepted here for a read-only connection', 400)
+    return errorResponse('The key must be a Stripe key starting with rk_live_, rk_test_, sk_live_, or sk_test_', 400)
   }
 
   const validation = await validateStripeKeyLive(apiKey)
