@@ -66,6 +66,29 @@ RPC — atomic, idempotent (returns `updated: false` if the run doesn't exist,
 belongs to another org, or isn't in `'exported'` status). This is what powers
 the anti-double-send exclusion on the next export of the same playbook.
 
+### `GET /export-playbook-csv?playbook_id=xxx` — run history
+
+```json
+{
+  "data": {
+    "runs": [
+      {
+        "id": "uuid",
+        "target_label": "Payment Failure Recovery",
+        "accounts_count": 42,
+        "mrr_at_risk_cents": 1284500,
+        "status": "exported",
+        "exported_at": "2026-08-02T10:00:00Z",
+        "executed_at": null
+      }
+    ]
+  }
+}
+```
+
+50 most recent runs, newest first. This is what the run-history list and
+"Mark as executed" button (frontend) render from.
+
 ## CSV columns → merge tags
 
 | CSV column | Merge tag equivalent (ESP import) | Source |
