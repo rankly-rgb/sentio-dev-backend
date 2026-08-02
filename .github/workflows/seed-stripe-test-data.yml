@@ -1,0 +1,58 @@
+name: Seed Stripe Test Data (Segment Validation)
+
+# Manual only — this hits the live Stripe API and creates/mutates real
+# test-mode resources. Never wire this to push/PR triggers.
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: >-
+          Seeding phase (scripts/seed-segment-test-data.ts). Phase 1 creates
+          the cohorts; phase 2 mutates Champions/Critical prices to produce
+          expansion/contraction MRR signals — run it only after a Sentio
+          sync has recorded phase 1's baseline MRR.
+        required: true
+        type: choice
+        options:
+          - '1'
+          - '2'
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Phase 2 needs phase 1's state file (customer/subscription IDs) to
+      # know which accounts to mutate. Runners are ephemeral, so hand it off
+      # via actions/cache rather than committing it (it's gitignored on
+      # purpose — see .gitignore).
+      - name: Restore phase 1 state
+        if: ${{ inputs.phase == '2' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: scripts/.seed-segment-state.json
+          key: seed-segment-state-${{ github.ref_name }}
+          fail-on-cache-miss: true
+
+      - name: Run seeding script (phase ${{ inputs.phase }})
+        env:
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+        run: npx tsx scripts/seed-segment-test-data.ts --phase=${{ inputs.phase }}
+
+      - name: Save phase 1 state (for the phase 2 run)
+        if: ${{ inputs.phase == '1' }}
+        uses: actions/cache/save@v4
+        with:
+          path: scripts/.seed-segment-state.json
+          key: seed-segment-state-${{ github.ref_name }}
