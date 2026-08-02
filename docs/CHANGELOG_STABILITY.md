@@ -4,6 +4,23 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Churn Risk — état figé "churned" pour les comptes partis (2026-08-02, D1/C2.1)
+
+Décision produit D1 (audit rétention 2026-08) : un compte à `mrr_cents = 0` ou dont l'abonnement est `canceled` recevait jusqu'ici un `churn_risk_score` calculé normalement sur ses signaux historiques (factures en retard passées, contraction MRR passée, etc.) — d'où des comptes déjà partis affichés à "92% de risque de churn critique". Un compte parti n'est pas à risque, il est perdu.
+
+**Changements :**
+- `calculate-scores/index.ts` (`scoreAccountPure`) : `subscriptionCanceled` calculé avant le scoring churn (au lieu d'après) ; si `mrr_cents === 0 || subscriptionCanceled`, court-circuite entièrement `buildChurnSignals`/`calcChurnRiskV2` — aucun signal n'est évalué. Retourne `{ churn_risk_score: null, churn_risk_band: 'churned', risk_signals_triggered: [], risk_signals_evaluated: 0 }`. `churn_risk_score` reste `NULL` (déjà nullable en base) — pas de clamp à 0, qui se lirait comme "aucun risque" plutôt que "non applicable" (S1 : no data ≠ neutral data).
+- `_shared/scoring.ts` : `SegmentInputV3.churnRiskBand` élargi à `'low' | 'watch' | 'high' | 'churned'`. `determineSegmentTypesV3` assignait déjà `en_churn` sur ce même critère (`mrrCents === 0 || subscriptionCanceled`) — les deux sont maintenant réconciliés : un compte du segment `en_churn` porte systématiquement `churn_risk_band = 'churned'`, plus jamais un score/band calculé.
+- Migration `20260802000001_churn_risk_band_churned_state.sql` : élargit les CHECK constraints `accounts_churn_risk_band_check` / `score_history_churn_risk_band_check` (`'low'/'watch'/'high'` → `+'churned'`), posées par `20260725000001_scoring_engine_v3.sql`. Sans cette migration, le premier `calculate-scores` écrivant `'churned'` aurait échoué sur la contrainte existante pour tout compte churné.
+- `assignSegments` : agrégat `avg_churn_risk` par segment — `churn_risk_score` étant désormais `null` pour les comptes churnés, ajout d'un compteur `churnCount` dédié (même pattern que `healthCount`/`health_score`) pour exclure ces comptes de la moyenne au lieu de les compter comme 0.
+- `export-csv/index.ts` : `.order('churn_risk_score', { ascending: false })` → ajout de `nullsFirst: false`. Sans ce changement, un compte churné (`churn_risk_score = null`) serait remonté en tête de tri (comportement par défaut de Postgres : NULL trié en premier en ordre DESC) — soit l'inverse exact de l'objectif de cette décision. Vérifié que les 4 autres endpoints triant par `churn_risk_score` DESC (`churn-alert`, `onboarding-status`, `weekly-digest`, `get-top-churn-risks`) filtrent déjà `churn_risk_band = 'high'` ou `.not('churn_risk_score', 'is', null)` — non affectés.
+
+**Hors scope de ce chantier** (C2.2, séparé) : exclusion explicite des comptes `churned` des KPIs "accounts at risk" / "MRR at risk" agrégés côté `get-today-status`/`dashboard-api`/`accounts-api` — ces endpoints excluent déjà naturellement les comptes à `churn_risk_score IS NULL` de leurs seuils numériques (`> 70` etc., NULL exclu par la sémantique SQL des comparaisons), mais une revue explicite reste à faire pour confirmer qu'aucun comptage n'agrège différemment.
+
+**Tests** : `supabase/tests/calculate-scores-churn.test.ts` (nouveau, 6 tests) — mirror de la décision `isChurned`/état figé, `calculate-scores/index.ts` ne peut pas être importé directement dans Vitest (imports `jsr:`), même convention que `churn-alert.test.ts`.
+
+---
+
 ## Devise — retrait des symboles € codés en dur (2026-08-02, E1.2/E1.3 partiel)
 
 Audit préalable (audit rétention 2026-08, décision produit D4 — anglais/en-US intégral) : la conversion FR→EN de l'UI et du contenu généré était déjà faite avant cet audit (aucun toggle FR/EN, `src/i18n/en.ts` seul fichier i18n, aucune chaîne française dans le contenu généré `generate-insights`/`account-summary`). Le seul écart réel trouvé : le symbole `€` codé en dur dans 6 fichiers backend, alors qu'aucune colonne de devise n'existe nulle part dans le schéma (`organizations`/`accounts` n'ont pas de champ `currency` — seules `invoices`/`subscriptions` stockent une devise Stripe par transaction).

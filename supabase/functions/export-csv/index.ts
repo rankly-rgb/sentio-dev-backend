@@ -296,7 +296,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (filters.min_mrr_cents !== undefined) query = query.gte('mrr_cents', filters.min_mrr_cents)
   if (filters.max_health_score !== undefined) query = query.lte('health_score', filters.max_health_score)
 
-  query = query.order('churn_risk_score', { ascending: false }).limit(limit)
+  // nullsFirst: false — churned accounts (D1: churn_risk_score frozen to null)
+  // must not sort as if they were the top risk just because NULL defaults
+  // to NULLS FIRST on DESC order in Postgres.
+  query = query.order('churn_risk_score', { ascending: false, nullsFirst: false }).limit(limit)
 
   const { data: accounts, error: acctError } = await query
 

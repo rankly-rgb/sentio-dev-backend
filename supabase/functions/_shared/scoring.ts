@@ -673,7 +673,7 @@ export type SegmentTypeV3 = Exclude<SegmentType, 'en_expansion'> | 'donnees_insu
 export interface SegmentInputV3 {
   healthScoreStatus: 'complete' | 'partial' | 'insufficient'
   healthScoreBand: 'healthy' | 'watch' | 'at_risk' | null
-  churnRiskBand: 'low' | 'watch' | 'high'
+  churnRiskBand: 'low' | 'watch' | 'high' | 'churned'
   hasExpansionSignal: boolean
   mrrCents: number
   hasOverdueInvoices: boolean
