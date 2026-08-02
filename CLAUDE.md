@@ -17,6 +17,15 @@ Plateforme de Customer Intelligence pour éditeurs SaaS B2B francophones. Ingèr
 
 **Architecture Zero-PII** : jamais d'email, nom, téléphone, IP. Uniquement identifiants anonymes (`stripe_customer_id`, `hubspot_company_id`) et métriques agrégées.
 
+## Langue produit — English-only (en-US)
+
+**IMPORTANT — décision produit actée** : le produit est intégralement en anglais (`en-US`), aucune exception. Ceci couvre tout contenu généré par le backend et consommé par un utilisateur final :
+- Insights IA (`generate-insights`), recommandations d'action, AI summaries (`account-summary`)
+- Templates d'emails (`weekly-digest`, `churn-alert`, `on-user-signup`, tout autre email transactionnel)
+- Tout libellé, statut ou message d'erreur retourné par une Edge Function et affiché côté client
+
+Dates au format US, séparateurs de milliers US, devise résolue depuis le compte Stripe connecté de l'org (jamais de symbole codé en dur type `€`). Il n'y a **aucune** plomberie multi-langue côté backend — pas de fallback FR, pas de détection de locale. Toute génération de contenu (prompts LLM inclus) DOIT produire de l'anglais directement, jamais de traduction a posteriori. Ce fichier CLAUDE.md et les commentaires de code restent en français (documentation interne), seule la sortie consommée par l'utilisateur est concernée.
+
 ## Stack
 
 | Couche | Technologie |
@@ -43,30 +52,48 @@ npm run typecheck    # TypeScript check (tsc --noEmit)
 npm run verify       # typecheck + lint + test + build (post-modification)
 ```
 
-## Scoring SaaS
+## Scoring SaaS — Engine V2/V3 (`_shared/scoring.ts`)
+
+**IMPORTANT** : c'est le seul moteur de scoring actif (`model_version 'v3'` en base, branché depuis `calculate-scores/index.ts`). Les anciennes fonctions V1 (`calcHealthScore`, `calcChurnRiskScore`, `determineSegmentTypes` — formule `Health = Usage×35% + Financial×25% + Engagement×20% + Contract×20%` / `Churn = 100 - Health + additifs`) ont été supprimées le 2026-08-02 : zéro appelant en production, remplacées depuis par le moteur ci-dessous. Ne pas les réintroduire.
+
+**Health Score** (`calcHealthScoreV3`) — 3 dimensions Stripe-only, poids org configurables (`organizations.scoring_weights`), défaut `payment_health=35 / revenue_dynamics=35 / contract_renewal=30` :
 
 ```
-Health Score = (Usage × 35%) + (Financial × 25%) + (Engagement × 20%) + (Contract × 20%)
-Churn Risk  = 100 - Health Score + facteurs additifs (capped 100)
-Expansion   = (seat_usage_pct × 60%) + (feature_ceiling × 40%)
+payment_health   = invoice_status_score(0.40) + payment_history_score(0.35) + dunning_score(0.25)
+revenue_dynamics = mrr_trend_score(0.45) + contraction_score(0.35) + expansion_signal_score(0.20)
+contract_renewal = billing_interval_score(0.30) + renewal_proximity_score(0.40) + tenure_score(0.30)
 ```
 
-Valeurs neutres (pas de données) : Usage=50, Engagement=50, Contrat=50, Financial=0.
+Principe fondateur : **« no data ≠ neutral data »**. Aucune fonction ne retourne un défaut numérique (50, 0…) pour un signal absent — l'absence est portée par `value: null` / `status: 'unavailable'`, exclue des moyennes (`combineWeightedSignals` — dimension entière `unavailable` si < 50% du poids interne dispo). Health Score composite = **aucune renormalisation dynamique entre dimensions** (poids fixes même si une dimension est indisponible — seul `health_score_max_points` diminue) ; statut `complete`/`partial`/`insufficient`, band `healthy`/`watch`/`at_risk`. `engagement` (HubSpot) et `product_usage` ne font PAS partie de ce modèle (dimensions v3-produit futures, hors scope).
 
-8 segments : Champions, En expansion, Stables, À risque léger, En danger critique, Impayés, En churn, Nouveaux (<90j).
+**Churn Risk** (`calcChurnRiskV2` / `buildChurnSignals`) — additif, **découplé du Health Score** (plus de `100 - health`). 7 signaux déterministes (jamais de probabilité/confidence) : `invoice_overdue_15d`(35, CRITIQUE), `mrr_contraction_20pct_3mo`(30, CRITIQUE), `payment_failures_90d`(25, MAJEUR), `monthly_young_account`(20, MAJEUR), `annual_renewal_soon_with_contraction`(20, MAJEUR), `plan_downgrade_6mo`(10, MINEUR), `invoice_overdue_under_15d`(10, MINEUR). Un signal dont la donnée est absente est *skippé* (`value: null`), jamais compté comme non-déclenché. Band `low`/`watch`/`high` (seuils 25/50).
 
-### Décision actée — poids fixes, pas de renormalisation (2026-07-12)
+**Expansion Score** (`calcExpansionScoreV2`) — `seat_usage_pct` seul (via `stripe_product_mappings`), `null` explicite si non configuré. **Jamais de cap silencieux.**
 
-`health_score` garde des poids fixes et des valeurs neutres fixes en cas de signal manquant. **Aucune renormalisation dynamique des poids** selon les signaux disponibles (ex : ne pas recalculer `score = (financial×w1 + engagement×w2) / (w1+w2)` quand `product_usage` est absent).
+**Segmentation V3** (`determineSegmentTypesV3`) — 8 segments (`en_expansion` conservé dans `SYSTEM_SEGMENT_TYPES`/CHECK constraint pour compat descendante mais plus jamais assigné — fusionné dans `champions`, qui exige désormais un signal d'expansion). Priorité décroissante, exclusif sauf `nouveaux` :
+1. `nouveaux` — < 90 jours (non-exclusif)
+2. `en_churn` — `mrr_cents = 0` **ou** `subscriptionCanceled`
+3. `impayes` — factures en retard
+4. `donnees_insuffisantes` — `health_score_status = 'insufficient'`
+5. `en_danger_critique` — `churn_risk_band = 'high'`
+6. `a_risque_leger` — `churn_risk_band = 'watch'`
+7. `champions` — `health_score_band = 'healthy'` ET signal d'expansion présent
+8. `stables` — défaut
+
+### Décision actée — poids fixes, pas de renormalisation entre dimensions (2026-07-12)
+
+Le Health Score composite garde des poids fixes entre dimensions (`payment_health`/`revenue_dynamics`/`contract_renewal`). **Aucune renormalisation dynamique** selon les dimensions disponibles.
 
 **Raisons :**
-- Comparabilité dans le temps : le score d'un compte ne doit pas varier uniquement parce qu'un tracker se connecte/déconnecte — sinon les courbes `score_history` deviennent illisibles.
-- Volatilité : renormaliser ferait porter 100 % du poids sur un seul signal restant quand les autres manquent — précisément sur les comptes les moins bien instrumentés (souvent les plus récents).
-- Explicabilité : un score qui varie parce que la formule change silencieusement selon les données disponibles est plus difficile à justifier auprès d'un CSM qu'un score stable accompagné d'un indicateur de complétude séparé.
+- Comparabilité dans le temps : le score d'un compte ne doit pas varier uniquement parce qu'une dimension devient disponible/indisponible — sinon les courbes `score_history` deviennent illisibles.
+- Volatilité : renormaliser ferait porter 100 % du poids sur une seule dimension restante quand les autres manquent — précisément sur les comptes les moins bien instrumentés.
+- Explicabilité : un score qui varie parce que la formule change silencieusement selon les données disponibles est plus difficile à justifier qu'un score stable accompagné d'un statut de complétude séparé (`health_score_status`).
 
-Cette décision est explicite et ne doit pas être remise en cause par un futur agent sans repasser par une décision produit documentée. Le cas `Financial=0` (qui, contrairement à Usage/Engagement/Contrat, n'est pas une valeur neutre mais peut aussi signaler un vrai défaut de paiement via `overdue_count >= 5` dans `calcFinancialScore`, `_shared/scoring.ts`) reste un point ouvert distinct, à trancher séparément sur la base d'un diagnostic des comptes concernés.
+Cette décision est explicite et ne doit pas être remise en cause sans repasser par une décision produit documentée.
 
-**Diagnostic Financial=0 (exécuté 2026-07-12, environnement dev/démo confirmé — organisations `Sentio Demo`/`Test OAuth Corp`, données Stripe test-mode seedées en masse)** : sur les comptes `churn_risk_score >= 70`, 99,9 % ont `financial_score = 0`. En croisant avec `subscriptions`, ce `0` recouvre en réalité 3 cas distincts que `calcFinancialScore` ne différencie pas aujourd'hui : (1) 88 % n'ont jamais eu de ligne `subscriptions` — vraie absence de donnée, candidate à `=50` neutre ; (2) 12 % ont une `subscription` `canceled`/`past_due` avec `mrr_cents=0` — vrai churn, doit rester bas ; (3) `mrr_cents>0` avec `overdue_count>=5` — risque réel, déjà correctement traité. Design retenu pour une future implémentation (non codé, en attente de validation produit) : distinguer ces 3 cas en joignant `subscriptions`, pas seulement `mrrCents`. Proportions non fiables comme métriques business (données de démo), mais le design à 3 voies reste valide indépendamment du ratio réel.
+### Décision actée — comptes churnés exclus du churn risk (D1, 2026-08-02)
+
+Un compte à `mrr_cents = 0` ou dont l'abonnement est `canceled` reçoit un état figé `churned` : il **sort** du calcul de `churn_risk_score`/`churn_risk_band` (plus de score calculé sur ses signaux historiques) et est **exclu** des listes « at risk », des KPIs « accounts at risk »/« MRR at risk » et des insights de churn. Un compte parti n'est pas « à risque », il est perdu. `determineSegmentTypesV3` assigne déjà `en_churn` sur ce critère (segment) — l'implémentation de cette décision consiste à réconcilier `churn_risk_score` persisté avec cet état (chantier Phase 2 / C2.1, voir `docs/CHANGELOG_STABILITY.md`). Ne pas revenir à un simple clamp du score : c'est un état figé distinct, pas une valeur basse.
 
 ## Edge Functions
 
