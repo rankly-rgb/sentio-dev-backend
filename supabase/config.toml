@@ -173,6 +173,12 @@ verify_jwt = false
 [functions.verify-stripe-token]
 verify_jwt = false
 
+# update-stripe-connection : JWT vérifié dans le code (ES256 — remplacement/
+# déconnexion de la clé Stripe depuis Settings, distinct du connect initial
+# ci-dessus)
+[functions.update-stripe-connection]
+verify_jwt = false
+
 [functions.get-sync-status]
 verify_jwt = false
 
