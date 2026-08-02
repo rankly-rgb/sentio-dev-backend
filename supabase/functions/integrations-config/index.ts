@@ -10,10 +10,13 @@
 //     {
 //       data: {
 //         stripe_configured: boolean,
-//         hubspot_configured: boolean
+//         hubspot_configured: boolean,
+//         stripe_account_id: string | null,
+//         stripe_connection_method: 'api_key' | 'oauth' | null
 //       }
 //     }
-//   (les clés ne sont jamais renvoyées)
+//   (les clés ne sont jamais renvoyées ; stripe_account_id/connection_method
+//   ajoutés pour la carte Settings → Integrations, cf. update-stripe-connection)
 //
 // POST /integrations-config
 //   Body : { provider: 'stripe' | 'hubspot', api_key: string }
@@ -73,7 +76,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method === 'GET') {
     const { data: org, error } = await supabase
       .from('organizations')
-      .select('stripe_api_key, hubspot_api_key')
+      .select('stripe_api_key, hubspot_api_key, stripe_account_id, stripe_connection_method')
       .eq('id', orgId)
       .maybeSingle()
 
@@ -86,6 +89,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       data: {
         stripe_configured:  Boolean(org?.stripe_api_key),
         hubspot_configured: Boolean(org?.hubspot_api_key),
+        stripe_account_id: org?.stripe_account_id ?? null,
+        stripe_connection_method: org?.stripe_connection_method ?? null,
       },
     })
   }
