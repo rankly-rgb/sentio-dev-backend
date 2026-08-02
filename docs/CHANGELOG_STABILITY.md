@@ -4,6 +4,18 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## AI Insights — Contrat de pagination corrigé (2026-08-02, P0.2)
+
+Audit préalable (audit rétention 2026-08) : `insights-crud handleList` retournait `{ insights, total_count, critical_count }` avec des query params `limit`/`offset` (contrat du 2026-07-05 ci-dessous), mais le frontend envoyait `page`/`per_page`/`sort` et lisait `listData?.data`/`listData?.pagination` — contrat cassé des deux côtés, probable cause d'une partie des symptômes de fatigue d'alerte observés (liste d'insights potentiellement vide/mal rendue en prod).
+
+**Changements :**
+- `insights-crud/index.ts` : `parseLimit`/`parseOffset` remplacés par `parsePage`/`parsePerPage` (1-indexé, `per_page` défaut 20 / max 100). `handleList` retourne désormais `{ data, pagination: { page, per_page, total_count }, critical_count }`. Le paramètre `sort` est accepté (le frontend l'envoie systématiquement) mais sans effet — le tri reste fixe côté SQL, requis par le `DISTINCT ON` de déduplication.
+- `docs/PROMPT_FRONTEND_INSIGHTS_V1.md` mis à jour avec le contrat actuel et un historique des 3 formes successives de cet endpoint.
+
+**Tests** : `supabase/tests/insights-crud.test.ts` — `parsePage`/`parsePerPage` remplacent `parseLimit`/`parseOffset` (mêmes bornes, nouveau défaut `page=1`).
+
+---
+
 ## Accounts — priority_label calculé (2026-07-05)
 
 Audit préalable : aucune vue SQL n'existait sur `accounts` (aucun fichier sous `supabase/views/`), et `accounts-api` (seul endpoint de liste de comptes — il n'y a pas de fonction `get-accounts`) sélectionnait directement la table `accounts` sans label de priorité calculé.

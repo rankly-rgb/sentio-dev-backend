@@ -3,7 +3,7 @@
 // API REST pour la consultation et gestion des insights IA
 //
 // Routes :
-//   GET  ?limit=N&offset=M           — Liste dédupliquée, triée priority/mrr/created_at DESC
+//   GET  ?page=N&per_page=M          — Liste dédupliquée, triée priority/mrr/created_at DESC
 //   GET  ?id=X                       — Détail d'un insight
 //   GET  ?stats=true&organization_id=X — Compteurs agrégés
 //   PATCH ?id=X                      — Transition de statut
@@ -32,16 +32,16 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 
 // ── Query parsing (pure, exported for tests) ─────────────────
 
-export function parseLimit(raw: string | null): number {
+export function parsePage(raw: string | null): number {
+  const n = parseInt(raw ?? '1', 10)
+  if (!Number.isFinite(n) || n < 1) return 1
+  return n
+}
+
+export function parsePerPage(raw: string | null): number {
   const n = parseInt(raw ?? '20', 10)
   if (!Number.isFinite(n) || n < 1) return 20
   return Math.min(100, n)
-}
-
-export function parseOffset(raw: string | null): number {
-  const n = parseInt(raw ?? '0', 10)
-  if (!Number.isFinite(n) || n < 0) return 0
-  return n
 }
 
 export function parseCsvFilter<T extends string>(raw: string | null, valid: readonly T[]): T[] | null {
@@ -93,13 +93,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 // ── GET list ─────────────────────────────────────────────────
 //
-// Default sort: priority DESC (critical first), mrr_impact DESC, created_at DESC.
+// Sort is fixed server-side: priority DESC (critical first), mrr_impact DESC,
+// created_at DESC — required for the dedup RPC's DISTINCT ON to be
+// deterministic. `sort` is accepted (frontend always sends it) but has no
+// effect; it exists only so an unrecognized query param doesn't need special
+// handling on either side.
 // Dedup: at most 1 row per (account_id, insight_type, created_at UTC day) — see
 // list_deduplicated_insights / count_deduplicated_insights (migration 20260705000001).
 
 async function handleList(supabase: SupabaseClient, url: URL, orgId: string): Promise<Response> {
-  const limit = parseLimit(url.searchParams.get('limit'))
-  const offset = parseOffset(url.searchParams.get('offset'))
+  const page = parsePage(url.searchParams.get('page'))
+  const perPage = parsePerPage(url.searchParams.get('per_page'))
+  const limit = perPage
+  const offset = (page - 1) * perPage
 
   const insightType = parseCsvFilter(url.searchParams.get('insight_type'), VALID_INSIGHT_TYPES)
   const priority = parseCsvFilter(url.searchParams.get('priority'), VALID_PRIORITIES)
@@ -144,8 +150,12 @@ async function handleList(supabase: SupabaseClient, url: URL, orgId: string): Pr
   }
 
   return jsonResponse({
-    insights: listResult.data ?? [],
-    total_count: countResult.data ?? 0,
+    data: listResult.data ?? [],
+    pagination: {
+      page,
+      per_page: perPage,
+      total_count: countResult.data ?? 0,
+    },
     critical_count: criticalResult.data ?? 0,
   })
 }
