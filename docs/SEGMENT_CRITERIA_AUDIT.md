@@ -58,12 +58,14 @@ hasOverdueInvoices === true
 ```
 = at least one invoice in the last 90 days with `status IN ('open', 'uncollectible')` and `due_date` in the past (`calculate-scores/index.ts:377-381`). Only reached if `mrrCents !== 0` and no subscription is fully canceled.
 
-### 3. Insufficient data — `donnees_insuffisantes`
+### 3. Insufficient data — `donnees_insuffisantes` — **appears to be unreachable in practice (see bug callout below)**
 
 ```
 healthScoreStatus === 'insufficient'
 ```
 See "Health score availability" below for exactly when this triggers. Only reached if the account has real MRR and isn't overdue — i.e. this segment can **only** ever be populated by accounts that are otherwise financially healthy-looking but too thin on payment/contract history to score. An account with `mrr_cents = 0` can never appear here even if it has zero of every other signal too, because rule 1 already claimed it.
+
+**Found while designing the part-2 seeding script, not in the first pass of this audit**: trying to actually construct a test case that lands here surfaces that the combination of rules elsewhere in this same file makes `insufficient` structurally very hard — quite possibly impossible — to reach at all. See the callout right after this list.
 
 ### 4. Critical — `en_danger_critique`
 
@@ -101,6 +103,72 @@ Champions rather than its own segment). This is intentional, documented, and
 not a bug — but it does mean this tile in the UI will show **0 accounts
 forever**, on every org, regardless of real data. Worth knowing so nobody
 "fixes" it as a bug later without checking this doc first.
+
+## ⚠️ Genuine bug found: `donnees_insuffisantes` (Insufficient data) is very likely unreachable
+
+Unlike `en_expansion`/Expanding (deliberately retired, documented in a code
+comment, not a bug), nothing in the code says `donnees_insuffisantes` is
+meant to be dead. But tracing what it would actually take to reach
+`healthScoreStatus === 'insufficient'` shows it structurally can't happen
+under any normal Stripe-synced data:
+
+1. **`revenue_dynamics` is unconditionally available, always**, regardless
+   of how little data exists. Its two lowest-weight signals never return
+   `null`: `calcContractionScore` returns `100` whenever there's no
+   contraction movement (`scoring.ts:443` — `if (contractionTotal === 0)
+   return 100`, true for an account with zero `mrr_movements` rows at all),
+   and `calcExpansionSignalScore` returns `60` whenever there's no expansion
+   movement (`scoring.ts:452-453`). Combined weight `0.35 + 0.20 = 0.55 ≥
+   0.5` — so `revenue_dynamics` is `available` even on an account's very
+   first scoring run, with zero movement history, zero MRR trend data.
+   `mrr_trend_score` (the one signal that *can* be null) doesn't matter
+   either way.
+
+2. **`contract_renewal` is available whenever `mrr_cents !== 0`.** An
+   account only has nonzero `mrr_cents` because `sync-stripe` summed it from
+   subscriptions with `status IN ('active','trialing')`
+   (`sync-stripe/index.ts:313`) — and that exact same code path
+   (`accountSubMeta`, lines 312-330) is what sets `billing_interval` and
+   `contract_start_date`/`contract_end_date` on the account, from the same
+   `primary` subscription object, in the same batch update. There is no way
+   for `mrr_cents` to be nonzero without `billing_interval` also being set.
+   Once `billing_interval` is set, `calcBillingIntervalScore` is always
+   non-null (weight 0.30), and `calcRenewalProximityScore` returns a constant
+   `70` for `monthly` billing regardless of any date (weight 0.40) — `0.30 +
+   0.40 = 0.70 ≥ 0.5`, so `contract_renewal` is available too.
+
+3. Put together: **any account with `mrr_cents !== 0` has at least
+   `revenue_dynamics` (org weight 35) + `contract_renewal` (org weight 30) =
+   65% dimension coverage, comfortably above the 50% `insufficient`
+   threshold** — so `partial` or `complete`, never `insufficient`. And any
+   account with `mrr_cents === 0` gets claimed by rule 1 (`en_churn`) before
+   `healthScoreStatus` is even checked (rule 3 in the priority chain, see
+   above). There doesn't appear to be a path through the current logic that
+   reaches `insufficient` at all.
+
+**This means `donnees_insuffisantes` is very likely permanently empty on
+every org, the same practical outcome as `en_expansion` — except this one
+doesn't look intentional.** The schema, the UI segment, and the
+`health_score_status` column all suggest this was meant to be reachable
+(an account with real MRR but genuinely no payment/contract history — e.g.
+a subscription created seconds ago, before any invoice or contract data
+exists — is exactly the case this segment sounds like it should catch).
+
+**No code changed here** — per the instruction that triggered this audit,
+scoring-logic changes need explicit sign-off (also consistent with
+CLAUDE.md's existing rule that scoring formulas aren't modified without
+explicit instruction). Flagging for a decision:
+- **If this is intentional** (maybe `revenue_dynamics`'s always-on defaults were a deliberate design choice and `insufficient` is meant to be rare/near-impossible by design), no action needed beyond this note.
+- **If not**, the fix is a scoring-weight/threshold decision, not a mechanical bug fix — e.g. lowering the "available" threshold on `revenue_dynamics`'s inherently-defaulted signals, or excluding contraction/expansion-signal defaults from counting toward availability when there's zero underlying movement data, or moving the `donnees_insuffisantes` check earlier in the priority chain. Each has real tradeoffs on the existing "no renormalization" (S4) and "no data ≠ neutral data" (S1) decisions already documented in CLAUDE.md, so this needs a product decision, not a unilateral change.
+
+**Practical consequence for the part-2 seeding script**: it isn't possible to
+reliably land 50 test accounts in this segment via Stripe configuration
+alone, for the same reason it isn't possible for `Expanding` — both are
+excluded from that script, which targets the 7 segments that are actually
+reachable (`en_churn`, `impayes`, `en_danger_critique`, `a_risque_leger`,
+`champions`, `stables`, plus `nouveaux` handled separately since every
+freshly-synced test account satisfies it automatically regardless of Stripe
+configuration — see that script's own notes).
 
 ## Health score availability (`insufficient` / `partial` / `complete`)
 
@@ -240,14 +308,22 @@ needs the query above to confirm either way.
 
 ## Summary verdict
 
-**Not a bug in the segmentation or scoring logic.** The 7-zero / 2-hundred
-pattern is the deterministic, correct consequence of (a) `Expanding` being
-permanently retired in V3, and (b) all 100 test accounts sharing
-`mrr_cents = 0`, which is itself fully explained by `sync-stripe` only
-aggregating MRR/contract fields from `active`/`trialing` subscriptions — most
-likely because these Stripe test subscriptions never left `incomplete`
-status. The identical `40` health score is very plausibly a legitimate,
-low, uniform score computed from identically-shaped thin test data — but
-confirming it isn't a null-defaulting-to-40 frontend display bug requires
-the query above, which needs live database access this environment doesn't
-have.
+**The reported anomaly (7/9 at zero, 100/100 identical) is not a bug in the
+segmentation or scoring logic.** The 7-zero / 2-hundred pattern is the
+deterministic, correct consequence of (a) `Expanding` being permanently
+retired in V3, and (b) all 100 test accounts sharing `mrr_cents = 0`, which
+is itself fully explained by `sync-stripe` only aggregating MRR/contract
+fields from `active`/`trialing` subscriptions — most likely because these
+Stripe test subscriptions never left `incomplete` status. The identical `40`
+health score is very plausibly a legitimate, low, uniform score computed
+from identically-shaped thin test data — but confirming it isn't a
+null-defaulting-to-40 frontend display bug requires the query above, which
+needs live database access this environment doesn't have.
+
+**Separately, while designing the seeding script that depends on this audit,
+a genuine, likely-unintentional bug did surface**: `donnees_insuffisantes`
+(Insufficient data) appears to be structurally unreachable through any
+normal Stripe-synced data, for reasons unrelated to the anomaly above (see
+the callout after the segment list). That one **is** worth a product
+decision on whether/how to fix — flagged, not fixed, since it's a scoring-
+logic change outside this audit's authorization.
