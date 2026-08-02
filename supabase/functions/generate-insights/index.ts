@@ -347,7 +347,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
               const usagePrevious = usageHistoryMap.get(account.id)
               const input = buildInsightInput(account, invoiceData, usagePrevious)
 
-              const candidates = evaluateInsightRules(input)
+              // D1 (2026-08-02) : un compte churné (mrr_cents=0) n'est pas
+              // "à risque", il est perdu — aucune règle ne doit produire de
+              // nouvel insight (payment_risk sur une vieille facture,
+              // renewal_alert sur une date de contrat obsolète, etc. peuvent
+              // sinon rester "vrais" alors que le compte est déjà parti).
+              // candidates=[] déclenche l'auto-résolution existante de
+              // syncInsights pour tout insight resté actif sur ce compte.
+              const candidates = account.mrr_cents === 0 ? [] : evaluateInsightRules(input)
               const { created, resolved } = await syncInsights(
                 supabase,
                 organizationId,

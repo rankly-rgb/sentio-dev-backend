@@ -40,6 +40,25 @@ Audit préalable (audit rétention 2026-08, décision produit D4 — anglais/en-
 
 ---
 
+## Churn Risk — exclusion des comptes churnés des KPIs/listes "at risk" (2026-08-02, C2.2)
+
+Suite de C2.1 (état figé `churn_risk_band='churned'`) : audit de tous les points du backend calculant un KPI ou une liste "at risk"/"critical"/"danger", pour confirmer qu'aucun ne pouvait encore afficher un compte churné comme s'il était à risque.
+
+**Confirmés déjà corrects (aucun changement)** — `get_portfolio_snapshot` (`at_risk_count`/`scored_accounts_count` filtrent déjà via la sémantique NULL de SQL), `churn-alert`/`onboarding-status`/`weekly-digest`/`get-top-churn-risks` (filtrent déjà `churn_risk_band='high'` ou `.not('churn_risk_score','is',null)`), `get-accounts-summary` (filtre déjà `mrr_cents > 0` en amont, commentaire explicite déjà présent), `outbound-webhook-dispatch`/`playbook-executor`/`playbook-execute`/`playbook-scheduler` (comparaisons numériques `churn_risk_score >= seuil` — `null` coerce à `0` en JS, un compte churné ne matche donc plus aucun seuil de déclenchement).
+
+**Corrigés :**
+- `get-today-status/index.ts` : `critical_count` comptait tout insight actif `priority='critical'`, y compris ceux restés actifs sur un compte devenu churné entre deux runs de `generate-insights`. Requête restructurée pour exclure les insights dont le compte a `churn_risk_band='churned'` (nouvelle fonction pure `countCriticalExcludingChurned`, testée).
+- `dashboard-api/index.ts` (`handleBriefing`) : même correctif sur `p0_insights_count` (source du "N pending P0 actions" du `DailyBriefing`) — même fonction dupliquée localement (pas d'abstraction partagée pour 3 lignes).
+- `generate-insights/index.ts` : root-cause — un compte à `mrr_cents=0` ne génère plus aucun insight (`payment_risk`/`renewal_alert`/`expansion_opportunity`/`usage_drop` pouvaient encore se déclencher sur des données historiques d'un compte déjà parti). `candidates=[]` déclenche l'auto-résolution déjà existante de `syncInsights` pour tout insight resté actif — corrige le problème à la source plutôt que de le filtrer en aval à chaque consommateur.
+- Migration `20260802000002_accounts_priority_exclude_churned.sql` : la vue `accounts_with_priority` (alimente la colonne priorité de la page Accounts) pouvait classer un compte churné en `critical`/`watch` via sa branche de repli `health_score <= 30/55` — `health_score` n'est pas gelé par D1, un compte qui vient de churner avec des factures impayées historiques peut avoir un `payment_health_score` bas. Nouvelle branche `churn_risk_band='churned' → 'churned'` évaluée en premier.
+- `onboarding-first-win/index.ts` : `at_risk_accounts` (top 3 du "aha moment" vu par un nouvel utilisateur), `mrr_at_risk` et `global_health_score` étaient calculés sur `health_score` seul, sans exclusion des comptes churnés — même gap que ci-dessus. Filtre `churn_risk_band != 'churned' OR IS NULL` ajouté (le `OR IS NULL` évite d'exclure par accident un compte pas encore scoré — `.neq()` seul aurait aussi droppé les NULL, sémantique SQL).
+
+**Trouvé mais hors scope de ce chantier** : `AccountPriorityLabel` côté frontend (`src/lib/types/accounts.ts`) attend encore les valeurs françaises historiques (`'critique'/'surveillance'/'nouveau'`) alors que `accounts_with_priority` produit des valeurs anglaises (`'critical'/'watch'/'new'`) depuis la migration `20260725000002` — contrat déjà cassé indépendamment de ce chantier (`PRIORITY_STYLES`/`fr.accountPriority` ne matchent aucune valeur sauf `'stable'`, badge de priorité probablement vide en prod pour tout compte critique/watch/new). Nécessite son propre ticket — au minimum ajouter `'churned'` à ce contrat en même temps que la correction FR→EN.
+
+**Tests** : `supabase/tests/get-today-status.test.ts` — 5 nouveaux tests sur `countCriticalExcludingChurned`.
+
+---
+
 ## AI Insights — Contrat de pagination corrigé (2026-08-02, P0.2)
 
 Audit préalable (audit rétention 2026-08) : `insights-crud handleList` retournait `{ insights, total_count, critical_count }` avec des query params `limit`/`offset` (contrat du 2026-07-05 ci-dessous), mais le frontend envoyait `page`/`per_page`/`sort` et lisait `listData?.data`/`listData?.pagination` — contrat cassé des deux côtés, probable cause d'une partie des symptômes de fatigue d'alerte observés (liste d'insights potentiellement vide/mal rendue en prod).

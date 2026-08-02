@@ -171,6 +171,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 // ── GET /dashboard-api/briefing ──────────────────────────────
 
+// D1/C2.2 (2026-08-02) : un compte churné n'est pas "à risque", il est
+// perdu — un insight critique resté actif sur un compte déjà churné (avant
+// que le prochain run de generate-insights ne l'auto-résolve) ne doit pas
+// gonfler p0_insights_count. Même logique que get-today-status/index.ts.
+function countCriticalExcludingChurned(
+  insightAccountIds: Array<string | null>,
+  churnedAccountIds: Set<string>,
+): number {
+  return insightAccountIds.filter((id) => id !== null && !churnedAccountIds.has(id)).length
+}
+
 async function handleBriefing(
   supabase: ReturnType<typeof createServiceClient>,
   orgId: string,
@@ -186,6 +197,7 @@ async function handleBriefing(
     yesterdayScoresRes,
     riskSegmentsRes,
     p0InsightsRes,
+    churnedAccountsRes,
     snapshotRes,
   ] = await Promise.all([
     // Scores actuels par compte (nécessaire pour insight_du_jour, pas pour la moyenne)
@@ -215,12 +227,22 @@ async function handleBriefing(
       .eq('organization_id', orgId)
       .in('segment_type', RISK_SEGMENT_TYPES),
 
-    // Insights P0 (critical actifs)
+    // Insights P0 (critical actifs) — account_id (pas un count) pour pouvoir
+    // exclure les comptes churnés ci-dessous (D1/C2.2).
     supabase.from('ai_insights')
-      .select('id', { count: 'exact', head: true })
+      .select('account_id')
       .eq('organization_id', orgId)
       .eq('status', 'active')
-      .eq('priority', 'critical'),
+      .eq('priority', 'critical')
+      .limit(5000),
+
+    // D1/C2.2 : ids des comptes churnés, pour exclure leurs insights actifs
+    // de p0_insights_count — un compte parti n'est pas "à risque".
+    supabase.from('accounts')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('churn_risk_band', 'churned')
+      .limit(20000),
 
     // Snapshot portefeuille partagé (chantier 5.1) — source de current_avg_health
     supabase.rpc('get_portfolio_snapshot', { p_organization_id: orgId }).maybeSingle(),
@@ -304,7 +326,10 @@ async function handleBriefing(
         health_trend: healthTrend,
       },
       risk_accounts_7d: riskAccounts7d,
-      p0_insights_count: p0InsightsRes.count ?? 0,
+      p0_insights_count: countCriticalExcludingChurned(
+        (p0InsightsRes.data ?? []).map((i: { account_id: string | null }) => i.account_id),
+        new Set((churnedAccountsRes.data ?? []).map((a: { id: string }) => a.id)),
+      ),
       insight_du_jour: insightDuJour,
     },
   })

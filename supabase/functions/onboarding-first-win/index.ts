@@ -13,7 +13,7 @@
 //     {
 //       data: {
 //         total_accounts: number,
-//         at_risk_accounts: [          // top 3 health_score ASC
+//         at_risk_accounts: [          // top 3 health_score ASC, comptes churnés exclus (D1/C2.2)
 //           {
 //             stripe_customer_id: string,
 //             display_name: string | null,
@@ -23,8 +23,8 @@
 //             top_risk_reason: string  // ex. "Overdue invoice for 20 day(s)"
 //           }
 //         ],
-//         mrr_at_risk: number,         // somme MRR comptes health_score < 40
-//         global_health_score: number  // moyenne arrondie tous comptes
+//         mrr_at_risk: number,         // somme MRR comptes health_score < 40, comptes churnés exclus
+//         global_health_score: number  // moyenne arrondie, comptes churnés exclus
 //       }
 //     }
 //
@@ -45,6 +45,7 @@ interface AccountRow {
   display_name: string | null
   health_score: number | null
   churn_risk_score: number | null
+  churn_risk_band: string | null
   mrr_cents: number | null
   financial_score: number | null
 }
@@ -94,12 +95,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const orgId = auth.organizationId
 
-  // Récupérer tous les comptes avec scores
+  // Récupérer tous les comptes avec scores — exclut les comptes churnés
+  // (D1/C2.2 : un compte parti n'est pas "à risque", il est perdu ; sans ce
+  // filtre, un compte churné avec un health_score bas — dimension jamais
+  // gelée par D1 — pourrait apparaître dans le top 3 "at risk" du premier
+  // écran vu par un nouvel utilisateur).
   const { data: accounts, error: accountsError } = await supabase
     .from('accounts')
-    .select('id, stripe_customer_id, display_name, health_score, churn_risk_score, mrr_cents, financial_score')
+    .select('id, stripe_customer_id, display_name, health_score, churn_risk_score, churn_risk_band, mrr_cents, financial_score')
     .eq('organization_id', orgId)
     .not('health_score', 'is', null)
+    // .neq() exclurait aussi les lignes NULL (NULL != 'churned' est NULL, pas
+    // TRUE, en SQL) — .or() explicite pour ne jamais filtrer un compte pas
+    // encore scoré par accident.
+    .or('churn_risk_band.neq.churned,churn_risk_band.is.null')
     .order('health_score', { ascending: true })
     .limit(500)
 
