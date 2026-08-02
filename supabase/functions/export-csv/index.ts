@@ -25,12 +25,15 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
-import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import {
+  type ContactInfo,
+  maskCustomerId,
+  escapeField,
+  resolveEmails,
+} from '../_shared/csv-export-utils.ts'
 
 const MAX_LIMIT = 2000
 const DEFAULT_LIMIT = 500
-const STRIPE_BATCH_SIZE = 10
-const STRIPE_BATCH_DELAY_MS = 100
 
 export interface AccountRow {
   id: string
@@ -45,24 +48,8 @@ export interface AccountRow {
   contract_end_date: string | null
 }
 
-export interface ContactInfo {
-  email: string
-  name: string
-}
-
-// ── Helpers exportés pour les tests ──────────────────────────
-
-export function maskCustomerId(id: string): string {
-  return `cus_***${id.slice(-3)}`
-}
-
-export function escapeField(val: unknown): string {
-  const str = String(val ?? '')
-  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
-    return `"${str.replace(/"/g, '""')}"`
-  }
-  return str
-}
+export type { ContactInfo }
+export { maskCustomerId, escapeField, resolveEmails }
 
 export function generateCsv(
   accounts: AccountRow[],
@@ -165,46 +152,6 @@ Exported from Sentio AI — https://app.sentioapp.io
 Emails were resolved from Stripe in transit.
 No personal data is stored by Sentio.
 `
-}
-
-// ── Résolution emails Stripe en transit ──────────────────────
-
-export async function resolveEmails(
-  stripeApiKey: string,
-  customerIds: string[],
-  fetcher: (url: string, init: RequestInit) => Promise<Response> = (url, init) =>
-    fetchWithTimeout(url, init, 5000),
-): Promise<Map<string, ContactInfo>> {
-  const results = new Map<string, ContactInfo>()
-
-  for (let i = 0; i < customerIds.length; i += STRIPE_BATCH_SIZE) {
-    const batch = customerIds.slice(i, i + STRIPE_BATCH_SIZE)
-    await Promise.all(
-      batch.map(async (customerId) => {
-        try {
-          const resp = await fetcher(
-            `https://api.stripe.com/v1/customers/${customerId}`,
-            { headers: { Authorization: `Bearer ${stripeApiKey}` } },
-          )
-          if (resp.ok) {
-            const customer = await resp.json()
-            results.set(customerId, {
-              email: typeof customer.email === 'string' ? customer.email : '',
-              name: typeof customer.name === 'string' ? customer.name : '',
-            })
-          } else {
-            results.set(customerId, { email: '', name: '' })
-          }
-        } catch {
-          results.set(customerId, { email: '', name: '' })
-        }
-      }),
-    )
-    if (i + STRIPE_BATCH_SIZE < customerIds.length) {
-      await new Promise((r) => setTimeout(r, STRIPE_BATCH_DELAY_MS))
-    }
-  }
-  return results
 }
 
 // ── Handler principal ─────────────────────────────────────────
