@@ -4,6 +4,25 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Devise — retrait des symboles € codés en dur (2026-08-02, E1.2/E1.3 partiel)
+
+Audit préalable (audit rétention 2026-08, décision produit D4 — anglais/en-US intégral) : la conversion FR→EN de l'UI et du contenu généré était déjà faite avant cet audit (aucun toggle FR/EN, `src/i18n/en.ts` seul fichier i18n, aucune chaîne française dans le contenu généré `generate-insights`/`account-summary`). Le seul écart réel trouvé : le symbole `€` codé en dur dans 6 fichiers backend, alors qu'aucune colonne de devise n'existe nulle part dans le schéma (`organizations`/`accounts` n'ont pas de champ `currency` — seules `invoices`/`subscriptions` stockent une devise Stripe par transaction).
+
+**Changements** (symbole `$` par défaut, formatage `en-US` avec séparateurs de milliers ; résolution complète depuis le compte Stripe connecté reste un chantier séparé — aucun champ `currency` org-level n'existe encore pour la porter) :
+- `_shared/insight-rules.ts` : `mrrEur` → `mrrUsd`, retourne désormais `$1,234` (le `€` littéral était concaténé séparément à chaque site d'appel)
+- `_shared/score-narratives.ts` : `narrativePaymentHealth` (chemin V3 actif) — `€` → `$`. `narrativeFinancial` (V1, zéro appelant — même statut que les fonctions supprimées ci-dessous) non touché, hors scope de ce fix
+- `weekly-digest/index.ts` : `formatMrr` retourne `$1,234` ; `accountRow` réutilise `formatMrr` au lieu d'un `Math.round` sans séparateur de milliers (bug de formatage additionnel corrigé au passage)
+- `churn-alert/index.ts` : même correction de formatage (séparateurs de milliers + `$`)
+- `account-summary/index.ts` : prompt IA — `mrr_euros` renommé `mrr_usd`, `€` → `$` (impacte directement le texte généré par le LLM)
+- `export-csv/index.ts` : en-tête CSV `MRR (€)` → `MRR ($)`
+- `_shared/connectors/slack.ts` : message Slack sortant (notification playbook vers le Slack du client) — `€` → `$`. Le nom de champ `mrr_eur` du contrat `ConnectorPayload` (payload webhooks sortants Brevo/HubSpot/Mailchimp/etc., documenté dans le changelog "Outbound Webhook System v1") n'est **pas** renommé — c'est un contrat externe déjà documenté, un renommage serait cassant pour des intégrations clientes existantes.
+
+**Non touché intentionnellement** : `stripe-product-mappings-api/index.ts` (déjà correctement conditionné sur `price.currency`, pas un hardcode) ; log d'alerte Slack interne de `sync-stripe` (alerte ops Sentio, pas une sortie produit consommée par l'utilisateur final).
+
+**Tests** : `insight-rules.test.ts`, `churn-alert.test.ts`, `export-csv.test.ts` — assertions `€` → `$` mises à jour.
+
+---
+
 ## AI Insights — Contrat de pagination corrigé (2026-08-02, P0.2)
 
 Audit préalable (audit rétention 2026-08) : `insights-crud handleList` retournait `{ insights, total_count, critical_count }` avec des query params `limit`/`offset` (contrat du 2026-07-05 ci-dessous), mais le frontend envoyait `page`/`per_page`/`sort` et lisait `listData?.data`/`listData?.pagination` — contrat cassé des deux côtés, probable cause d'une partie des symptômes de fatigue d'alerte observés (liste d'insights potentiellement vide/mal rendue en prod).

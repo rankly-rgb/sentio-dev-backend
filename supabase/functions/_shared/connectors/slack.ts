@@ -36,7 +36,7 @@ function formatMessage(payload: ConnectorPayload, template?: string): string {
     `${emoji} *Sentio — Signal de risque*\n` +
     `Compte : \`${payload.stripe_customer_id}\`\n` +
     `Segment : *${payload.segment}*${payload.segment_previous ? ` (était : ${payload.segment_previous})` : ''}\n` +
-    `Churn Risk : *${payload.churn_risk_score}%* | Health : ${payload.health_score} | MRR : ${payload.mrr_eur}€`
+    `Churn Risk : *${payload.churn_risk_score}%* | Health : ${payload.health_score} | MRR : $${payload.mrr_eur}`
   )
 }
 

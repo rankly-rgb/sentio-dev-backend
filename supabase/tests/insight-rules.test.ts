@@ -253,9 +253,9 @@ describe('evaluateAccountHealthSummary', () => {
     expect(result!.priority).toBe('critical')
   })
 
-  it('description contains MRR in euros', () => {
+  it('description contains MRR in USD', () => {
     const result = evaluateAccountHealthSummary({ ...baseInput, mrr_cents: 150000 })
-    expect(result!.description).toContain('€')
+    expect(result!.description).toContain('$')
   })
 
   it('source_scores contains health and churn', () => {
@@ -341,9 +341,9 @@ describe('evaluateInsightRules', () => {
     }
   })
 
-  it('descriptions contain MRR in euros', () => {
+  it('descriptions contain MRR in USD', () => {
     const result = evaluateInsightRules({ ...baseInput, churn_risk_score: 80, mrr_cents: 250000 })
-    expect(result[0].description).toContain('€')
+    expect(result[0].description).toContain('$')
   })
 
   it('titles are in English', () => {

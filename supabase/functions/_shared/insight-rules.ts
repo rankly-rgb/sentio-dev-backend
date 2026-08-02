@@ -58,8 +58,8 @@ export interface InsightCandidate {
 
 // ── Helpers ──────────────────────────────────────────────────
 
-function mrrEur(cents: number): string {
-  return (cents / 100).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+function mrrUsd(cents: number): string {
+  return '$' + (cents / 100).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
 }
 
 function daysUntil(dateStr: string): number {
@@ -82,7 +82,7 @@ export function evaluateChurnPrediction(input: InsightInput): InsightCandidate |
     title: isCritical
       ? 'Critical churn risk detected'
       : 'High churn risk detected',
-    description: `This account has a churn risk of ${input.churn_risk_score}% with a health score of ${input.health_score}%. MRR at risk: €${mrrEur(input.mrr_cents)}.`,
+    description: `This account has a churn risk of ${input.churn_risk_score}% with a health score of ${input.health_score}%. MRR at risk: ${mrrUsd(input.mrr_cents)}.`,
     recommended_action: isCritical
       ? 'Immediate CSM intervention required. Schedule a retention call within 48h.'
       : 'Schedule a follow-up with the customer within the week.',
@@ -113,7 +113,7 @@ export function evaluateExpansionOpportunity(input: InsightInput): InsightCandid
     title: isHigh
       ? 'Strong expansion opportunity identified'
       : 'Expansion opportunity detected',
-    description: `Expansion score of ${input.expansion_score}% with good health (${input.health_score}%). Estimated expansion potential: €${mrrEur(estimatedExpansion)}/month.`,
+    description: `Expansion score of ${input.expansion_score}% with good health (${input.health_score}%). Estimated expansion potential: ${mrrUsd(estimatedExpansion)}/month.`,
     recommended_action: isHigh
       ? 'Propose a plan upgrade or additional seats at the next check-in.'
       : 'Monitor progress and prepare an upsell proposal.',
@@ -150,8 +150,8 @@ export function evaluateRenewalAlert(input: InsightInput): InsightCandidate | nu
         ? 'Renewal imminent (< 30 days)'
         : 'Renewal upcoming (< 60 days)',
     description: isExpired
-      ? `The contract expired ${Math.abs(days)} days ago. Account MRR: €${mrrEur(input.mrr_cents)}. Health score: ${input.health_score}%.`
-      : `The contract expires in ${days} days. Account MRR: €${mrrEur(input.mrr_cents)}. Health score: ${input.health_score}%.`,
+      ? `The contract expired ${Math.abs(days)} days ago. Account MRR: ${mrrUsd(input.mrr_cents)}. Health score: ${input.health_score}%.`
+      : `The contract expires in ${days} days. Account MRR: ${mrrUsd(input.mrr_cents)}. Health score: ${input.health_score}%.`,
     recommended_action: isExpired
       ? 'Contract expired — handle as urgent. Contact the decision-maker immediately to resolve.'
       : isCritical
@@ -183,7 +183,7 @@ export function evaluatePaymentRisk(input: InsightInput): InsightCandidate | nul
     title: isCritical
       ? 'Critical overdue payment (> 30 days)'
       : 'Late payment detected (> 15 days)',
-    description: `Invoice(s) overdue for ${input.overdue_days} days. MRR at risk: €${mrrEur(input.mrr_cents)}.`,
+    description: `Invoice(s) overdue for ${input.overdue_days} days. MRR at risk: ${mrrUsd(input.mrr_cents)}.`,
     recommended_action: isCritical
       ? 'Escalate to finance. Send a formal reminder and consider suspension.'
       : 'Send a payment reminder to the customer and verify billing details.',
@@ -216,7 +216,7 @@ export function evaluateUsageDrop(input: InsightInput): InsightCandidate | null 
     title: isSevere
       ? 'Severe usage drop detected (> 50%)'
       : 'Significant usage decline detected (> 30%)',
-    description: `Usage dropped by ${dropPct}% over the last 14 days (score ${input.usage_score_previous} → ${input.usage_score_current}). Account MRR: €${mrrEur(input.mrr_cents)}.`,
+    description: `Usage dropped by ${dropPct}% over the last 14 days (score ${input.usage_score_previous} → ${input.usage_score_current}). Account MRR: ${mrrUsd(input.mrr_cents)}.`,
     recommended_action: isSevere
       ? 'Contact the customer urgently to understand the reason for the usage drop.'
       : 'Monitor progress over the next week and schedule a check-in.',
@@ -253,25 +253,25 @@ export function evaluateAccountHealthSummary(input: InsightInput): InsightCandid
     priority = 'critical'
     severity = 'CRITIQUE'
     title = 'Account in critical condition'
-    description = `Very low health score (${health}%) with a churn risk of ${churn}%. MRR: €${mrrEur(input.mrr_cents)}. Situation requires immediate attention.`
+    description = `Very low health score (${health}%) with a churn risk of ${churn}%. MRR: ${mrrUsd(input.mrr_cents)}. Situation requires immediate attention.`
     action = 'Analyze the causes of the low score and contact the customer within 48h.'
   } else if (health < 50) {
     priority = 'high'
     severity = 'MAJEUR'
     title = 'At-risk account — monitoring required'
-    description = `Health score of ${health}% with a churn risk of ${churn}%. MRR: €${mrrEur(input.mrr_cents)}. Increased follow-up recommended.`
+    description = `Health score of ${health}% with a churn risk of ${churn}%. MRR: ${mrrUsd(input.mrr_cents)}. Increased follow-up recommended.`
     action = 'Schedule a check-in with the customer within the next 7 days.'
   } else if (health < 70) {
     priority = 'medium'
     severity = 'MINEUR'
     title = 'Account to watch'
-    description = `Health score of ${health}% with a churn risk of ${churn}%. MRR: €${mrrEur(input.mrr_cents)}. Progress to monitor.`
+    description = `Health score of ${health}% with a churn risk of ${churn}%. MRR: ${mrrUsd(input.mrr_cents)}. Progress to monitor.`
     action = 'Perform a monthly follow-up and monitor how the indicators evolve.'
   } else {
     priority = 'low'
     severity = 'MINEUR'
     title = 'Account in good health'
-    description = `Health score of ${health}% with a low churn risk (${churn}%). MRR: €${mrrEur(input.mrr_cents)}. Stable account.`
+    description = `Health score of ${health}% with a low churn risk (${churn}%). MRR: ${mrrUsd(input.mrr_cents)}. Stable account.`
     action = 'Maintain current engagement and identify expansion opportunities.'
   }
 

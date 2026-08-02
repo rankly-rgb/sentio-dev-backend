@@ -60,7 +60,7 @@ export function generateCsv(
     'Company',
     'Stripe ID',
     ...(includeEmail ? ['Email'] : []),
-    'MRR (€)',
+    'MRR ($)',
     'Health Score',
     'Churn Risk',
     'Expansion Score',

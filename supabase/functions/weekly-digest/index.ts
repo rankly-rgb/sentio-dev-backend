@@ -45,7 +45,7 @@ export interface WeeklyStats {
 // ── Helpers exportés pour les tests ──────────────────────────
 
 export function formatMrr(cents: number): string {
-  return Math.round(cents / 100).toLocaleString('en-US') + '€'
+  return '$' + Math.round(cents / 100).toLocaleString('en-US')
 }
 
 export function formatMrrVariation(current: number, previous: number): string {
@@ -73,14 +73,14 @@ function formatAccountLabel(account: DigestAccount): string {
 
 function accountRow(account: DigestAccount, scoreField: 'churn_risk_score' | 'expansion_score'): string {
   const label = formatAccountLabel(account)
-  const mrr = Math.round(account.mrr_cents / 100)
+  const mrr = formatMrr(account.mrr_cents)
   const score = account[scoreField] ?? 0
   const scoreLabel = scoreField === 'churn_risk_score' ? `${score}/100` : `${score}/100`
   const scoreColor = scoreField === 'churn_risk_score' ? '#dc2626' : '#16a34a'
   return `
     <tr>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0">${label}</td>
-      <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:right">${mrr}€</td>
+      <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:right">${mrr}</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:center;color:${scoreColor};font-weight:600">${scoreLabel}</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0">
         <a href="${APP_URL}/dashboard/accounts/${account.id}" style="color:#3b82f6;text-decoration:none">View →</a>

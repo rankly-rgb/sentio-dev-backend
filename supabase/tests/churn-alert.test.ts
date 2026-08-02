@@ -56,12 +56,12 @@ function buildChurnAlertEmail(accounts: CriticalAccount[]): string {
   const n = accounts.length
   const rows = accounts.map(a => {
     const label = formatAccountLabel(a)
-    const mrr = Math.round(a.mrr_cents / 100)
+    const mrr = '$' + Math.round(a.mrr_cents / 100).toLocaleString('en-US')
     const healthLabel = a.health_score === null ? 'N/A' : `${a.health_score}/100`
     return `
     <tr>
       <td>${label}</td>
-      <td>${mrr}€/mo</td>
+      <td>${mrr}/mo</td>
       <td>${healthLabel}</td>
       <td>${a.churn_risk_score}/100</td>
       <td><a href="https://app.sentioapp.io/dashboard/accounts/${a.id}">View →</a></td>
@@ -147,9 +147,9 @@ describe('buildChurnAlertEmail', () => {
     expect(html).not.toContain('cus_def456')
   })
 
-  it('displays MRR in euros', () => {
+  it('displays MRR in USD', () => {
     const html = buildChurnAlertEmail([baseAccount])
-    expect(html).toContain('499€/mo')
+    expect(html).toContain('$499/mo')
   })
 
   it('displays churn_risk_score and health_score', () => {
