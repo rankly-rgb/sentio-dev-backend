@@ -16,6 +16,10 @@ export interface Condition {
 export interface ConditionGroup {
   operator: LogicalOperator
   conditions: Condition[]
+  // C2.5 (2026-08-02) : opt-in explicite pour cibler tous les comptes sans
+  // condition — évite qu'un eligibility_criteria vide/null matche tout le
+  // monde par défaut (voir evaluateConditions). false/absent par défaut.
+  match_all?: boolean
 }
 
 // ── Action types ────────────────────────────────────────────
@@ -174,14 +178,24 @@ export function evaluateCondition(
 
 /**
  * Évalue un groupe de conditions (AND/OR) contre les données d'un compte.
- * Retourne true si le groupe est null/undefined ou si conditions est vide.
+ *
+ * C2.5 (2026-08-02) : un groupe null/undefined ou sans conditions ne matche
+ * PLUS rien par défaut — avant ce changement, un playbook sans
+ * eligibility_criteria (ou avec `conditions: []`) matchait silencieusement
+ * TOUS les comptes de l'org, y compris dans playbook-scheduler quand aucun
+ * segment_id n'était défini non plus (aucun garde-fou du tout dans ce cas).
+ * Un ciblage "tous les comptes" volontaire doit désormais être explicite via
+ * `match_all: true` — un simple oubli de configuration ne peut plus se
+ * traduire par une exécution sur l'intégralité du portefeuille.
  */
 export function evaluateConditions(
   conditionGroup: ConditionGroup | null | undefined,
   accountData: Record<string, unknown>,
 ): boolean {
-  if (!conditionGroup) return true
-  if (!conditionGroup.conditions || conditionGroup.conditions.length === 0) return true
+  if (!conditionGroup) return false
+  if (!conditionGroup.conditions || conditionGroup.conditions.length === 0) {
+    return conditionGroup.match_all === true
+  }
 
   if (conditionGroup.operator === 'OR') {
     return conditionGroup.conditions.some((c) => evaluateCondition(c, accountData))
@@ -313,6 +327,10 @@ export function validateConditions(conditions: unknown): ConditionGroup | null {
     }
   }
 
+  if (obj.match_all !== undefined && typeof obj.match_all !== 'boolean') {
+    throw new Error('conditions.match_all must be a boolean')
+  }
+
   return {
     operator: obj.operator as LogicalOperator,
     conditions: obj.conditions.map((c: Record<string, unknown>) => ({
@@ -320,6 +338,7 @@ export function validateConditions(conditions: unknown): ConditionGroup | null {
       operator: c.operator as ComparisonOperator,
       value: c.value,
     })),
+    ...(obj.match_all === true ? { match_all: true as const } : {}),
   }
 }
 
@@ -497,8 +516,17 @@ export interface PlaybookTemplate {
   template_category: string
   priority: 'critical' | 'high' | 'medium' | 'low'
   is_automated: boolean
+  // trigger_conditions n'est actuellement évalué par aucun code (recherche
+  // confirmée : ni playbook-execute, ni playbook-scheduler, ni ailleurs) —
+  // reste en shorthand libre, purement documentaire pour l'instant.
   trigger_conditions: Record<string, unknown>
-  eligibility_criteria?: Record<string, unknown>
+  // eligibility_criteria, contrairement à trigger_conditions, EST évalué
+  // (evaluateConditions, playbook-execute/scheduler) — doit donc être un
+  // vrai ConditionGroup, pas un raccourci libre (C2.5 : un ancien shorthand
+  // `{ mrr_cents_min: 1 }` échouait silencieusement la validation, contourné
+  // par un bypass dans playbook-crud qui stockait l'objet non conforme tel
+  // quel — supprimé, voir handleCreate).
+  eligibility_criteria?: ConditionGroup
   actions: PlaybookAction[]
 }
 
@@ -512,7 +540,7 @@ export const PLAYBOOK_TEMPLATES_V1: PlaybookTemplate[] = [
     priority: 'critical',
     is_automated: true,
     trigger_conditions: { health_score_below: 40, evaluation: 'daily' },
-    eligibility_criteria: { mrr_cents_min: 1 },
+    eligibility_criteria: { operator: 'AND', conditions: [{ field: 'mrr_cents', operator: 'gt', value: 0 }] },
     actions: [{
       type: 'send_email',
       order: 1,

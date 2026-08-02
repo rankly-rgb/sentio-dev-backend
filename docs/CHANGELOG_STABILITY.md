@@ -40,6 +40,23 @@ Audit préalable (audit rétention 2026-08, décision produit D4 — anglais/en-
 
 ---
 
+## Playbooks — garde-fou eligibility_criteria vide/absent (2026-08-02, C2.5)
+
+Audit préalable (hypothèse "291/291 comptes ciblés" du rapport d'audit) : `evaluateConditions` (`_shared/playbook-engine.ts`) matchait tous les comptes quand `eligibility_criteria` était `null` ou `{ conditions: [] }`. Confirmé dangereux en pratique dans `playbook-scheduler/index.ts` : quand un playbook n'a **ni** `segment_id` **ni** `eligibility_criteria` significatif, la requête de résolution des comptes (`accountQuery`) ne pose alors aucune autre limite que `MAX_ACCOUNTS_PER_PLAYBOOK` — un playbook automatique mal configuré s'exécutait silencieusement sur la totalité du portefeuille de l'org, sans qu'aucun garde-fou ne s'en aperçoive.
+
+**Changements :**
+- `_shared/playbook-engine.ts` : `ConditionGroup` gagne un champ `match_all?: boolean`. `evaluateConditions` ne matche plus rien par défaut pour un groupe `null`/`undefined`/`conditions: []` — seul `match_all: true` explicite restaure ce comportement. `validateConditions` valide et propage ce nouveau champ.
+- `playbook-execute/index.ts` : suppression du bypass `playbook.eligibility_criteria ? ... : accounts` sur le chemin **segment_id** (résolution automatique/bulk) — passe désormais toujours par `evaluateConditions`. Le chemin **account_ids** (sélection manuelle explicite, ex. futur "Run this playbook on this account" depuis une carte insight, D2) reste volontairement **non filtré** par eligibility_criteria : une sélection humaine explicite exprime déjà l'intention, la re-filtrer risquerait de ne rien exécuter silencieusement sur le compte pourtant choisi.
+- `playbook-scheduler/index.ts` : même suppression du bypass — aucune notion de sélection manuelle ici (100% cron-driven), le garde-fou s'applique donc sans exception.
+- Migration `20260802000003_playbook_eligibility_match_all_backfill.sql` : backfill de tous les playbooks existants dont `eligibility_criteria` est `null` ou `conditions: []`, vers un `match_all: true` explicite — préserve exactement leur comportement actuel (rien ne s'arrête de s'exécuter silencieusement suite à ce chantier). Idempotent.
+- **Bug latent trouvé au passage** : le template `PLAYBOOK_TEMPLATES_V1['churn-critical-alert']` déclarait `eligibility_criteria: { mrr_cents_min: 1 }` — un raccourci qui n'a jamais été un `ConditionGroup` valide. `playbook-crud handleCreate` contournait `validateConditions` spécifiquement pour les playbooks créés depuis un template (`if (body.from_template_id) { validatedEligibility = body.eligibility_criteria }`), stockant cet objet non conforme tel quel. `evaluateConditions` l'aurait silencieusement traité comme "vide" dans les deux cas (avant ce chantier : matche tout ; après : ne matcherait plus rien, une régression fonctionnelle pour ce template précis). Corrigé : le template déclare désormais un vrai `ConditionGroup` (`mrr_cents > 0`), et le bypass de validation est supprimé — tout eligibility_criteria, template ou non, passe par `validateConditions`.
+
+**Non vérifié dans ce chantier** : la config réelle des playbooks en environnement prod/démo (hypothèse "291/291" du rapport) — aucun accès à une base de données réelle depuis cet environnement de développement. Le correctif de code + la migration de backfill rendent la question sans objet pour l'avenir (le défaut dangereux n'existe plus), mais une vérification a posteriori sur l'historique d'exécution réel resterait utile pour confirmer le diagnostic.
+
+**Tests** : `supabase/tests/playbook-engine.test.ts` — 3 tests existants mis à jour (le défaut n'est plus "matche tout"), 4 nouveaux tests sur `match_all` (évaluation + validation).
+
+---
+
 ## Today Actions — source de vérité unique insights + playbooks (2026-08-02, C2.4a)
 
 Audit préalable : la page "Today" affichait deux nombres de deux sources totalement indépendantes sur le même écran — le statut portefeuille (`get-today-status`, basé sur `ai_insights`) et le total "priority actions" (calculé 100% côté client dans `src/lib/types/today-actions.ts`, basé uniquement sur le matching `eligibility_criteria` des playbooks actifs, sans aucune notion d'insight). D'où la contradiction trouvée par l'audit : "portfolio stable" + "0 priority actions" alors que 206 insights critiques étaient actifs — un compte avec un insight critique mais qu'aucun playbook ne ciblait n'apparaissait tout simplement nulle part dans le calcul côté client.

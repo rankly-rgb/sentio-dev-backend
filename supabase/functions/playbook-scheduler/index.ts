@@ -153,11 +153,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
         }
 
         // ── Filter by eligibility criteria ────────────────
+        // C2.5 : plus de bypass sur eligibility_criteria vide/absent — avant
+        // ce chantier, un playbook sans segment_id NI eligibility_criteria
+        // s'exécutait sur la totalité des comptes de l'org (accountQuery
+        // ci-dessus ne pose alors aucune limite autre que
+        // MAX_ACCOUNTS_PER_PLAYBOOK). evaluateConditions ne matche plus rien
+        // par défaut sans conditions explicites ou match_all:true (voir
+        // playbook-engine.ts) — migration de backfill sur les playbooks
+        // existants pour préserver leur comportement actuel.
 
-        const eligible = playbook.eligibility_criteria
-          ? accounts.filter((a: Record<string, unknown>) =>
-              evaluateConditions(playbook.eligibility_criteria, a))
-          : accounts
+        const eligible = accounts.filter((a: Record<string, unknown>) => evaluateConditions(playbook.eligibility_criteria, a))
 
         // ── Idempotency check ─────────────────────────────
 

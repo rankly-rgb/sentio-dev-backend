@@ -37,7 +37,12 @@ function playbook(overrides: Partial<TodayPlaybookInput> = {}): TodayPlaybookInp
     priority: 'high',
     template_category: 'payment_recovery',
     status: 'active',
-    eligibility_criteria: null,
+    // match_all: true — C2.5 changed evaluateConditions so null/empty
+    // criteria matches nothing by default; tests here are about
+    // today-actions matching logic, not the C2.5 eligibility guard itself
+    // (see playbook-engine.test.ts for that), so the fixture opts in
+    // explicitly to keep "any active playbook matches" as the default.
+    eligibility_criteria: { operator: 'AND', conditions: [], match_all: true },
     ...overrides,
   }
 }
@@ -151,7 +156,7 @@ describe('buildTodayActionsSummary', () => {
   it('counts by priority and sums MRR at risk for P0/P1 only', () => {
     const actions = computeTodayActions(
       [account({ id: 'a1', churn_risk_score: 80, mrr_cents: 5000 }), account({ id: 'a2', churn_risk_score: 10, mrr_cents: 3000 })],
-      [playbook({ eligibility_criteria: null })],
+      [playbook({ eligibility_criteria: { operator: 'AND', conditions: [], match_all: true } })],
       new Map(),
     )
     const summary = buildTodayActionsSummary(actions)

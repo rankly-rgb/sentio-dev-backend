@@ -53,7 +53,13 @@ export async function resolvePlaybookTargetAccounts(
 
   const rows = (accounts ?? []) as AccountData[]
 
-  return playbook.eligibility_criteria
-    ? rows.filter((a) => evaluateConditions(playbook.eligibility_criteria, a as unknown as Record<string, unknown>))
-    : rows
+  // C2.5 : une sélection manuelle explicite (account_ids) exprime déjà
+  // l'intention de l'utilisateur — elle n'est jamais filtrée par
+  // eligibility_criteria (sinon "Run this playbook on this account" depuis
+  // une carte insight pourrait silencieusement ne rien exécuter). Seule la
+  // résolution par segment_id passe par evaluateConditions, qui ne matche
+  // plus rien par défaut si eligibility_criteria est vide/absent.
+  if (explicitAccountIds?.length) return rows
+
+  return rows.filter((a) => evaluateConditions(playbook.eligibility_criteria, a as unknown as Record<string, unknown>))
 }

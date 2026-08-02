@@ -474,7 +474,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const hasMore = body.account_ids
     ? body.account_ids.length > MAX_ACCOUNTS_PER_RUN
-    : accountIds.length >= MAX_ACCOUNTS_PER_RUN
+    : eligibleAccounts.length >= MAX_ACCOUNTS_PER_RUN
 
   return jsonResponse({
     success: true,
