@@ -6,6 +6,18 @@
 [functions.stripe-webhook]
 verify_jwt = false
 
+# stripe-billing-webhook : pas de vérification JWT (Stripe signe via HMAC,
+# compte Stripe de Sentio elle-même — distinct de stripe-webhook)
+[functions.stripe-billing-webhook]
+verify_jwt = false
+
+# subscription-status / stripe-billing-checkout : JWT vérifié dans le code (ES256)
+[functions.subscription-status]
+verify_jwt = false
+
+[functions.stripe-billing-checkout]
+verify_jwt = false
+
 # track-usage : pas de JWT (endpoints publics SDK clients)
 [functions.track-usage]
 verify_jwt = false

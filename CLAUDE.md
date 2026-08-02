@@ -85,6 +85,10 @@ Cette décision est explicite et ne doit pas être remise en cause par un futur 
 | `self-monitor` | POST (15 min) | Auto-recovery |
 | `admin-proxy` | REST (JWT) | Admin API |
 | `workflow-step-processor` | POST | Workflow steps |
+| `export-playbook-csv` | REST (JWT) | Chantier A : preview/export CSV playbook + run history |
+| `subscription-status` | GET (JWT) | Chantier C : tier courant, usage vs plafond, catalogue tiers |
+| `stripe-billing-checkout` | POST (JWT) | Chantier C : crée une Stripe Checkout Session (upgrade self-serve) |
+| `stripe-billing-webhook` | POST (Stripe) | Chantier C : webhooks abonnement Sentio (compte Stripe propre, distinct de `stripe-webhook`) |
 
 ### Pattern Edge Function (obligatoire)
 
@@ -183,13 +187,16 @@ Toute feature substantielle doit passer par ce pipeline (constitution déjà en 
 | `NEXT_PUBLIC_SUPABASE_URL` | Oui | Client Supabase |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Oui | Client Supabase |
 | `SUPABASE_SERVICE_ROLE_KEY` | Oui | Server/Edge Functions |
-| `STRIPE_SECRET_KEY` | Oui | API Stripe + OAuth callback |
-| `STRIPE_WEBHOOK_SECRET` | Oui | HMAC webhooks Stripe |
+| `STRIPE_SECRET_KEY` | Oui | API Stripe (compte Sentio elle-même) — OAuth callback (échange token client) ET Checkout Sessions (`stripe-billing-checkout`, chantier C) |
+| `STRIPE_WEBHOOK_SECRET` | Oui | HMAC webhooks Stripe — comptes clients connectés (`stripe-webhook`) |
+| `STRIPE_BILLING_WEBHOOK_SECRET` | Non | HMAC webhook abonnement Sentio (`stripe-billing-webhook`, chantier C) — 500 si absent quand ce endpoint est appelé, distinct de `STRIPE_WEBHOOK_SECRET` |
+| `STRIPE_PRICE_ID_GROWTH` | Non | Price ID Stripe du tier Growth ($129/mo) — 503 sur `stripe-billing-checkout` si absent |
+| `STRIPE_PRICE_ID_SCALE` | Non | Price ID Stripe du tier Scale ($349/mo) — 503 sur `stripe-billing-checkout` si absent |
 | `STRIPE_CLIENT_ID` | Non* | OAuth Stripe (`stripe-oauth-initiate`) — fallback flow clé directe si absent |
 | `HUBSPOT_API_KEY` | Non | Fallback global HubSpot (priorité 3, après Vault et `organizations.hubspot_api_key`) |
 | `RESEND_API_KEY` | Non | Emails de bienvenue (`on-user-signup`) — log-only si absent |
 | `ANTHROPIC_API_KEY` | Non | Résumés IA comptes (`account-summary`) — 503 si absent |
 | `SLACK_WEBHOOK_URL` | Non | Alertes monitoring — silencieux si absent |
-| `NEXT_PUBLIC_APP_URL` | Non | URL de base de l'app (OAuth redirect) — défaut `https://app.sentioapp.io` |
+| `NEXT_PUBLIC_APP_URL` | Non | URL de base de l'app (OAuth redirect, Stripe Checkout success/cancel) — défaut `https://app.sentioapp.io` |
 
 *Optionnel si le flow de connexion Stripe par clé directe (`verify-stripe-token`) est utilisé à la place.
