@@ -1,0 +1,71 @@
+name: DIAGNOSTIC — Playbook empty-state investigation (read-only, temporary)
+
+# Manual only. Read-only SQL against the live database via the Supabase
+# Management API (same mechanism already used by supabase-deploy.yml's
+# cron-scheduling step) to gather real evidence for a bug report — no
+# mutation, no app code touched. This workflow and its branch are deleted
+# once the investigation is done; never merge into main.
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run read-only diagnostic queries
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+
+          run_sql() {
+            local label="$1"
+            local sql="$2"
+            echo "===== $label ====="
+            local SQL_BODY
+            SQL_BODY=$(jq -Rcs '{"query":.}' <<< "$sql")
+            local RESULT
+            RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$SQL_BODY")
+            local CODE
+            CODE=$(printf '%s' "$RESULT" | tail -1)
+            local OUT
+            OUT=$(printf '%s' "$RESULT" | head -n -1)
+            echo "HTTP $CODE"
+            echo "$OUT"
+            echo ""
+          }
+
+          run_sql "0. Organizations (identify demo org)" \
+            "select id, name, created_at from public.organizations order by created_at asc limit 10;"
+
+          run_sql "1. playbook_runs row counts by org/status" \
+            "select organization_id, status, count(*) as n, max(exported_at) as latest from public.playbook_runs group by 1,2 order by 1,2;"
+
+          run_sql "1b. playbook_runs sample rows (most recent 20)" \
+            "select id, organization_id, playbook_id, status, accounts_count, mrr_at_risk_cents, exported_at, executed_at, array_length(account_ids,1) as n_account_ids from public.playbook_runs order by exported_at desc limit 20;"
+
+          run_sql "2a. Do get_playbook_detail / get_playbook_full_detail / get_playbook_targets / transition_playbook_status exist as live functions?" \
+            "select p.proname, n.nspname, pg_get_function_arguments(p.oid) as args from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.proname in ('get_playbook_detail','get_playbook_full_detail','get_playbook_targets','transition_playbook_status') order by 1;"
+
+          run_sql "2b. Full source of get_playbook_detail (if it exists)" \
+            "select pg_get_functiondef(p.oid) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.proname = 'get_playbook_detail' and n.nspname='public';"
+
+          run_sql "2c. Full source of get_playbook_full_detail (if it exists)" \
+            "select pg_get_functiondef(p.oid) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.proname = 'get_playbook_full_detail' and n.nspname='public';"
+
+          run_sql "3. playbooks table — real eligibility_criteria/status/segment_id shapes" \
+            "select id, organization_id, title, status, segment_id, eligibility_criteria, is_workflow from public.playbooks order by created_at desc limit 30;"
+
+          run_sql "4. segment_memberships counts per segment (are segments actually populated?)" \
+            "select segment_id, status, count(*) from public.segment_memberships group by 1,2 order by 1,2 limit 30;"
+
+          run_sql "5. Vault secret playbook_trigger_secret existence (name only, no decrypt)" \
+            "select name, created_at from vault.secrets where name = 'playbook_trigger_secret';"
+
+          run_sql "6. accounts_with_priority / accounts sanity check (row count, any churned)" \
+            "select churn_risk_band, count(*) from public.accounts group by 1 order by 1;"
