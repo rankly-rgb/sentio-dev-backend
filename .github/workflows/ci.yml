@@ -12,6 +12,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check for migration version collisions
+        run: |
+          cd supabase/migrations
+          dupes=$(ls -1 *.sql | grep -oE '^[0-9]{14}' | sort | uniq -d)
+          if [ -n "$dupes" ]; then
+            echo "Supabase keys a migration by its 14-digit version number only, not the filename."
+            echo "Two files sharing a version number will apply cleanly in git but collide on"
+            echo "'supabase db push' (duplicate primary key in schema_migrations) — usually caused"
+            echo "by two branches independently authoring a migration on the same day."
+            echo ""
+            echo "Colliding version(s):"
+            for v in $dupes; do
+              echo "  $v:"
+              ls -1 "${v}"*.sql | sed 's/^/    /'
+            done
+            exit 1
+          fi
+          echo "No migration version collisions."
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
