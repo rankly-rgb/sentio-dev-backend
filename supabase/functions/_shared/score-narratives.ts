@@ -205,9 +205,9 @@ function narrativePaymentHealth(
 ): string {
   if (mrrCents === 0) return 'Account with no active MRR — subscription canceled or suspended.'
   if (score === null) return 'Payment health score not available — not enough invoice history yet.'
-  const mrrEur = (mrrCents / 100).toFixed(0)
-  if (score >= 90) return `No overdue invoices. MRR: €${mrrEur}.`
-  if (score >= 70) return `Stable billing. MRR: €${mrrEur}.`
-  if (score >= 50) return `Warning: ${overdueCount} overdue invoice(s) (€${(overdueAmountCents / 100).toFixed(0)}).`
-  return `High payment risk: ${overdueCount} overdue invoice(s) totaling €${(overdueAmountCents / 100).toFixed(0)}.`
+  const mrrUsd = (mrrCents / 100).toFixed(0)
+  if (score >= 90) return `No overdue invoices. MRR: $${mrrUsd}.`
+  if (score >= 70) return `Stable billing. MRR: $${mrrUsd}.`
+  if (score >= 50) return `Warning: ${overdueCount} overdue invoice(s) ($${(overdueAmountCents / 100).toFixed(0)}).`
+  return `High payment risk: ${overdueCount} overdue invoice(s) totaling $${(overdueAmountCents / 100).toFixed(0)}.`
 }

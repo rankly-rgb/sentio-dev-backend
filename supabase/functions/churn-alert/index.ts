@@ -87,12 +87,12 @@ export function buildChurnAlertEmail(accounts: CriticalAccount[]): string {
   const n = accounts.length
   const rows = accounts.map(a => {
     const label = formatAccountLabel(a)
-    const mrr = Math.round(a.mrr_cents / 100)
+    const mrr = '$' + Math.round(a.mrr_cents / 100).toLocaleString('en-US')
     const healthLabel = a.health_score === null ? 'N/A' : `${a.health_score}/100`
     return `
     <tr>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0">${label}</td>
-      <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:right">${mrr}€/mo</td>
+      <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:right">${mrr}/mo</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:center">${healthLabel}</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:center;color:#dc2626;font-weight:600">${a.churn_risk_score}/100</td>
       <td style="padding:10px 8px;border-bottom:1px solid #e2e8f0">

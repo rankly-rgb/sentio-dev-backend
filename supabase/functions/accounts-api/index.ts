@@ -22,7 +22,7 @@
 //   Response 200 :
 //     {
 //       data: Array<Account & {
-//         priority_label: 'critical' | 'watch' | 'new' | 'stable',
+//         priority_label: 'churned' | 'critical' | 'watch' | 'new' | 'stable',
 //         primary_segment: string | null   // voir docs/API_CONTRACTS.md — liste exhaustive des valeurs
 //       }>,
 //       pagination: { limit: number, next_cursor: string | null, has_more: boolean },
@@ -30,6 +30,8 @@
 //       total_mrr_cents: number    // idem, source : RPC get_portfolio_snapshot (chantier 5.1)
 //     }
 //   priority_label calculé côté SQL (vue accounts_with_priority, Scoring V2) :
+//     churned  : churn_risk_band = 'churned' (D1/C2.2 — évalué en premier, un
+//                compte parti n'est pas "à risque" même si health_score <= 30/55)
 //     critical : churn_risk_band = 'high' OU health_score <= 30
 //     watch    : churn_risk_band = 'watch' OU health_score <= 55
 //     new      : created_at < 90j ET churn_risk_band = 'low'

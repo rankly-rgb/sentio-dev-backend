@@ -171,17 +171,36 @@ describe('evaluateConditions', () => {
     expect(evaluateConditions(group, baseAccount)).toBe(false)
   })
 
-  it('returns true for null condition group', () => {
-    expect(evaluateConditions(null, baseAccount)).toBe(true)
+  // C2.5 (2026-08-02) : un eligibility_criteria vide/absent ne matche plus
+  // rien par défaut — avant ce chantier, un playbook sans critères
+  // s'exécutait silencieusement sur tous les comptes de l'org (voir
+  // playbook-scheduler/playbook-execute, cas sans segment_id ni account_ids).
+
+  it('returns false for null condition group (no more implicit match-all)', () => {
+    expect(evaluateConditions(null, baseAccount)).toBe(false)
   })
 
-  it('returns true for undefined condition group', () => {
-    expect(evaluateConditions(undefined, baseAccount)).toBe(true)
+  it('returns false for undefined condition group', () => {
+    expect(evaluateConditions(undefined, baseAccount)).toBe(false)
   })
 
-  it('returns true for empty conditions array', () => {
+  it('returns false for empty conditions array without match_all', () => {
     const group: ConditionGroup = { operator: 'AND', conditions: [] }
+    expect(evaluateConditions(group, baseAccount)).toBe(false)
+  })
+
+  it('returns true for empty conditions array with explicit match_all: true', () => {
+    const group: ConditionGroup = { operator: 'AND', conditions: [], match_all: true }
     expect(evaluateConditions(group, baseAccount)).toBe(true)
+  })
+
+  it('match_all does not bypass non-empty conditions — they still gate matching', () => {
+    const group: ConditionGroup = {
+      operator: 'AND',
+      conditions: [{ field: 'health_score', operator: 'gte', value: 999 }],
+      match_all: true,
+    }
+    expect(evaluateConditions(group, baseAccount)).toBe(false)
   })
 
   it('handles mixed numeric and string conditions', () => {
@@ -366,6 +385,23 @@ describe('validateConditions', () => {
     }
     const result = validateConditions(input)
     expect(result!.operator).toBe('OR')
+  })
+
+  it('accepts explicit match_all: true (C2.5)', () => {
+    const input = { operator: 'AND', conditions: [], match_all: true }
+    const result = validateConditions(input)
+    expect(result!.match_all).toBe(true)
+  })
+
+  it('omits match_all when not provided', () => {
+    const input = { operator: 'AND', conditions: [{ field: 'x', operator: 'eq', value: 1 }] }
+    const result = validateConditions(input)
+    expect(result!.match_all).toBeUndefined()
+  })
+
+  it('throws for non-boolean match_all', () => {
+    const input = { operator: 'AND', conditions: [], match_all: 'yes' }
+    expect(() => validateConditions(input)).toThrow('conditions.match_all must be a boolean')
   })
 })
 

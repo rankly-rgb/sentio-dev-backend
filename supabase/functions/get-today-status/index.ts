@@ -27,7 +27,9 @@
 //     }
 //
 // Règles de statut :
-//   1. critical_count > 0 (insights ai_insights actifs, priority='critical') → 'critical'
+//   1. critical_count > 0 (insights ai_insights actifs, priority='critical',
+//      hors comptes churn_risk_band='churned' — D1/C2.2, un compte parti
+//      n'est pas "à risque") → 'critical'
 //   2. sinon, part des comptes scorés avec churn_risk_score > 70 dépasse 30 % → 'at_risk'
 //   3. sinon → 'stable'
 //
@@ -96,6 +98,17 @@ export function selectTopInsightTitle(insights: InsightRow[]): string {
   return sorted[0].title
 }
 
+// D1/C2.2 (2026-08-02) : un compte churné n'est pas "à risque", il est
+// perdu — un insight critique resté actif sur un compte déjà churné (avant
+// que le prochain run de generate-insights ne l'auto-résolve) ne doit pas
+// pouvoir forcer le statut du portefeuille à 'critical'.
+export function countCriticalExcludingChurned(
+  insightAccountIds: Array<string | null>,
+  churnedAccountIds: Set<string>,
+): number {
+  return insightAccountIds.filter((id) => id !== null && !churnedAccountIds.has(id)).length
+}
+
 interface PortfolioSnapshot {
   total_accounts: number
   total_mrr_cents: number
@@ -130,13 +143,23 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const orgId = auth.organizationId
 
-  const [criticalRes, accountsRes, snapshotRes] = await Promise.all([
+  const [criticalRes, churnedRes, accountsRes, snapshotRes] = await Promise.all([
     supabase
       .from('ai_insights')
-      .select('id', { count: 'exact', head: true })
+      .select('account_id')
       .eq('organization_id', orgId)
       .eq('status', 'active')
-      .eq('priority', 'critical'),
+      .eq('priority', 'critical')
+      .limit(5000),
+    // D1/C2.2 : ids des comptes churnés, pour exclure leurs insights actifs
+    // du compte critique — pas de cap à 500 (contrairement à accountsRes
+    // ci-dessous) car il ne s'agit que d'ids, pas de lignes complètes.
+    supabase
+      .from('accounts')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('churn_risk_band', 'churned')
+      .limit(20000),
     supabase
       .from('accounts')
       .select('id, display_name, mrr_cents, churn_risk_score')
@@ -148,6 +171,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (criticalRes.error) {
     console.error(JSON.stringify({ level: 'error', function_name: 'get-today-status', message: criticalRes.error.message }))
     return errorResponse('Failed to fetch insights', 500)
+  }
+
+  if (churnedRes.error) {
+    console.error(JSON.stringify({ level: 'error', function_name: 'get-today-status', message: churnedRes.error.message }))
+    return errorResponse('Failed to fetch churned accounts', 500)
   }
 
   if (accountsRes.error) {
@@ -167,7 +195,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const typedAccounts = (accountsRes.data ?? []) as AccountRow[]
   const scoredAccounts = typedAccounts.filter((a) => a.churn_risk_score !== null)
 
-  const criticalInsightCount = criticalRes.count ?? 0
+  const churnedAccountIds = new Set((churnedRes.data ?? []).map((a: { id: string }) => a.id))
+  const criticalInsightAccountIds = (criticalRes.data ?? []).map((i: { account_id: string | null }) => i.account_id)
+  const criticalInsightCount = countCriticalExcludingChurned(criticalInsightAccountIds, churnedAccountIds)
   const status = determineTodayStatus(
     criticalInsightCount,
     snapshot?.at_risk_count ?? 0,

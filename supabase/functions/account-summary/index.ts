@@ -117,7 +117,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     ? Math.max(0, Math.round((Date.now() - new Date(account.created_at).getTime()) / (30 * 24 * 60 * 60 * 1000)))
     : null
 
-  const mrrEuros = account.mrr_cents ? (account.mrr_cents / 100).toFixed(2) : '0.00'
+  const mrrDisplay = account.mrr_cents ? (account.mrr_cents / 100).toFixed(2) : '0.00'
 
   const userPrompt = buildPrompt({
     health_score: account.health_score,
@@ -130,7 +130,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     payment_health_score: account.payment_health_score,
     revenue_dynamics_score: account.revenue_dynamics_score,
     contract_renewal_score: account.contract_renewal_score,
-    mrr_euros: mrrEuros,
+    mrr_usd: mrrDisplay,
     plan_tier: account.plan_tier,
     billing_interval: account.billing_interval,
     months_since_created: monthsSinceCreated,
@@ -201,7 +201,7 @@ interface PromptData {
   payment_health_score: number | null
   revenue_dynamics_score: number | null
   contract_renewal_score: number | null
-  mrr_euros: string
+  mrr_usd: string
   plan_tier: string | null
   billing_interval: string | null
   months_since_created: number | null
@@ -230,7 +230,7 @@ function buildPrompt(data: PromptData): string {
     `- Revenue dynamics score: ${fmtScore(data.revenue_dynamics_score)}`,
     `- Contract renewal score: ${fmtScore(data.contract_renewal_score)}`,
     `- Expansion score: ${data.expansion_score_status === 'unavailable' ? 'not available (seat data not configured)' : fmtScore(data.expansion_score)}`,
-    `- MRR: €${data.mrr_euros}`,
+    `- MRR: $${data.mrr_usd}`,
   ]
 
   if (data.plan_tier) {

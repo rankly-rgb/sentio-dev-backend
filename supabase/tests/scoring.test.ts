@@ -5,17 +5,11 @@ import {
   calcEngagementScore,
   calcContractScore,
   calcExpansionScore,
-  calcHealthScore,
-  calcChurnRiskScore,
-  determineSegmentTypes,
-  computeSignalsAvailable,
-  computeDataCompletenessPct,
   type Account,
   type UsageStats,
   type HubspotData,
   type InvoiceStatus,
   type SubscriptionStatus,
-  type SignalsAvailable,
 } from '../functions/_shared/scoring'
 
 // ── Usage Score ───────────────────────────────────────────────
@@ -118,54 +112,6 @@ describe('calcFinancialScore', () => {
 
   it('reste à 0 (pas neutre) pour un compte ayant déjà eu une subscription, mrr=0 — vrai churn', () => {
     expect(calcFinancialScore(0, noOverdue, 10000, hasSubscription)).toBe(0)
-  })
-})
-
-// ── Indicateur de complétude des données ───────────────────────
-
-describe('computeSignalsAvailable', () => {
-  const account: Account = {
-    id: 'a1', organization_id: 'o1', mrr_cents: 1000, seat_count: null,
-    seat_limit: null, contract_end_date: null, health_score: null, churn_risk_score: null,
-  }
-  const usage: UsageStats = { login_count: 0, feature_count: 0, total_events: 0, distinct_features: 0, days_active: 0 }
-  const hubspot: HubspotData = { nps_score: null, open_ticket_count: 0, open_deal_count: 0, last_meeting_date: null }
-
-  it('tous absents quand aucune donnée n\'est disponible', () => {
-    expect(computeSignalsAvailable(usage, null, account, { hasAny: false })).toEqual({
-      financial: false, engagement: false, contract: false, product_usage: false,
-    })
-  })
-
-  it('tous présents quand toutes les données sont disponibles', () => {
-    const fullUsage: UsageStats = { ...usage, total_events: 10 }
-    const fullAccount: Account = { ...account, contract_end_date: '2027-01-01' }
-    expect(computeSignalsAvailable(fullUsage, hubspot, fullAccount, { hasAny: true })).toEqual({
-      financial: true, engagement: true, contract: true, product_usage: true,
-    })
-  })
-
-  it('détecte financial indépendamment des autres signaux', () => {
-    const result = computeSignalsAvailable(usage, hubspot, account, { hasAny: true })
-    expect(result.financial).toBe(true)
-    expect(result.product_usage).toBe(false)
-  })
-})
-
-describe('computeDataCompletenessPct', () => {
-  it('retourne 0 quand aucun signal n\'est disponible', () => {
-    const signals: SignalsAvailable = { financial: false, engagement: false, contract: false, product_usage: false }
-    expect(computeDataCompletenessPct(signals)).toBe(0)
-  })
-
-  it('retourne 100 quand tous les signaux sont disponibles', () => {
-    const signals: SignalsAvailable = { financial: true, engagement: true, contract: true, product_usage: true }
-    expect(computeDataCompletenessPct(signals)).toBe(100)
-  })
-
-  it('retourne 50 pour 2 signaux sur 4', () => {
-    const signals: SignalsAvailable = { financial: true, engagement: true, contract: false, product_usage: false }
-    expect(computeDataCompletenessPct(signals)).toBe(50)
   })
 })
 
@@ -311,155 +257,3 @@ describe('calcExpansionScore', () => {
   })
 })
 
-// ── Health Score composite ────────────────────────────────────
-
-describe('calcHealthScore', () => {
-  it('follows weighted formula: U×35 + F×25 + E×20 + C×20', () => {
-    const health = calcHealthScore(80, 60, 70, 90)
-    const expected = Math.round((80 * 0.35 + 60 * 0.25 + 70 * 0.20 + 90 * 0.20) * 100) / 100
-    expect(health).toBe(expected)
-  })
-
-  it('returns 0 for all zero inputs', () => {
-    expect(calcHealthScore(0, 0, 0, 0)).toBe(0)
-  })
-
-  it('returns 100 for all 100 inputs', () => {
-    expect(calcHealthScore(100, 100, 100, 100)).toBe(100)
-  })
-})
-
-// ── Churn Risk Score ──────────────────────────────────────────
-
-describe('calcChurnRiskScore', () => {
-  const baseAccount: Account = {
-    id: 'a1', organization_id: 'o1', mrr_cents: null,
-    seat_count: null, seat_limit: null, contract_end_date: null,
-    health_score: null, churn_risk_score: null,
-  }
-  const noOverdue: InvoiceStatus = { has_overdue: false, overdue_count: 0 }
-
-  it('is inverse of health score (base case)', () => {
-    const risk = calcChurnRiskScore(80, noOverdue, 10, baseAccount)
-    expect(risk).toBe(20)
-  })
-
-  it('adds 20 for overdue invoices (spec: past_due +20)', () => {
-    const overdue: InvoiceStatus = { has_overdue: true, overdue_count: 1 }
-    const risk = calcChurnRiskScore(80, overdue, 10, baseAccount)
-    expect(risk).toBe(40) // 100 - 80 + 20 = 40
-  })
-
-  it('adds 10 for zero activity (spec: last_login >45j +10)', () => {
-    const risk = calcChurnRiskScore(80, noOverdue, 0, baseAccount)
-    expect(risk).toBe(30) // 100 - 80 + 10 = 30
-  })
-
-  it('adds 25 for expired contract', () => {
-    const acct = { ...baseAccount, contract_end_date: '2020-01-01' }
-    const risk = calcChurnRiskScore(80, noOverdue, 10, acct)
-    expect(risk).toBe(45) // 100 - 80 + 25 = 45
-  })
-
-  it('is capped at 100', () => {
-    const overdue: InvoiceStatus = { has_overdue: true, overdue_count: 1 }
-    const acct = { ...baseAccount, contract_end_date: '2020-01-01' }
-    // 100 - 0 + 15 + 20 + 25 = 160 → capped at 100
-    const risk = calcChurnRiskScore(0, overdue, 0, acct)
-    expect(risk).toBe(100)
-  })
-
-  it('is floored at 0', () => {
-    const risk = calcChurnRiskScore(100, noOverdue, 30, baseAccount)
-    expect(risk).toBe(0)
-  })
-})
-
-// ── Segment Assignment ────────────────────────────────────────
-
-describe('determineSegmentTypes', () => {
-  const baseScores = { health_score: 50, churn_risk_score: 50, expansion_score: 30 }
-  const oldDate = '2020-01-01T00:00:00Z'
-  const recentDate = new Date(Date.now() - 30 * 86400000).toISOString()
-
-  it('assigns "nouveaux" for accounts < 90 days old', () => {
-    const segments = determineSegmentTypes(baseScores, 5000, false, recentDate)
-    expect(segments).toContain('nouveaux')
-  })
-
-  it('does not assign "nouveaux" for old accounts', () => {
-    const segments = determineSegmentTypes(baseScores, 5000, false, oldDate)
-    expect(segments).not.toContain('nouveaux')
-  })
-
-  it('assigns "en_churn" when mrr_cents = 0', () => {
-    const segments = determineSegmentTypes(baseScores, 0, false, oldDate)
-    expect(segments).toContain('en_churn')
-    // en_churn is exclusive with other score-based segments
-    expect(segments).not.toContain('stables')
-    expect(segments).not.toContain('en_danger_critique')
-  })
-
-  it('assigns "impayes" when has overdue invoices (mrr > 0)', () => {
-    const segments = determineSegmentTypes(baseScores, 5000, true, oldDate)
-    expect(segments).toContain('impayes')
-    expect(segments).not.toContain('a_risque_leger')
-  })
-
-  it('assigns "en_danger_critique" for churn_risk >= 70', () => {
-    const scores = { health_score: 25, churn_risk_score: 75, expansion_score: 10 }
-    const segments = determineSegmentTypes(scores, 5000, false, oldDate)
-    expect(segments).toContain('en_danger_critique')
-    expect(segments).toHaveLength(1)
-  })
-
-  it('assigns "a_risque_leger" for 50 <= churn_risk < 70', () => {
-    const scores = { health_score: 45, churn_risk_score: 55, expansion_score: 20 }
-    const segments = determineSegmentTypes(scores, 5000, false, oldDate)
-    expect(segments).toContain('a_risque_leger')
-    expect(segments).toHaveLength(1)
-  })
-
-  it('assigns "champions" for health >= 80', () => {
-    const scores = { health_score: 85, churn_risk_score: 15, expansion_score: 40 }
-    const segments = determineSegmentTypes(scores, 5000, false, oldDate)
-    expect(segments).toContain('champions')
-    expect(segments).toHaveLength(1)
-  })
-
-  it('assigns "en_expansion" for expansion >= 70 and health >= 60', () => {
-    const scores = { health_score: 65, churn_risk_score: 35, expansion_score: 75 }
-    const segments = determineSegmentTypes(scores, 5000, false, oldDate)
-    expect(segments).toContain('en_expansion')
-    expect(segments).toHaveLength(1)
-  })
-
-  it('assigns "stables" as default fallback', () => {
-    const scores = { health_score: 55, churn_risk_score: 40, expansion_score: 30 }
-    const segments = determineSegmentTypes(scores, 5000, false, oldDate)
-    expect(segments).toEqual(['stables'])
-  })
-
-  it('can assign both "nouveaux" and a score-based segment', () => {
-    const scores = { health_score: 90, churn_risk_score: 10, expansion_score: 50 }
-    const segments = determineSegmentTypes(scores, 5000, false, recentDate)
-    expect(segments).toContain('nouveaux')
-    expect(segments).toContain('champions')
-    expect(segments).toHaveLength(2)
-  })
-
-  it('prioritizes "en_churn" over "en_danger_critique" when mrr = 0', () => {
-    const scores = { health_score: 10, churn_risk_score: 90, expansion_score: 5 }
-    const segments = determineSegmentTypes(scores, 0, false, oldDate)
-    expect(segments).toContain('en_churn')
-    expect(segments).not.toContain('en_danger_critique')
-  })
-
-  it('prioritizes "impayes" over score-based segments when overdue', () => {
-    const scores = { health_score: 85, churn_risk_score: 15, expansion_score: 80 }
-    const segments = determineSegmentTypes(scores, 5000, true, oldDate)
-    expect(segments).toContain('impayes')
-    expect(segments).not.toContain('champions')
-    expect(segments).not.toContain('en_expansion')
-  })
-})

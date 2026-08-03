@@ -159,6 +159,10 @@ verify_jwt = false
 [functions.get-today-status]
 verify_jwt = false
 
+# get-today-actions : JWT vérifié dans le code (ES256 — C2.4a, liste d'actions priorisées Today)
+[functions.get-today-actions]
+verify_jwt = false
+
 # score-feedback : JWT vérifié dans le code (ES256 — chantier 7)
 [functions.score-feedback]
 verify_jwt = false

@@ -6,16 +6,16 @@ const VALID_INSIGHT_TYPES = ['churn_prediction', 'expansion_opportunity', 'renew
 const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'] as const
 const VALID_STATUSES = ['active', 'acknowledged', 'resolved', 'dismissed'] as const
 
-function parseLimit(raw: string | null): number {
+function parsePage(raw: string | null): number {
+  const n = parseInt(raw ?? '1', 10)
+  if (!Number.isFinite(n) || n < 1) return 1
+  return n
+}
+
+function parsePerPage(raw: string | null): number {
   const n = parseInt(raw ?? '20', 10)
   if (!Number.isFinite(n) || n < 1) return 20
   return Math.min(100, n)
-}
-
-function parseOffset(raw: string | null): number {
-  const n = parseInt(raw ?? '0', 10)
-  if (!Number.isFinite(n) || n < 0) return 0
-  return n
 }
 
 function parseCsvFilter<T extends string>(raw: string | null, valid: readonly T[]): T[] | null {
@@ -26,44 +26,45 @@ function parseCsvFilter<T extends string>(raw: string | null, valid: readonly T[
 
 // ── Tests ───────────────────────────────────────────────────
 
-describe('parseLimit', () => {
-  it('defaults to 20 when absent', () => {
-    expect(parseLimit(null)).toBe(20)
+describe('parsePage', () => {
+  it('defaults to 1 when absent', () => {
+    expect(parsePage(null)).toBe(1)
   })
 
   it('parses a valid value', () => {
-    expect(parseLimit('50')).toBe(50)
+    expect(parsePage('3')).toBe(3)
   })
 
-  it('clamps above 100 down to 100', () => {
-    expect(parseLimit('500')).toBe(100)
+  it('falls back to 1 for zero or negative', () => {
+    expect(parsePage('0')).toBe(1)
+    expect(parsePage('-5')).toBe(1)
   })
 
-  it('falls back to 20 for zero or negative', () => {
-    expect(parseLimit('0')).toBe(20)
-    expect(parseLimit('-5')).toBe(20)
-  })
-
-  it('falls back to 20 for non-numeric input', () => {
-    expect(parseLimit('abc')).toBe(20)
+  it('falls back to 1 for non-numeric input', () => {
+    expect(parsePage('abc')).toBe(1)
   })
 })
 
-describe('parseOffset', () => {
-  it('defaults to 0 when absent', () => {
-    expect(parseOffset(null)).toBe(0)
+describe('parsePerPage', () => {
+  it('defaults to 20 when absent', () => {
+    expect(parsePerPage(null)).toBe(20)
   })
 
   it('parses a valid value', () => {
-    expect(parseOffset('40')).toBe(40)
+    expect(parsePerPage('50')).toBe(50)
   })
 
-  it('falls back to 0 for negative input', () => {
-    expect(parseOffset('-1')).toBe(0)
+  it('clamps above 100 down to 100', () => {
+    expect(parsePerPage('500')).toBe(100)
   })
 
-  it('falls back to 0 for non-numeric input', () => {
-    expect(parseOffset('abc')).toBe(0)
+  it('falls back to 20 for zero or negative', () => {
+    expect(parsePerPage('0')).toBe(20)
+    expect(parsePerPage('-5')).toBe(20)
+  })
+
+  it('falls back to 20 for non-numeric input', () => {
+    expect(parsePerPage('abc')).toBe(20)
   })
 })
 

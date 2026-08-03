@@ -43,7 +43,7 @@ function generateCsv(
     'Company',
     'Stripe ID',
     ...(includeEmail ? ['Email'] : []),
-    'MRR (€)',
+    'MRR ($)',
     'Health Score',
     'Churn Risk',
     'Expansion Score',
@@ -121,7 +121,7 @@ describe('generateCsv', () => {
     expect(header).toContain('Company')
     expect(header).toContain('Stripe ID')
     expect(header).toContain('Email')
-    expect(header).toContain('MRR (€)')
+    expect(header).toContain('MRR ($)')
     expect(header).toContain('Health Score')
     expect(header).toContain('Churn Risk')
     expect(header).toContain('Expansion Score')

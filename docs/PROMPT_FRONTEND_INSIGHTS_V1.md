@@ -28,15 +28,16 @@ GET /functions/v1/insights-crud
 | `priority` | string (csv) | — | Filtre par priorité(s) : `low`, `medium`, `high`, `critical` |
 | `status` | string (csv) | `active` | Filtre par statut(s) : `active`, `acknowledged`, `resolved`, `dismissed` |
 | `account_id` | uuid | — | Insights d'un compte spécifique |
-| `limit` | number | `20` | Nombre de résultats (max 100) |
-| `offset` | number | `0` | Décalage pour la pagination |
+| `page` | number | `1` | Page courante (1-indexée) |
+| `per_page` | number | `20` | Résultats par page (max 100) |
+| `sort` | string | — | Accepté mais sans effet (voir ci-dessous) |
 
-Tri fixe (non paramétrable) : `priority DESC` (critical d'abord) → `mrr_impact_cents DESC` → `created_at DESC`. La liste est dédupliquée : au plus 1 insight par `(account_id, insight_type, jour UTC)`.
+Tri fixe (non paramétrable, `sort` est ignoré côté serveur) : `priority DESC` (critical d'abord) → `mrr_impact_cents DESC` → `created_at DESC` — requis pour que le `DISTINCT ON` de déduplication soit déterministe. La liste est dédupliquée : au plus 1 insight par `(account_id, insight_type, jour UTC)`.
 
 **Réponse :**
 ```json
 {
-  "insights": [
+  "data": [
     {
       "id": "uuid",
       "organization_id": "uuid",
@@ -59,12 +60,18 @@ Tri fixe (non paramétrable) : `priority DESC` (critical d'abord) → `mrr_impac
       "updated_at": "2026-03-05T10:00:00Z"
     }
   ],
-  "total_count": 42,
+  "pagination": {
+    "page": 1,
+    "per_page": 20,
+    "total_count": 42
+  },
   "critical_count": 3
 }
 ```
 
-`critical_count` = insights `active` + `priority=critical` de l'org, indépendant des filtres appliqués — c'est cette valeur (pas `total_count`) qui doit alimenter le badge de navigation.
+`critical_count` = insights `active` + `priority=critical` de l'org, indépendant des filtres appliqués — c'est cette valeur (pas `pagination.total_count`) qui doit alimenter le badge de navigation.
+
+**Historique de contrat** : cet endpoint est passé par 3 formes successives — `page`/`per_page` + `{ data, pagination }` (V0, jamais consommé) → `limit`/`offset` + `{ insights, total_count, critical_count }` (2026-07-05, jamais consommé non plus, contrat documenté mais frontend écrit contre l'ancien) → forme actuelle ci-dessus (2026-08-02, fix P0.2 : le frontend envoyait déjà `page`/`per_page`/`sort` et lisait `data`/`pagination`, contrat désormais aligné des deux côtés).
 
 #### 2. Détail d'un insight
 ```

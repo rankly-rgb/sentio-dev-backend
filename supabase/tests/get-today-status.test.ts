@@ -48,6 +48,13 @@ function selectTopInsightTitle(insights: InsightRow[]): string {
   return sorted[0].title
 }
 
+function countCriticalExcludingChurned(
+  insightAccountIds: Array<string | null>,
+  churnedAccountIds: Set<string>,
+): number {
+  return insightAccountIds.filter((id) => id !== null && !churnedAccountIds.has(id)).length
+}
+
 // ── Helpers de test ─────────────────────────────────────────
 
 function account(overrides: Partial<AccountRow>): AccountRow {
@@ -131,5 +138,29 @@ describe('get-today-status: selectTopInsightTitle', () => {
 
   it('retourne le seul insight présent', () => {
     expect(selectTopInsightTitle([{ title: 'Solo', priority: 'medium' }])).toBe('Solo')
+  })
+})
+
+// ── Tests countCriticalExcludingChurned (D1/C2.2) ─────────────
+
+describe('get-today-status: countCriticalExcludingChurned', () => {
+  it('compte tous les insights critiques quand aucun compte n\'est churné', () => {
+    expect(countCriticalExcludingChurned(['a1', 'a2'], new Set())).toBe(2)
+  })
+
+  it('exclut les insights liés à un compte churné', () => {
+    expect(countCriticalExcludingChurned(['a1', 'a2'], new Set(['a2']))).toBe(1)
+  })
+
+  it('retourne 0 si tous les comptes concernés sont churnés', () => {
+    expect(countCriticalExcludingChurned(['a1', 'a2'], new Set(['a1', 'a2']))).toBe(0)
+  })
+
+  it('ignore les account_id null sans planter', () => {
+    expect(countCriticalExcludingChurned([null, 'a1'], new Set())).toBe(1)
+  })
+
+  it('retourne 0 pour une liste vide', () => {
+    expect(countCriticalExcludingChurned([], new Set())).toBe(0)
   })
 })

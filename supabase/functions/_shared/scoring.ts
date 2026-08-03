@@ -145,64 +145,6 @@ export function calcExpansionScore(account: Account, stats: UsageStats): number 
   return Math.round(featureCeilingScore * 0.4 * 100) / 100
 }
 
-// ── Health Score composite ────────────────────────────────────
-export function calcHealthScore(
-  usageScore: number,
-  financialScore: number,
-  engagementScore: number,
-  contractScore: number,
-): number {
-  return Math.round(
-    (usageScore * 0.35 + financialScore * 0.25 + engagementScore * 0.20 + contractScore * 0.20) * 100,
-  ) / 100
-}
-
-// ── Indicateur de complétude des données ──────────────────────
-// signals_available / data_completeness_pct : pas un calcul de score, juste
-// un état des lieux "quels signaux étaient réellement disponibles pour ce
-// run" — alimente le futur badge UI "Calculé sur X/4 signaux" (chantier 5.4).
-export function computeSignalsAvailable(
-  usage: UsageStats,
-  hubspot: HubspotData | null,
-  account: Account,
-  subscriptionStatus: SubscriptionStatus,
-): SignalsAvailable {
-  return {
-    financial: subscriptionStatus.hasAny,
-    engagement: hubspot !== null,
-    contract: account.contract_end_date !== null,
-    product_usage: usage.total_events > 0,
-  }
-}
-
-export function computeDataCompletenessPct(signals: SignalsAvailable): number {
-  const values = Object.values(signals)
-  const present = values.filter(Boolean).length
-  return Math.round((present / values.length) * 1000) / 10
-}
-
-// ── Churn Risk Score ──────────────────────────────────────────
-export function calcChurnRiskScore(
-  healthScore: number,
-  invoiceStatus: InvoiceStatus,
-  daysActive: number,
-  account: Account,
-): number {
-  let churnAdditif = 0
-  if (invoiceStatus.has_overdue) churnAdditif += 20          // spec : past_due +20
-  if (daysActive === 0) churnAdditif += 10                   // spec : last_login >45j +10 (aucune activité 30j = proxy)
-
-  if (account.contract_end_date) {
-    const daysUntilRenewal = Math.floor(
-      (new Date(account.contract_end_date).getTime() - Date.now()) / 86400000,
-    )
-    if (daysUntilRenewal <= 30 && daysUntilRenewal >= 0) churnAdditif += 15  // spec : +15
-    if (daysUntilRenewal < 0) churnAdditif += 25
-  }
-
-  return Math.max(0, Math.min(100, Math.round((100 - healthScore + churnAdditif) * 100) / 100))
-}
-
 // ── Segmentation ─────────────────────────────────────────────
 export type SegmentType =
   | 'champions' | 'en_expansion' | 'stables' | 'a_risque_leger'
@@ -214,45 +156,6 @@ export const SYSTEM_SEGMENT_TYPES: SegmentType[] = [
   'en_danger_critique', 'impayes', 'en_churn', 'nouveaux',
   'donnees_insuffisantes',
 ]
-
-/**
- * Determine which segment(s) an account belongs to.
- * Returns an array: score-based segment (mutually exclusive, first match)
- * + lifecycle segment ('nouveaux') which can overlap.
- */
-export function determineSegmentTypes(
-  scores: { health_score: number; churn_risk_score: number; expansion_score: number },
-  mrrCents: number,
-  hasOverdueInvoices: boolean,
-  accountCreatedAt: string,
-): SegmentType[] {
-  const segments: SegmentType[] = []
-
-  // Lifecycle: nouveaux if < 90 days old
-  const daysSinceCreation = Math.floor(
-    (Date.now() - new Date(accountCreatedAt).getTime()) / 86400000,
-  )
-  if (daysSinceCreation < 90) segments.push('nouveaux')
-
-  // Score-based primary segment (mutually exclusive, priority order)
-  if (mrrCents === 0) {
-    segments.push('en_churn')
-  } else if (hasOverdueInvoices) {
-    segments.push('impayes')
-  } else if (scores.churn_risk_score >= 70) {
-    segments.push('en_danger_critique')
-  } else if (scores.churn_risk_score >= 50) {
-    segments.push('a_risque_leger')
-  } else if (scores.health_score >= 80) {
-    segments.push('champions')
-  } else if (scores.expansion_score >= 70 && scores.health_score >= 60) {
-    segments.push('en_expansion')
-  } else {
-    segments.push('stables')
-  }
-
-  return segments
-}
 
 // ════════════════════════════════════════════════════════════
 // SCORING ENGINE V2 (produit) — model_version 'v3' en base
@@ -770,7 +673,7 @@ export type SegmentTypeV3 = Exclude<SegmentType, 'en_expansion'> | 'donnees_insu
 export interface SegmentInputV3 {
   healthScoreStatus: 'complete' | 'partial' | 'insufficient'
   healthScoreBand: 'healthy' | 'watch' | 'at_risk' | null
-  churnRiskBand: 'low' | 'watch' | 'high'
+  churnRiskBand: 'low' | 'watch' | 'high' | 'churned'
   hasExpansionSignal: boolean
   mrrCents: number
   hasOverdueInvoices: boolean

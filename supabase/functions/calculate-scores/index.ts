@@ -57,7 +57,7 @@ interface AccountWithCreatedAt extends Account {
   seat_count: number | null
   billing_interval: string | null
   contract_start_date: string | null
-  churn_risk_band?: 'low' | 'watch' | 'high' | null
+  churn_risk_band?: 'low' | 'watch' | 'high' | 'churned' | null
   health_score_status?: 'complete' | 'partial' | 'insufficient' | null
 }
 
@@ -77,8 +77,8 @@ interface ScoreResult {
   health_score_status: 'complete' | 'partial' | 'insufficient'
   health_score_max_points: number
   health_score_band: 'healthy' | 'watch' | 'at_risk' | null
-  churn_risk_score: number
-  churn_risk_band: 'low' | 'watch' | 'high'
+  churn_risk_score: number | null
+  churn_risk_band: 'low' | 'watch' | 'high' | 'churned'
   risk_signals_triggered: Array<{ code: string; label: string; severity: string; points: number }>
   risk_signals_evaluated: number
   expansion_score: number | null
@@ -408,23 +408,37 @@ function scoreAccountPure(input: ScoreAccountInput, now: number = Date.now()): S
 
   const hasDowngrade6mo = movements6mo.some((m) => m.movement_type === 'contraction')
 
-  const signalInputs: ChurnSignalInputs = {
-    hasInvoiceOverdue15Plus: invoices90d.length > 0 ? hasOverdue15Plus : null,
-    contractionMrr20PctPlus3mo: movements6mo.length > 0 || mrrCurrentCents > 0 ? contraction20PctPlus : null,
-    paymentFailures2PlusIn90d: paymentFailures2Plus,
-    isMonthlyAndTenureUnder6mo: isMonthlyAndYoung,
-    annualRenewal30dPlusWithContraction6mo: annualRenewalSoonWithContraction,
-    hasDowngrade6mo: movements6mo.length > 0 ? hasDowngrade6mo : null,
-    hasInvoiceOverdueUnder15: invoices90d.length > 0 ? hasOverdueUnder15 : null,
-  }
+  const subscriptionCanceled = subscriptions.length > 0 && subscriptions.every((s) => s.status === 'canceled')
 
-  const churn = calcChurnRiskV2(buildChurnSignals(signalInputs))
+  // D1 (2026-08-02) : un compte churné (mrr_cents=0 ou abonnement canceled)
+  // sort du calcul de churn risk — état figé 'churned', pas un score calculé
+  // sur des signaux historiques (invoice/contraction/tenure passés). Un
+  // compte parti n'est pas "à risque", il est perdu. churn_risk_score reste
+  // `null` (S1 : no data ≠ neutral data — pas un 0 qui se lirait comme
+  // "aucun risque"). Ne jamais recalculer sur ce chemin, même si des signaux
+  // seraient techniquement disponibles.
+  const isChurned = mrrCurrentCents === 0 || subscriptionCanceled
+
+  let churn: { churn_risk_score: number | null; churn_risk_band: 'low' | 'watch' | 'high' | 'churned'; risk_signals_triggered: Array<{ code: string; label: string; severity: string; points: number }>; risk_signals_evaluated: number }
+
+  if (isChurned) {
+    churn = { churn_risk_score: null, churn_risk_band: 'churned', risk_signals_triggered: [], risk_signals_evaluated: 0 }
+  } else {
+    const signalInputs: ChurnSignalInputs = {
+      hasInvoiceOverdue15Plus: invoices90d.length > 0 ? hasOverdue15Plus : null,
+      contractionMrr20PctPlus3mo: movements6mo.length > 0 || mrrCurrentCents > 0 ? contraction20PctPlus : null,
+      paymentFailures2PlusIn90d: paymentFailures2Plus,
+      isMonthlyAndTenureUnder6mo: isMonthlyAndYoung,
+      annualRenewal30dPlusWithContraction6mo: annualRenewalSoonWithContraction,
+      hasDowngrade6mo: movements6mo.length > 0 ? hasDowngrade6mo : null,
+      hasInvoiceOverdueUnder15: invoices90d.length > 0 ? hasOverdueUnder15 : null,
+    }
+    churn = calcChurnRiskV2(buildChurnSignals(signalInputs))
+  }
 
   // ── Expansion ──
   const expansion = calcExpansionScoreV2(seatUsagePct, seatUsageUnavailableReason)
   const expansionSignals = calcExpansionSignals(movements6mo, mrrCurrentCents, mrr3moAgoCents)
-
-  const subscriptionCanceled = subscriptions.length > 0 && subscriptions.every((s) => s.status === 'canceled')
 
   return {
     scores: {
@@ -466,7 +480,7 @@ async function assignSegments(
 
   // Build new memberships (upsert to avoid delete+insert visibility gap)
   const memberships: Array<Record<string, unknown>> = []
-  const segmentAggs: Record<string, { count: number; mrrTotal: number; healthSum: number; healthCount: number; churnSum: number }> = {}
+  const segmentAggs: Record<string, { count: number; mrrTotal: number; healthSum: number; healthCount: number; churnSum: number; churnCount: number }> = {}
   const segmentsByAccount = new Map<string, SegmentTypeV3[]>()
   // primary_segment (T0.2, accounts.primary_segment) : premier segment non-'nouveaux'
   // — même règle de priorité que accounts-api (fetchPrimarySegments). 'nouveaux' est
@@ -475,7 +489,7 @@ async function assignSegments(
   const accountIdsBySegment = new Map<SegmentTypeV3, string[]>()
 
   for (const segType of SYSTEM_SEGMENT_TYPES) {
-    segmentAggs[segType] = { count: 0, mrrTotal: 0, healthSum: 0, healthCount: 0, churnSum: 0 }
+    segmentAggs[segType] = { count: 0, mrrTotal: 0, healthSum: 0, healthCount: 0, churnSum: 0, churnCount: 0 }
   }
 
   const now = new Date().toISOString()
@@ -512,7 +526,12 @@ async function assignSegments(
       const agg = segmentAggs[segType]
       agg.count++
       agg.mrrTotal += account.mrr_cents ?? 0
-      agg.churnSum += scores.churn_risk_score
+      // churn_risk_score est `null` pour les comptes churnés (D1) — exclu de
+      // la moyenne plutôt que compté comme 0, même raison que health_score.
+      if (scores.churn_risk_score !== null) {
+        agg.churnSum += scores.churn_risk_score
+        agg.churnCount++
+      }
       // health_score peut être null (status='insufficient') — exclu de la
       // moyenne plutôt que compté comme 0 (S1 : no data ≠ neutral data).
       if (scores.health_score !== null) {
@@ -591,7 +610,7 @@ async function assignSegments(
         account_count: agg.count,
         mrr_total_cents: agg.mrrTotal,
         avg_health_score: agg.healthCount > 0 ? Math.round((agg.healthSum / agg.healthCount) * 100) / 100 : null,
-        avg_churn_risk: agg.count > 0 ? Math.round((agg.churnSum / agg.count) * 100) / 100 : null,
+        avg_churn_risk: agg.churnCount > 0 ? Math.round((agg.churnSum / agg.churnCount) * 100) / 100 : null,
         last_calculated_at: now,
       })
       .eq('id', segId)

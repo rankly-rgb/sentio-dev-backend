@@ -4,6 +4,104 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Churn Risk — état figé "churned" pour les comptes partis (2026-08-02, D1/C2.1)
+
+Décision produit D1 (audit rétention 2026-08) : un compte à `mrr_cents = 0` ou dont l'abonnement est `canceled` recevait jusqu'ici un `churn_risk_score` calculé normalement sur ses signaux historiques (factures en retard passées, contraction MRR passée, etc.) — d'où des comptes déjà partis affichés à "92% de risque de churn critique". Un compte parti n'est pas à risque, il est perdu.
+
+**Changements :**
+- `calculate-scores/index.ts` (`scoreAccountPure`) : `subscriptionCanceled` calculé avant le scoring churn (au lieu d'après) ; si `mrr_cents === 0 || subscriptionCanceled`, court-circuite entièrement `buildChurnSignals`/`calcChurnRiskV2` — aucun signal n'est évalué. Retourne `{ churn_risk_score: null, churn_risk_band: 'churned', risk_signals_triggered: [], risk_signals_evaluated: 0 }`. `churn_risk_score` reste `NULL` (déjà nullable en base) — pas de clamp à 0, qui se lirait comme "aucun risque" plutôt que "non applicable" (S1 : no data ≠ neutral data).
+- `_shared/scoring.ts` : `SegmentInputV3.churnRiskBand` élargi à `'low' | 'watch' | 'high' | 'churned'`. `determineSegmentTypesV3` assignait déjà `en_churn` sur ce même critère (`mrrCents === 0 || subscriptionCanceled`) — les deux sont maintenant réconciliés : un compte du segment `en_churn` porte systématiquement `churn_risk_band = 'churned'`, plus jamais un score/band calculé.
+- Migration `20260802000001_churn_risk_band_churned_state.sql` : élargit les CHECK constraints `accounts_churn_risk_band_check` / `score_history_churn_risk_band_check` (`'low'/'watch'/'high'` → `+'churned'`), posées par `20260725000001_scoring_engine_v3.sql`. Sans cette migration, le premier `calculate-scores` écrivant `'churned'` aurait échoué sur la contrainte existante pour tout compte churné.
+- `assignSegments` : agrégat `avg_churn_risk` par segment — `churn_risk_score` étant désormais `null` pour les comptes churnés, ajout d'un compteur `churnCount` dédié (même pattern que `healthCount`/`health_score`) pour exclure ces comptes de la moyenne au lieu de les compter comme 0.
+- `export-csv/index.ts` : `.order('churn_risk_score', { ascending: false })` → ajout de `nullsFirst: false`. Sans ce changement, un compte churné (`churn_risk_score = null`) serait remonté en tête de tri (comportement par défaut de Postgres : NULL trié en premier en ordre DESC) — soit l'inverse exact de l'objectif de cette décision. Vérifié que les 4 autres endpoints triant par `churn_risk_score` DESC (`churn-alert`, `onboarding-status`, `weekly-digest`, `get-top-churn-risks`) filtrent déjà `churn_risk_band = 'high'` ou `.not('churn_risk_score', 'is', null)` — non affectés.
+
+**Hors scope de ce chantier** (C2.2, séparé) : exclusion explicite des comptes `churned` des KPIs "accounts at risk" / "MRR at risk" agrégés côté `get-today-status`/`dashboard-api`/`accounts-api` — ces endpoints excluent déjà naturellement les comptes à `churn_risk_score IS NULL` de leurs seuils numériques (`> 70` etc., NULL exclu par la sémantique SQL des comparaisons), mais une revue explicite reste à faire pour confirmer qu'aucun comptage n'agrège différemment.
+
+**Tests** : `supabase/tests/calculate-scores-churn.test.ts` (nouveau, 6 tests) — mirror de la décision `isChurned`/état figé, `calculate-scores/index.ts` ne peut pas être importé directement dans Vitest (imports `jsr:`), même convention que `churn-alert.test.ts`.
+
+---
+
+## Devise — retrait des symboles € codés en dur (2026-08-02, E1.2/E1.3 partiel)
+
+Audit préalable (audit rétention 2026-08, décision produit D4 — anglais/en-US intégral) : la conversion FR→EN de l'UI et du contenu généré était déjà faite avant cet audit (aucun toggle FR/EN, `src/i18n/en.ts` seul fichier i18n, aucune chaîne française dans le contenu généré `generate-insights`/`account-summary`). Le seul écart réel trouvé : le symbole `€` codé en dur dans 6 fichiers backend, alors qu'aucune colonne de devise n'existe nulle part dans le schéma (`organizations`/`accounts` n'ont pas de champ `currency` — seules `invoices`/`subscriptions` stockent une devise Stripe par transaction).
+
+**Changements** (symbole `$` par défaut, formatage `en-US` avec séparateurs de milliers ; résolution complète depuis le compte Stripe connecté reste un chantier séparé — aucun champ `currency` org-level n'existe encore pour la porter) :
+- `_shared/insight-rules.ts` : `mrrEur` → `mrrUsd`, retourne désormais `$1,234` (le `€` littéral était concaténé séparément à chaque site d'appel)
+- `_shared/score-narratives.ts` : `narrativePaymentHealth` (chemin V3 actif) — `€` → `$`. `narrativeFinancial` (V1, zéro appelant — même statut que les fonctions supprimées ci-dessous) non touché, hors scope de ce fix
+- `weekly-digest/index.ts` : `formatMrr` retourne `$1,234` ; `accountRow` réutilise `formatMrr` au lieu d'un `Math.round` sans séparateur de milliers (bug de formatage additionnel corrigé au passage)
+- `churn-alert/index.ts` : même correction de formatage (séparateurs de milliers + `$`)
+- `account-summary/index.ts` : prompt IA — `mrr_euros` renommé `mrr_usd`, `€` → `$` (impacte directement le texte généré par le LLM)
+- `export-csv/index.ts` : en-tête CSV `MRR (€)` → `MRR ($)`
+- `_shared/connectors/slack.ts` : message Slack sortant (notification playbook vers le Slack du client) — `€` → `$`. Le nom de champ `mrr_eur` du contrat `ConnectorPayload` (payload webhooks sortants Brevo/HubSpot/Mailchimp/etc., documenté dans le changelog "Outbound Webhook System v1") n'est **pas** renommé — c'est un contrat externe déjà documenté, un renommage serait cassant pour des intégrations clientes existantes.
+
+**Non touché intentionnellement** : `stripe-product-mappings-api/index.ts` (déjà correctement conditionné sur `price.currency`, pas un hardcode) ; log d'alerte Slack interne de `sync-stripe` (alerte ops Sentio, pas une sortie produit consommée par l'utilisateur final).
+
+**Tests** : `insight-rules.test.ts`, `churn-alert.test.ts`, `export-csv.test.ts` — assertions `€` → `$` mises à jour.
+
+---
+
+## Playbooks — garde-fou eligibility_criteria vide/absent (2026-08-02, C2.5)
+
+Audit préalable (hypothèse "291/291 comptes ciblés" du rapport d'audit) : `evaluateConditions` (`_shared/playbook-engine.ts`) matchait tous les comptes quand `eligibility_criteria` était `null` ou `{ conditions: [] }`. Confirmé dangereux en pratique dans `playbook-scheduler/index.ts` : quand un playbook n'a **ni** `segment_id` **ni** `eligibility_criteria` significatif, la requête de résolution des comptes (`accountQuery`) ne pose alors aucune autre limite que `MAX_ACCOUNTS_PER_PLAYBOOK` — un playbook automatique mal configuré s'exécutait silencieusement sur la totalité du portefeuille de l'org, sans qu'aucun garde-fou ne s'en aperçoive.
+
+**Changements :**
+- `_shared/playbook-engine.ts` : `ConditionGroup` gagne un champ `match_all?: boolean`. `evaluateConditions` ne matche plus rien par défaut pour un groupe `null`/`undefined`/`conditions: []` — seul `match_all: true` explicite restaure ce comportement. `validateConditions` valide et propage ce nouveau champ.
+- `playbook-execute/index.ts` : suppression du bypass `playbook.eligibility_criteria ? ... : accounts` sur le chemin **segment_id** (résolution automatique/bulk) — passe désormais toujours par `evaluateConditions`. Le chemin **account_ids** (sélection manuelle explicite, ex. futur "Run this playbook on this account" depuis une carte insight, D2) reste volontairement **non filtré** par eligibility_criteria : une sélection humaine explicite exprime déjà l'intention, la re-filtrer risquerait de ne rien exécuter silencieusement sur le compte pourtant choisi.
+- `playbook-scheduler/index.ts` : même suppression du bypass — aucune notion de sélection manuelle ici (100% cron-driven), le garde-fou s'applique donc sans exception.
+- Migration `20260802000003_playbook_eligibility_match_all_backfill.sql` : backfill de tous les playbooks existants dont `eligibility_criteria` est `null` ou `conditions: []`, vers un `match_all: true` explicite — préserve exactement leur comportement actuel (rien ne s'arrête de s'exécuter silencieusement suite à ce chantier). Idempotent.
+- **Bug latent trouvé au passage** : le template `PLAYBOOK_TEMPLATES_V1['churn-critical-alert']` déclarait `eligibility_criteria: { mrr_cents_min: 1 }` — un raccourci qui n'a jamais été un `ConditionGroup` valide. `playbook-crud handleCreate` contournait `validateConditions` spécifiquement pour les playbooks créés depuis un template (`if (body.from_template_id) { validatedEligibility = body.eligibility_criteria }`), stockant cet objet non conforme tel quel. `evaluateConditions` l'aurait silencieusement traité comme "vide" dans les deux cas (avant ce chantier : matche tout ; après : ne matcherait plus rien, une régression fonctionnelle pour ce template précis). Corrigé : le template déclare désormais un vrai `ConditionGroup` (`mrr_cents > 0`), et le bypass de validation est supprimé — tout eligibility_criteria, template ou non, passe par `validateConditions`.
+
+**Non vérifié dans ce chantier** : la config réelle des playbooks en environnement prod/démo (hypothèse "291/291" du rapport) — aucun accès à une base de données réelle depuis cet environnement de développement. Le correctif de code + la migration de backfill rendent la question sans objet pour l'avenir (le défaut dangereux n'existe plus), mais une vérification a posteriori sur l'historique d'exécution réel resterait utile pour confirmer le diagnostic.
+
+**Tests** : `supabase/tests/playbook-engine.test.ts` — 3 tests existants mis à jour (le défaut n'est plus "matche tout"), 4 nouveaux tests sur `match_all` (évaluation + validation).
+
+---
+
+## Today Actions — source de vérité unique insights + playbooks (2026-08-02, C2.4a)
+
+Audit préalable : la page "Today" affichait deux nombres de deux sources totalement indépendantes sur le même écran — le statut portefeuille (`get-today-status`, basé sur `ai_insights`) et le total "priority actions" (calculé 100% côté client dans `src/lib/types/today-actions.ts`, basé uniquement sur le matching `eligibility_criteria` des playbooks actifs, sans aucune notion d'insight). D'où la contradiction trouvée par l'audit : "portfolio stable" + "0 priority actions" alors que 206 insights critiques étaient actifs — un compte avec un insight critique mais qu'aucun playbook ne ciblait n'apparaissait tout simplement nulle part dans le calcul côté client.
+
+**Changements :**
+- `_shared/today-actions-helpers.ts` (nouveau) : port du calcul `today-actions.ts` frontend, avec une différence de fond — `computeTodayActions` inclut désormais un compte s'il matche un playbook actif **OU** s'il porte au moins un insight actif, les deux mécanismes alimentant la même liste dédupliquée par compte. Réutilise `evaluateConditions`/`ConditionGroup` de `_shared/playbook-engine.ts` (déjà existant, zéro nouvelle implémentation du matching). `computePriority` prend désormais aussi en compte la priorité de l'insight le plus urgent du compte (un insight `critical` ne peut jamais laisser un compte en dessous de P0, quels que soient ses scores). `determinePortfolioStatus(criticalInsightCount, totalActions)` formalise la règle non négociable : `criticalInsightCount > 0` ⇒ jamais `'stable'` ; sinon `totalActions > 0` ⇒ `'attention_needed'` ; sinon `'stable'`.
+- `get-today-actions/index.ts` (nouvelle Edge Function, `GET`, JWT vérifié dans le code) : fetch accounts (comptes churnés exclus, D1) + playbooks actifs + insights actifs de l'org, calcule via le helper ci-dessus, retourne `{ status, total, by_priority, by_category, mrr_at_risk_cents, actions }`. C'est le contrat que consommera la Phase Today du frontend (C2.4b) à la place du calcul client-side actuel.
+
+**Décision de périmètre — `get-today-status`/`dashboard-api` non modifiés.** Leur logique de comptage `critical_count`/`p0_insights_count` (corrigée en C2.2 pour exclure les comptes churnés) reste correcte et testée en l'état — le bug réel n'était pas dans leur calcul mais dans l'absence totale de lien entre le statut portefeuille et le total "priority actions" affiché côté client. Faire consommer ce nouveau helper à ces deux fonctions n'aurait rien corrigé de plus et risquait de régresser du code déjà validé ; réévaluer seulement si un besoin concret apparaît.
+
+**Tests** : `supabase/tests/today-actions-helpers.test.ts` (nouveau, 24 tests) — dont un test de non-régression explicite sur la contradiction trouvée par l'audit (`determinePortfolioStatus(206, 0)` ne peut jamais retourner `'stable'`).
+
+---
+
+## Churn Risk — exclusion des comptes churnés des KPIs/listes "at risk" (2026-08-02, C2.2)
+
+Suite de C2.1 (état figé `churn_risk_band='churned'`) : audit de tous les points du backend calculant un KPI ou une liste "at risk"/"critical"/"danger", pour confirmer qu'aucun ne pouvait encore afficher un compte churné comme s'il était à risque.
+
+**Confirmés déjà corrects (aucun changement)** — `get_portfolio_snapshot` (`at_risk_count`/`scored_accounts_count` filtrent déjà via la sémantique NULL de SQL), `churn-alert`/`onboarding-status`/`weekly-digest`/`get-top-churn-risks` (filtrent déjà `churn_risk_band='high'` ou `.not('churn_risk_score','is',null)`), `get-accounts-summary` (filtre déjà `mrr_cents > 0` en amont, commentaire explicite déjà présent), `outbound-webhook-dispatch`/`playbook-executor`/`playbook-execute`/`playbook-scheduler` (comparaisons numériques `churn_risk_score >= seuil` — `null` coerce à `0` en JS, un compte churné ne matche donc plus aucun seuil de déclenchement).
+
+**Corrigés :**
+- `get-today-status/index.ts` : `critical_count` comptait tout insight actif `priority='critical'`, y compris ceux restés actifs sur un compte devenu churné entre deux runs de `generate-insights`. Requête restructurée pour exclure les insights dont le compte a `churn_risk_band='churned'` (nouvelle fonction pure `countCriticalExcludingChurned`, testée).
+- `dashboard-api/index.ts` (`handleBriefing`) : même correctif sur `p0_insights_count` (source du "N pending P0 actions" du `DailyBriefing`) — même fonction dupliquée localement (pas d'abstraction partagée pour 3 lignes).
+- `generate-insights/index.ts` : root-cause — un compte à `mrr_cents=0` ne génère plus aucun insight (`payment_risk`/`renewal_alert`/`expansion_opportunity`/`usage_drop` pouvaient encore se déclencher sur des données historiques d'un compte déjà parti). `candidates=[]` déclenche l'auto-résolution déjà existante de `syncInsights` pour tout insight resté actif — corrige le problème à la source plutôt que de le filtrer en aval à chaque consommateur.
+- Migration `20260802000002_accounts_priority_exclude_churned.sql` : la vue `accounts_with_priority` (alimente la colonne priorité de la page Accounts) pouvait classer un compte churné en `critical`/`watch` via sa branche de repli `health_score <= 30/55` — `health_score` n'est pas gelé par D1, un compte qui vient de churner avec des factures impayées historiques peut avoir un `payment_health_score` bas. Nouvelle branche `churn_risk_band='churned' → 'churned'` évaluée en premier.
+- `onboarding-first-win/index.ts` : `at_risk_accounts` (top 3 du "aha moment" vu par un nouvel utilisateur), `mrr_at_risk` et `global_health_score` étaient calculés sur `health_score` seul, sans exclusion des comptes churnés — même gap que ci-dessus. Filtre `churn_risk_band != 'churned' OR IS NULL` ajouté (le `OR IS NULL` évite d'exclure par accident un compte pas encore scoré — `.neq()` seul aurait aussi droppé les NULL, sémantique SQL).
+
+**Trouvé mais hors scope de ce chantier** : `AccountPriorityLabel` côté frontend (`src/lib/types/accounts.ts`) attend encore les valeurs françaises historiques (`'critique'/'surveillance'/'nouveau'`) alors que `accounts_with_priority` produit des valeurs anglaises (`'critical'/'watch'/'new'`) depuis la migration `20260725000002` — contrat déjà cassé indépendamment de ce chantier (`PRIORITY_STYLES`/`fr.accountPriority` ne matchent aucune valeur sauf `'stable'`, badge de priorité probablement vide en prod pour tout compte critique/watch/new). Nécessite son propre ticket — au minimum ajouter `'churned'` à ce contrat en même temps que la correction FR→EN.
+
+**Tests** : `supabase/tests/get-today-status.test.ts` — 5 nouveaux tests sur `countCriticalExcludingChurned`.
+
+---
+
+## AI Insights — Contrat de pagination corrigé (2026-08-02, P0.2)
+
+Audit préalable (audit rétention 2026-08) : `insights-crud handleList` retournait `{ insights, total_count, critical_count }` avec des query params `limit`/`offset` (contrat du 2026-07-05 ci-dessous), mais le frontend envoyait `page`/`per_page`/`sort` et lisait `listData?.data`/`listData?.pagination` — contrat cassé des deux côtés, probable cause d'une partie des symptômes de fatigue d'alerte observés (liste d'insights potentiellement vide/mal rendue en prod).
+
+**Changements :**
+- `insights-crud/index.ts` : `parseLimit`/`parseOffset` remplacés par `parsePage`/`parsePerPage` (1-indexé, `per_page` défaut 20 / max 100). `handleList` retourne désormais `{ data, pagination: { page, per_page, total_count }, critical_count }`. Le paramètre `sort` est accepté (le frontend l'envoie systématiquement) mais sans effet — le tri reste fixe côté SQL, requis par le `DISTINCT ON` de déduplication.
+- `docs/PROMPT_FRONTEND_INSIGHTS_V1.md` mis à jour avec le contrat actuel et un historique des 3 formes successives de cet endpoint.
+
+**Tests** : `supabase/tests/insights-crud.test.ts` — `parsePage`/`parsePerPage` remplacent `parseLimit`/`parseOffset` (mêmes bornes, nouveau défaut `page=1`).
+
+---
+
 ## Accounts — priority_label calculé (2026-07-05)
 
 Audit préalable : aucune vue SQL n'existait sur `accounts` (aucun fichier sous `supabase/views/`), et `accounts-api` (seul endpoint de liste de comptes — il n'y a pas de fonction `get-accounts`) sélectionnait directement la table `accounts` sans label de priorité calculé.

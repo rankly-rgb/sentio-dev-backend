@@ -162,17 +162,18 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     }
   }
 
-  // Validate eligibility_criteria (optional)
+  // Validate eligibility_criteria (optional) — C2.5 : plus de bypass pour les
+  // playbooks créés depuis un template. Un ancien shorthand de template non
+  // conforme au schéma ConditionGroup (ex. `{ mrr_cents_min: 1 }`) était
+  // stocké tel quel sans validation, silencieusement ignoré par
+  // evaluateConditions au moment de l'exécution — les templates déclarent
+  // désormais un ConditionGroup valide (voir PLAYBOOK_TEMPLATES_V1).
   let validatedEligibility: unknown = null
   if (body.eligibility_criteria) {
-    if (body.from_template_id) {
-      validatedEligibility = body.eligibility_criteria
-    } else {
-      try {
-        validatedEligibility = validateConditions(body.eligibility_criteria)
-      } catch (err) {
-        return errorResponse(err instanceof Error ? err.message : 'Invalid eligibility_criteria', 400)
-      }
+    try {
+      validatedEligibility = validateConditions(body.eligibility_criteria)
+    } catch (err) {
+      return errorResponse(err instanceof Error ? err.message : 'Invalid eligibility_criteria', 400)
     }
   }
 
