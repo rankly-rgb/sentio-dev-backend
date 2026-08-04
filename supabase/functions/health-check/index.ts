@@ -4,13 +4,50 @@
 // stale cron locks, and stuck syncs.
 // ============================================================
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
+import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse, errorResponse } from '../_shared/supabase-client.ts'
+import { verifyUserAuth } from '../_shared/auth.ts'
 
 interface HealthCheck {
   name: string
   status: 'ok' | 'warning' | 'critical'
   message?: string
+}
+
+// Seuil de fraîcheur (docs/openspec.md Phase 3, miroir du contrat frontend
+// déjà déclaré — src/types/ops.ts HealthCheckResponse.hubspot_stale —
+// jamais réellement peuplé côté backend avant ce chantier). sync-stripe et
+// sync-hubspot tournent quotidiennement (CLAUDE.md) : > 48h = au moins
+// 2 runs manqués consécutifs.
+const STALE_THRESHOLD_HOURS = 48
+
+interface SyncFreshness {
+  stale: boolean
+  lastSyncHoursAgo: number | null
+}
+
+async function computeSyncFreshness(
+  supabase: SupabaseClient,
+  organizationId: string,
+  syncSource: 'stripe' | 'hubspot',
+): Promise<SyncFreshness> {
+  const { data } = await supabase
+    .from('data_syncs')
+    .select('completed_at')
+    .eq('organization_id', organizationId)
+    .eq('sync_source', syncSource)
+    .eq('sync_status', 'completed')
+    .order('completed_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (!data?.completed_at) {
+    return { stale: true, lastSyncHoursAgo: null }
+  }
+
+  const hoursAgo = (Date.now() - new Date(data.completed_at).getTime()) / (1000 * 60 * 60)
+  return { stale: hoursAgo > STALE_THRESHOLD_HOURS, lastSyncHoursAgo: Math.round(hoursAgo * 10) / 10 }
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -105,6 +142,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
     checks.push({ name: 'dlq', status: 'warning', message: 'Could not check DLQ' })
   }
 
+  // Fraîcheur de sync par org (docs/openspec.md Phase 3) — endpoint
+  // volontairement appelable sans JWT (moniteur externe existant), un JWT
+  // valide ajoute simplement les champs *_stale/*_sync_hours_ago pour
+  // l'org résolue. stripe_stale mirrore exactement hubspot_stale, jusque-là
+  // déclaré côté frontend (src/types/ops.ts) mais jamais réellement peuplé.
+  let freshnessFields: Record<string, boolean | number | null> = {}
+  try {
+    const { organizationId } = await verifyUserAuth(req)
+    const [stripeFreshness, hubspotFreshness] = await Promise.all([
+      computeSyncFreshness(supabase, organizationId, 'stripe'),
+      computeSyncFreshness(supabase, organizationId, 'hubspot'),
+    ])
+    freshnessFields = {
+      stripe_stale: stripeFreshness.stale,
+      last_stripe_sync_hours_ago: stripeFreshness.lastSyncHoursAgo,
+      hubspot_stale: hubspotFreshness.stale,
+      last_hubspot_sync_hours_ago: hubspotFreshness.lastSyncHoursAgo,
+    }
+  } catch {
+    // Pas de JWT (ou invalide) — comportement inchangé pour les moniteurs
+    // externes non authentifiés, champs de fraîcheur simplement absents.
+  }
+
   const statusCode = overallStatus === 'unhealthy' ? 503 : 200
-  return jsonResponse({ status: overallStatus, checks, timestamp: new Date().toISOString() }, statusCode)
+  return jsonResponse({ status: overallStatus, checks, timestamp: new Date().toISOString(), ...freshnessFields }, statusCode)
 })

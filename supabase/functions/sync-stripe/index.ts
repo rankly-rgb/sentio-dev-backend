@@ -94,6 +94,18 @@ interface StripeInvoice {
   status_transitions?: { paid_at?: number | null }
 }
 
+// Détection du profil de facturation (Phase 3, docs/openspec.md §11) —
+// signaux détectables sans coût (données déjà en mémoire pendant le sync)
+// sauf has_subscription_schedules (un appel Stripe dédié, limit=1).
+interface BillingProfileCounts {
+  metered_subscriptions: number
+  multi_item_subscriptions: number
+  null_unit_amount_prices: number
+  invoice_only_accounts: number
+  multi_currency: boolean
+  has_subscription_schedules: boolean
+}
+
 // ── Helpers Stripe API ────────────────────────────────────────
 async function stripeGet<T>(
   path: string,
@@ -265,8 +277,20 @@ async function syncSubscriptions(
   apiKey: string,
   logger: DataSyncLogger,
   restatementMode = false,
-): Promise<{ anomalyDetected: boolean }> {
+): Promise<{ anomalyDetected: boolean; billingProfile?: BillingProfileCounts }> {
   const extraParams: Record<string, string> = { status: 'all' }
+
+  // Détection du profil de facturation (Phase 3, docs/openspec.md §11) —
+  // compteurs bruts calculés en marge du même passage sur les subscriptions
+  // de l'org, zéro appel Stripe supplémentaire (sauf has_subscription_schedules).
+  const billingProfileCounts: BillingProfileCounts = {
+    metered_subscriptions: 0,
+    multi_item_subscriptions: 0,
+    null_unit_amount_prices: 0,
+    invoice_only_accounts: 0,
+    multi_currency: false,
+    has_subscription_schedules: false,
+  }
 
   // Pre-build stripe_customer_id → account.id Map (eliminates N+1 queries)
   // + snapshot du MRR/mrr_status actuels pour détecter les mouvements
@@ -330,6 +354,13 @@ async function syncSubscriptions(
       if (sub.canceled_at > existing) accountLatestCanceledAt.set(accountId, sub.canceled_at)
     }
 
+    // Compteurs de profil de facturation (Phase 3) — indépendants du statut,
+    // une subscription non-standard reste un signal même si canceled.
+    const items = sub.items?.data ?? []
+    if (items.length > 1) billingProfileCounts.multi_item_subscriptions++
+    if (items.some((i) => i.price.recurring?.usage_type === 'metered')) billingProfileCounts.metered_subscriptions++
+    if (items.some((i) => i.price.unit_amount === null || i.price.unit_amount === undefined)) billingProfileCounts.null_unit_amount_prices++
+
     const mrrResult = calcSubscriptionMrrCents(sub)
     const qty = sub.items?.data?.[0]?.quantity ?? sub.quantity ?? 1
 
@@ -381,6 +412,22 @@ async function syncSubscriptions(
   }
 
   const orgMajorityCurrency = detectOrgMajorityCurrency(orgSubscriptionCurrencies)
+  billingProfileCounts.multi_currency = new Set(
+    orgSubscriptionCurrencies.map((c) => c.currency).filter((c): c is string => c !== null),
+  ).size > 1
+
+  // has_subscription_schedules : un seul appel Stripe dédié, limit=1 — ne
+  // sert qu'à savoir si l'org en utilise, jamais à en lire le détail dans
+  // cette itération (docs/openspec.md §8.3, hors périmètre de calcul MRR).
+  try {
+    const schedules = await stripeGet<StripeListResponse<{ id: string }>>('/subscription_schedules', apiKey, { limit: '1' })
+    billingProfileCounts.has_subscription_schedules = schedules.data.length > 0
+  } catch (err) {
+    console.warn(JSON.stringify({
+      level: 'warn', function_name: 'sync-stripe', organization_id: organizationId,
+      message: `subscription_schedules check failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+    }))
+  }
 
   // Devise d'affichage de l'org : vote majoritaire sur les subscriptions de
   // CE run (docs/openspec.md §9), remplace l'ancienne convention "première
@@ -558,7 +605,7 @@ async function syncSubscriptions(
       message: `restatement_mode: ${restatementRows.length}/${customerToAccount.size} comptes restated, 0 mrr_movements générés`,
     }))
 
-    return { anomalyDetected: false }
+    return { anomalyDetected: false, billingProfile: billingProfileCounts }
   }
 
   // Phase 3 : générer les mrr_movements — classification centralisée
@@ -627,7 +674,7 @@ async function syncSubscriptions(
     }
   }
 
-  return { anomalyDetected: false }
+  return { anomalyDetected: false, billingProfile: billingProfileCounts }
 }
 
 // ── Sync invoices ─────────────────────────────────────────────
@@ -637,7 +684,7 @@ async function syncInvoices(
   apiKey: string,
   logger: DataSyncLogger,
   createdAfter?: number,
-): Promise<void> {
+): Promise<{ invoiceOnlyAccountsCount: number }> {
   const extraParams: Record<string, string> = {}
   if (createdAfter) extraParams['created[gt]'] = String(createdAfter)
 
@@ -727,6 +774,8 @@ async function syncInvoices(
       message: `${orphaned} invoices skipped — no matching account (expected during initial sync)`,
     }))
   }
+
+  return { invoiceOnlyAccountsCount: invoiceOnlyAccountIds.length }
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
@@ -884,14 +933,45 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   try {
     await syncCustomers(supabase, organizationId, apiKey, logger, createdAfter)
-    const { anomalyDetected } = await syncSubscriptions(supabase, organizationId, apiKey, logger, restatementMode)
-    await syncInvoices(supabase, organizationId, apiKey, logger, createdAfter)
+    const { anomalyDetected, billingProfile } = await syncSubscriptions(supabase, organizationId, apiKey, logger, restatementMode)
+    const { invoiceOnlyAccountsCount } = await syncInvoices(supabase, organizationId, apiKey, logger, createdAfter)
 
     if (anomalyDetected) {
       // 'validation_error' — CHECK data_syncs_error_type_check n'inclut pas de valeur
       // dédiée aux anomalies de données, c'est la plus proche sémantiquement.
       await logger.fail('MRR anomaly detected — accounts write blocked for this run', 'validation_error')
       return errorResponse('Sync completed with MRR anomaly — accounts write blocked, see logs/Slack', 409)
+    }
+
+    // Profil de facturation (Phase 3, docs/openspec.md §11) : agrège les
+    // compteurs de syncSubscriptions avec le compte invoice_only calculé
+    // par syncInvoices (qui tourne après, seul à avoir la vue complète
+    // invoices × subscriptions). needs_review si un signal de configuration
+    // Stripe non-standard a été détecté — multi_item_subscriptions n'en
+    // fait volontairement pas partie : les subscriptions multi-items sont
+    // désormais correctement chiffrées par le moteur (Phase 2.2), ce n'est
+    // plus une limitation, juste une donnée de diagnostic.
+    if (billingProfile) {
+      const flags = { ...billingProfile, invoice_only_accounts: invoiceOnlyAccountsCount }
+      const needsReview = flags.invoice_only_accounts > 0
+        || flags.metered_subscriptions > 0
+        || flags.null_unit_amount_prices > 0
+        || flags.multi_currency
+        || flags.has_subscription_schedules
+
+      const { error: profileError } = await supabase
+        .from('organizations')
+        .update({
+          billing_profile_flags: flags,
+          billing_profile: needsReview ? 'needs_review' : 'standard',
+        })
+        .eq('id', organizationId)
+      if (profileError) {
+        console.error(JSON.stringify({
+          level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
+          message: `Failed to update billing_profile_flags: ${profileError.message}`,
+        }))
+      }
     }
 
     await supabase

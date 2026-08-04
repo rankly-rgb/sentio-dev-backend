@@ -288,8 +288,12 @@ Complémentaire à `get-onboarding-status-v2`.
 | | |
 |---|---|
 | **URL** | `https://upqakxuatlshhqiagbqw.supabase.co/functions/v1/onboarding-status` |
-| **GET** | Retourne `stripe_connected`, `stripe_sync_in_progress`, `first_score_calculated`, `current_step`, `at_risk_count` |
+| **GET** | Retourne `stripe_connected`, `stripe_sync_in_progress`, `first_score_calculated`, `current_step`, `at_risk_count`, `billing_profile`, `billing_profile_flags` |
 | **PATCH** | `{ field: 'first_win_seen' \| 'onboarding_completed', value: true }` |
+
+**`billing_profile`** (Phase 3, docs/openspec.md §11) : `'standard' \| 'needs_review' \| null`. `null` tant qu'aucun sync Stripe complet n'a encore tourné pour l'org (colonne DB par défaut `'standard'`, mais ce champ de réponse reflète explicitement "pas encore de signal" plutôt que d'implicitement laisser croire à un profil vérifié). `'needs_review'` dès que `sync-stripe` a détecté un signal de configuration Stripe non-standard sur ce dernier run (voir `billing_profile_flags`) : comptes facturés manuellement (`invoice_only_accounts`), abonnements usage-based (`metered_subscriptions`), prix sans `unit_amount` (`null_unit_amount_prices`), plusieurs devises (`multi_currency`), ou `subscription_schedules` détectés (`has_subscription_schedules`). `multi_item_subscriptions` (comptage informatif) n'influence jamais ce statut — les abonnements multi-items sont correctement chiffrés depuis le moteur MRR v2.
+
+**`billing_profile_flags`** : `{ metered_subscriptions: number, multi_item_subscriptions: number, null_unit_amount_prices: number, invoice_only_accounts: number, multi_currency: boolean, has_subscription_schedules: boolean } | null`.
 
 ### integrations-config (GET/POST)
 
@@ -468,13 +472,15 @@ Données agrégées pour la page "Aujourd'hui".
       "delta": -19,
       "direction": "degraded",
       "main_dimension": "usage"
-    }
+    },
+    "billing_profile": "standard"
   }
 }
 ```
 
 `health_trend` : `"up" | "down" | "stable" | "unknown"`  
 `insight_du_jour` : `null` si aucun compte n'a bougé significativement.
+`billing_profile` (Phase 3, docs/openspec.md §11) : `"standard" | "needs_review" | null` — même champ/mêmes valeurs que `onboarding-status`, voir cette section pour le détail des signaux qui déclenchent `needs_review`.
 
 **GET /wins** — Comptes améliorés sur les 7 derniers jours
 
@@ -753,6 +759,42 @@ Envoie un payload de test vers une destination outbound configurée (sans attend
 ```
 
 **Codes d'erreur** : `400`, `401`, `404` (destination inconnue ou autre org), `500`
+
+---
+
+## Ops
+
+### health-check (GET/POST)
+
+Statut système global (DB, cron locks, syncs bloqués, DLQ). Appelable **sans authentification** (moniteur externe existant, `verify_jwt=false`) — un `Authorization: Bearer <jwt_utilisateur>` valide ajoute en plus les champs de fraîcheur de sync pour l'org résolue depuis ce JWT (Phase 3, docs/openspec.md).
+
+| | |
+|---|---|
+| **URL** | `.../functions/v1/health-check` |
+| **Méthode** | `GET` ou `POST` |
+| **Auth** | Aucune (obligatoire) — JWT utilisateur optionnel pour les champs de fraîcheur |
+
+**Response 200 (sans JWT)**
+```json
+{ "status": "ok", "checks": [...], "timestamp": "2026-08-04T12:00:00Z" }
+```
+
+**Response 200 (avec JWT utilisateur valide)**
+```json
+{
+  "status": "ok",
+  "checks": [...],
+  "timestamp": "2026-08-04T12:00:00Z",
+  "stripe_stale": false,
+  "last_stripe_sync_hours_ago": 3.2,
+  "hubspot_stale": true,
+  "last_hubspot_sync_hours_ago": null
+}
+```
+
+`*_stale` : `true` si le dernier sync `completed` de cette source a plus de 48h, ou si aucun sync `completed` n'existe encore pour cette org. `last_*_sync_hours_ago` : `null` si jamais synced, sinon un nombre (peut dépasser largement 48 si le sync est en panne depuis longtemps — jamais plafonné). `stripe_stale` reprend exactement le même contrat que `hubspot_stale` (déjà déclaré côté frontend, `src/types/ops.ts`, avant ce chantier — mais jamais réellement peuplé par le backend jusqu'ici).
+
+**Codes d'erreur** : `500` (config serveur manquante), `503` (statut `unhealthy`)
 
 ---
 

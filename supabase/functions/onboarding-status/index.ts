@@ -137,7 +137,7 @@ async function handleGetStatus(
   // data_syncs utilisé uniquement pour le statut running du sync en cours
   const [orgRes, stripeSyncRunningRes, accountsCountRes, atRiskCountRes] = await Promise.all([
     supabase.from('organizations')
-      .select('stripe_connected, hubspot_connected, first_score_calculated_at, aha_moment_seen_at, onboarding_completed')
+      .select('stripe_connected, hubspot_connected, first_score_calculated_at, aha_moment_seen_at, onboarding_completed, billing_profile, billing_profile_flags')
       .eq('id', orgId)
       .maybeSingle(),
     supabase.from('data_syncs')
@@ -215,6 +215,12 @@ async function handleGetStatus(
       accounts_count: accountsCount,
       at_risk_count: atRiskCount,
       top_risk_account: topRiskAccount,
+      // Phase 3 (docs/openspec.md §11) : 'needs_review' quand sync-stripe a
+      // détecté une configuration Stripe non-standard (invoice-only,
+      // metered, prix sans unit_amount, multi-devises, subscription
+      // schedules) — null tant qu'aucun sync complet n'a encore tourné.
+      billing_profile: org?.billing_profile ?? null,
+      billing_profile_flags: org?.billing_profile_flags ?? null,
     },
   })
 }

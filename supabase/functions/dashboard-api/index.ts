@@ -199,6 +199,7 @@ async function handleBriefing(
     p0InsightsRes,
     churnedAccountsRes,
     snapshotRes,
+    orgBillingProfileRes,
   ] = await Promise.all([
     // Scores actuels par compte (nécessaire pour insight_du_jour, pas pour la moyenne)
     supabase.from('accounts')
@@ -246,6 +247,9 @@ async function handleBriefing(
 
     // Snapshot portefeuille partagé (chantier 5.1) — source de current_avg_health
     supabase.rpc('get_portfolio_snapshot', { p_organization_id: orgId }).maybeSingle(),
+
+    // Phase 3 (docs/openspec.md §11) : profil de facturation détecté par sync-stripe
+    supabase.from('organizations').select('billing_profile').eq('id', orgId).maybeSingle(),
   ])
 
   // ── Portfolio health delta ────────────────────────────────
@@ -331,6 +335,7 @@ async function handleBriefing(
         new Set((churnedAccountsRes.data ?? []).map((a: { id: string }) => a.id)),
       ),
       insight_du_jour: insightDuJour,
+      billing_profile: (orgBillingProfileRes.data as { billing_profile?: string } | null)?.billing_profile ?? null,
     },
   })
 }
