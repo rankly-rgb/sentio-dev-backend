@@ -304,6 +304,14 @@ async function syncSubscriptions(
   // Devises des subscriptions billables de l'org, pour le vote majoritaire
   // (docs/openspec.md §9) appliqué ci-dessous par compte.
   const orgSubscriptionCurrencies: Array<{ currency: string | null }> = []
+  // canceled_at le plus récent par compte — permet de dater un mouvement
+  // `churn` à la date effective d'annulation Stripe plutôt qu'à la date du
+  // run de sync (docs/openspec.md §10). Pas d'équivalent pour new/expansion/
+  // contraction dans ce chemin batch : sync-stripe compare deux snapshots
+  // sans qu'un événement Stripe unique ne soit rattachable à ces
+  // transitions (contrairement à stripe-webhook, event-driven — voir
+  // handleSubscriptionEvent). Limitation documentée, pas un oubli.
+  const accountLatestCanceledAt = new Map<string, number>()
 
   // Collect all subscription rows — batch upsert at the end
   const subRows: Record<string, unknown>[] = []
@@ -316,6 +324,11 @@ async function syncSubscriptions(
     }
 
     accountsWithAnySubscription.add(accountId)
+
+    if (sub.status === 'canceled' && sub.canceled_at) {
+      const existing = accountLatestCanceledAt.get(accountId) ?? 0
+      if (sub.canceled_at > existing) accountLatestCanceledAt.set(accountId, sub.canceled_at)
+    }
 
     const mrrResult = calcSubscriptionMrrCents(sub)
     const qty = sub.items?.data?.[0]?.quantity ?? sub.quantity ?? 1
@@ -577,12 +590,20 @@ async function syncSubscriptions(
     })
 
     if (movement) {
+      // Pour un churn, dater à la date effective d'annulation Stripe
+      // (canceled_at) quand connue — plus précis que "aujourd'hui" pour un
+      // compte annulé depuis plusieurs jours mais seulement rattrapé par ce
+      // run (docs/openspec.md §10). Pas d'équivalent pour les autres types
+      // de mouvement dans ce chemin batch (voir commentaire plus haut).
+      const canceledAtMs = movement.movement_type === 'churn' ? accountLatestCanceledAt.get(acctId) : undefined
+      const movementDate = canceledAtMs ? new Date(canceledAtMs * 1000).toISOString().split('T')[0] : today
+
       movementRows.push({
         organization_id: organizationId,
         account_id: acctId,
         movement_type: movement.movement_type,
         amount_cents: movement.amount_cents,
-        movement_date: today,
+        movement_date: movementDate,
         stripe_event_id: null,
       })
     }

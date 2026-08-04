@@ -88,6 +88,28 @@ async function handleSubscriptionEvent(
 ): Promise<void> {
   const sub = event.data.object as StripeSubscription
 
+  // Garde d'ordonnancement (docs/openspec.md §10) : Stripe ne garantit pas
+  // la livraison des webhooks dans l'ordre. Si un event plus ancien que le
+  // dernier déjà appliqué à cette subscription arrive en retard, l'ignorer
+  // plutôt que d'écraser un état plus récent avec des données périmées.
+  const { data: existingSub } = await supabase
+    .from('subscriptions')
+    .select('last_event_created_at')
+    .eq('stripe_sub_id', sub.id)
+    .maybeSingle()
+
+  if (existingSub?.last_event_created_at && event.created) {
+    const lastAppliedMs = new Date(existingSub.last_event_created_at).getTime()
+    const thisEventMs = event.created * 1000
+    if (thisEventMs < lastAppliedMs) {
+      console.warn(JSON.stringify({
+        level: 'warn', function_name: 'stripe-webhook', event_id: event.id,
+        message: `Ignored out-of-order event for subscription ${sub.id}: event.created=${new Date(thisEventMs).toISOString()} older than last applied ${existingSub.last_event_created_at}`,
+      }))
+      return
+    }
+  }
+
   // Résoudre l'account via le customer
   const { data: accountRow } = await supabase
     .from('accounts')
@@ -140,6 +162,7 @@ async function handleSubscriptionEvent(
         trial_end_date: trialEnd,
         cancel_at: cancelAt,
         canceled_at: canceledAt,
+        ...(event.created && { last_event_created_at: new Date(event.created * 1000).toISOString() }),
       },
       { onConflict: 'stripe_sub_id', ignoreDuplicates: false },
     )
@@ -214,6 +237,14 @@ async function handleSubscriptionEvent(
   })
 
   if (movement) {
+    // movement_date = date effective de l'événement Stripe (event.created),
+    // jamais la date de traitement (docs/openspec.md §10) — un webhook
+    // rattrapé en retard (redémarrage, backlog DLQ) ne doit pas dater le
+    // mouvement du jour où il a été rejoué.
+    const movementDate = event.created
+      ? new Date(event.created * 1000).toISOString().split('T')[0]
+      : new Date().toISOString().split('T')[0]
+
     const { error: mvtError } = await supabase
       .from('mrr_movements')
       .insert({
@@ -221,7 +252,7 @@ async function handleSubscriptionEvent(
         account_id: accountRow.id,
         movement_type: movement.movement_type,
         amount_cents: movement.amount_cents,
-        movement_date: new Date().toISOString().split('T')[0],
+        movement_date: movementDate,
         stripe_event_id: event.id,
       })
 
@@ -229,8 +260,7 @@ async function handleSubscriptionEvent(
       logger.increment('movements_processed')
     } else if (mvtError.code === '23505') {
       // Collision sur la contrainte unique (stripe_event_id) — rejeu légitime
-      // du même event Stripe, pas une erreur (Phase 2.6 pour le traitement
-      // complet de l'idempotence webhook).
+      // du même event Stripe, pas une erreur.
       console.log(JSON.stringify({
         level: 'info', function_name: 'stripe-webhook', event_id: event.id,
         message: 'mrr_movements insert skipped: duplicate stripe_event_id (legitimate replay)',
@@ -240,6 +270,13 @@ async function handleSubscriptionEvent(
         level: 'error', function_name: 'stripe-webhook', event_id: event.id,
         message: `mrr_movements insert failed: ${mvtError.message}`,
       }))
+      await writeToDLQ(supabase, {
+        organization_id: organizationId,
+        provider: 'stripe',
+        event_type: event.type,
+        payload: event,
+        error_message: `mrr_movements insert failed: ${mvtError.message}`,
+      })
     }
   }
 
@@ -333,13 +370,12 @@ async function handleInvoiceEvent(
     return
   }
 
-  // Même logique que sync-stripe : propage la devise du compte Stripe
-  // connecté vers organizations.currency dès la première invoice reçue
-  // en temps réel, pas seulement lors du sync quotidien.
-  await supabase
-    .from('organizations')
-    .update({ currency: invoiceCurrency })
-    .eq('id', organizationId)
+  // organizations.currency n'est plus mis à jour depuis ce chemin (Phase
+  // 2.6) : sync-stripe le dérive désormais d'un vote majoritaire sur les
+  // subscriptions de l'org (docs/openspec.md §9) — propager la devise
+  // d'une seule invoice ici referait flapper la valeur à chaque event pour
+  // toute org multi-devises, exactement le bug que le vote majoritaire
+  // corrige côté sync-stripe (AUDIT_LOGIQUE_METIER_STRIPE.md point 7).
 
   logger.increment('records_processed')
   logger.increment('invoices_processed')
@@ -350,11 +386,65 @@ async function handleInvoiceEvent(
   }
 }
 
+// customer.subscription.trial_will_end — signal informatif uniquement
+// (docs/openspec.md §4). Aucune écriture MRR, juste un accusé de réception
+// journalisé pour observabilité/futurs insights.
+function handleTrialWillEnd(event: StripeEvent, logger: DataSyncLogger): void {
+  const trial = event.data.object as StripeTrialWillEnd
+  console.log(JSON.stringify({
+    level: 'info', function_name: 'stripe-webhook', event_id: event.id,
+    message: `trial_will_end received for customer ${trial.customer} (subscription ${trial.id}) — no financial field updated, informational only (docs/openspec.md §4)`,
+  }))
+  logger.increment('records_processed')
+}
+
+// charge.refunded / credit_note.created — met à jour uniquement le statut
+// de l'invoice liée (docs/openspec.md §10). Aucun impact rétroactif sur
+// mrr_movements/score_history : l'historique n'est jamais réécrit
+// silencieusement, seul le ledger d'invoices reste honnête.
+async function handleRefundEvent(
+  supabase: SupabaseClient,
+  organizationId: string,
+  event: StripeEvent,
+  logger: DataSyncLogger,
+): Promise<void> {
+  const obj = event.data.object as StripeCharge | StripeCreditNote
+  const stripeInvoiceId = obj.invoice
+  if (!stripeInvoiceId) {
+    // Remboursement/avoir non lié à une invoice (ex. charge one-off) —
+    // rien à mettre à jour côté MRR/invoices dans cette itération.
+    logger.increment('records_processed')
+    return
+  }
+
+  const { error } = await supabase
+    .from('invoices')
+    .update({ status: 'refunded' })
+    .eq('organization_id', organizationId)
+    .eq('stripe_invoice_id', stripeInvoiceId)
+
+  if (error) {
+    console.error(JSON.stringify({
+      level: 'error', function_name: 'stripe-webhook', event_id: event.id,
+      message: `Failed to mark invoice ${stripeInvoiceId} as refunded: ${error.message}`,
+    }))
+    logger.increment('records_failed')
+    return
+  }
+
+  logger.increment('records_processed')
+  logger.increment('records_updated')
+}
+
 // ── Types Stripe minimalistes ────────────────────────────────
 interface StripeEvent {
   id: string
   type: string
   account?: string
+  // Timestamp Unix (secondes) de l'événement côté Stripe — garde
+  // d'ordonnancement (docs/openspec.md §10) et movement_date effectif,
+  // jamais la date de traitement local.
+  created?: number
   data: {
     object: unknown
     previous_attributes?: unknown
@@ -406,6 +496,29 @@ interface StripeInvoice {
   status_transitions?: { paid_at?: number }
 }
 
+// charge.refunded / credit_note.created (docs/openspec.md §10) : handlers
+// minimaux — mettent à jour uniquement invoices.status, aucun impact
+// rétroactif sur mrr_movements/score_history. L'historique n'est jamais
+// réécrit silencieusement.
+interface StripeCharge {
+  id: string
+  invoice?: string | null
+}
+
+interface StripeCreditNote {
+  id: string
+  invoice?: string | null
+}
+
+// customer.subscription.trial_will_end : aucun champ financier modifié
+// (docs/openspec.md §4) — signal informatif pour de futurs insights/
+// playbooks, hors périmètre du moteur MRR dans cette itération. Le handler
+// se contente d'accuser réception (utile pour l'idempotence/observabilité).
+interface StripeTrialWillEnd {
+  id: string
+  customer: string
+}
+
 // ── Handlers routés par event type ──────────────────────────
 const ROUTED_EVENTS = new Set([
   'customer.created',
@@ -413,10 +526,13 @@ const ROUTED_EVENTS = new Set([
   'customer.subscription.created',
   'customer.subscription.updated',
   'customer.subscription.deleted',
+  'customer.subscription.trial_will_end',
   'invoice.created',
   'invoice.paid',
   'invoice.payment_failed',
   'invoice.voided',
+  'charge.refunded',
+  'credit_note.created',
 ])
 
 // ── Entrypoint ───────────────────────────────────────────────
@@ -586,6 +702,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
             })
           }
         }
+        break
+      case 'customer.subscription.trial_will_end':
+        handleTrialWillEnd(event, logger)
+        break
+      case 'charge.refunded':
+      case 'credit_note.created':
+        await handleRefundEvent(supabase, organizationId, event, logger)
         break
     }
 
