@@ -15,6 +15,7 @@ import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
 import { CircuitBreaker } from '../_shared/circuit-breaker.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { detectMrrCollapseAnomaly, type AccountMrrUpdate } from '../_shared/sync-anomaly-guard.ts'
+import { calcSubscriptionMrrCents, classifyMovement, type StripeSubscriptionLike } from '../_shared/mrr-engine.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
@@ -44,21 +45,31 @@ interface StripeCustomer {
   created: number
 }
 
-interface StripeSubscription {
+interface StripeSubscription extends StripeSubscriptionLike {
   id: string
   customer: string
   status: string
   quantity: number
   created: number
-  plan?: { amount: number; interval: string; id: string; product: string }
+  plan?: { amount: number; interval: string; id: string; product: string; currency?: string }
   items?: {
     data: Array<{
-      price: { id: string; unit_amount: number; product: string; recurring?: { interval: string; interval_count?: number } }
+      price: {
+        id: string
+        unit_amount: number | null
+        currency?: string
+        product: string
+        recurring?: { interval: string; interval_count?: number; usage_type?: string }
+        billing_scheme?: string
+      }
       quantity?: number
     }>
   }
+  discount?: { coupon: { percent_off?: number | null; amount_off?: number | null; duration: 'forever' | 'repeating' | 'once'; duration_in_months?: number | null } } | null
+  discounts?: Array<{ coupon: { percent_off?: number | null; amount_off?: number | null; duration: 'forever' | 'repeating' | 'once'; duration_in_months?: number | null } }> | null
   trial_end?: number | null
   cancel_at?: number | null
+  cancel_at_period_end?: boolean
   canceled_at?: number | null
   current_period_start: number
   current_period_end: number
@@ -157,17 +168,10 @@ async function* paginateStripe<T>(
 }
 
 // ── Helpers subscription ─────────────────────────────────────
-function getSubscriptionInterval(sub: StripeSubscription): string {
-  return sub.plan?.interval ?? sub.items?.data?.[0]?.price?.recurring?.interval ?? 'month'
-}
-
-function calcMrrCents(sub: StripeSubscription): number {
-  const item = sub.items?.data?.[0]
-  const amount = item?.price?.unit_amount ?? sub.plan?.amount ?? 0
-  const qty = item?.quantity ?? sub.quantity ?? 1
-  const interval = getSubscriptionInterval(sub)
-  return Math.round((amount * qty) / (interval === 'year' ? 12 : 1))
-}
+// calcSubscriptionMrrCents (MRR: tous les items, interval_count, remises,
+// trials, metered/null-unit_amount -> unavailable) vient de _shared/mrr-engine.ts —
+// seule implémentation autorisée (docs/openspec.md §13). Plus de formule
+// locale dupliquée ici.
 
 // Retourne le stripe_price_id de l'abonnement actif principal.
 // Critère : MRR le plus élevé. Tie-break : le plus récemment créé (created DESC).
@@ -272,7 +276,9 @@ async function syncSubscriptions(
 
   // Track per-account metadata from active subs for MRR aggregation
   const accountSubMeta = new Map<string, Array<{
+    status: string
     mrrCents: number
+    mrrStatus: 'ok' | 'unavailable'
     billingInterval: string
     quantity: number
     contractStart: string | null
@@ -291,8 +297,7 @@ async function syncSubscriptions(
       continue
     }
 
-    const mrrCents = calcMrrCents(sub)
-    const interval = getSubscriptionInterval(sub)
+    const mrrResult = calcSubscriptionMrrCents(sub)
     const qty = sub.items?.data?.[0]?.quantity ?? sub.quantity ?? 1
 
     subRows.push({
@@ -302,15 +307,19 @@ async function syncSubscriptions(
       stripe_price_id: sub.items?.data?.[0]?.price?.id ?? null,
       stripe_product_id: sub.items?.data?.[0]?.price?.product ?? null,
       status: sub.status,
-      mrr_cents: mrrCents,
+      mrr_cents: mrrResult.mrr_cents,
       quantity: qty,
       trial_end_date: sub.trial_end ? new Date(sub.trial_end * 1000).toISOString().split('T')[0] : null,
       cancel_at: sub.cancel_at ? new Date(sub.cancel_at * 1000).toISOString().split('T')[0] : null,
       canceled_at: sub.canceled_at ? new Date(sub.canceled_at * 1000).toISOString() : null,
     })
 
-    // Collect metadata from active subs for account MRR propagation
-    if (sub.status === 'active' || sub.status === 'trialing') {
+    // Collect metadata from billable subs for account MRR propagation.
+    // past_due ajouté ici (docs/openspec.md §5) : un compte délinquant reste
+    // compté dans le MRR, jamais silencieusement mis à zéro — c'est ce qui
+    // évite qu'il se retrouve, en aval, court-circuité comme "churned"
+    // (AUDIT_LOGIQUE_METIER_STRIPE.md point 6).
+    if (sub.status === 'active' || sub.status === 'trialing' || sub.status === 'past_due' || sub.status === 'unpaid') {
       const periodStart = sub.current_period_start
         ? new Date(sub.current_period_start * 1000).toISOString().split('T')[0]
         : null
@@ -319,8 +328,10 @@ async function syncSubscriptions(
         : null
       const list = accountSubMeta.get(accountId) ?? []
       list.push({
-        mrrCents,
-        billingInterval: interval === 'year' ? 'annual' : 'monthly',
+        status: sub.status,
+        mrrCents: mrrResult.mrr_cents,
+        mrrStatus: mrrResult.mrr_status,
+        billingInterval: mrrResult.interval_raw === 'year' ? 'annual' : 'monthly',
         quantity: qty,
         contractStart: periodStart,
         contractEnd: periodEnd,
@@ -355,12 +366,21 @@ async function syncSubscriptions(
     }) => [m.stripe_price_id, m]),
   )
 
+  // mrr_status par compte (en mémoire pour ce run — persisté sur accounts
+  // à partir de la migration 20260804000001, docs/openspec.md §12). Un
+  // compte dont au moins une subscription billable est 'unavailable'
+  // (metered, devise minoritaire, unit_amount null) ne classe aucun
+  // mouvement MRR ce run (classifyMovement) plutôt que de fabriquer un
+  // mouvement à partir d'un chiffre partiellement connu.
+  const accountMrrStatus = new Map<string, 'ok' | 'unavailable'>()
+
   const accountUpdateRows: Record<string, unknown>[] = []
   for (const acctId of customerToAccount.values()) {
     const subs = accountSubMeta.get(acctId) ?? []
     const totalMrr = subs.reduce((sum, s) => sum + s.mrrCents, 0)
     const totalSeats = subs.reduce((sum, s) => sum + s.quantity, 0)
     const primary = subs.length > 0 ? subs.slice().sort((a, b) => b.mrrCents - a.mrrCents)[0] : null
+    accountMrrStatus.set(acctId, subs.some((s) => s.mrrStatus === 'unavailable') ? 'unavailable' : 'ok')
 
     // Résoudre le mapping produit à partir du price_id de l'abonnement principal
     const primaryPriceId = getPrimaryPriceId(subs)
@@ -414,35 +434,45 @@ async function syncSubscriptions(
   const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id')
   logger.increment('records_failed', acctFail)
 
-  // Phase 3 : générer les mrr_movements par comparaison avant/après
+  // Phase 3 : générer les mrr_movements — classification centralisée
+  // (classifyMovement, _shared/mrr-engine.ts, docs/openspec.md §7 et §11
+  // audit) au lieu d'un diff avant/après ad-hoc. Réactivation détectée au
+  // niveau compte (hasPriorChurnMovement), symétrique avec stripe-webhook —
+  // avant ce changement, seul le chemin webhook tentait cette distinction
+  // (et échouait en pratique, un nouvel objet Subscription Stripe étant
+  // toujours créé après une annulation).
   // Idempotent grâce à l'index unique (org_id, account_id, movement_date, movement_type) WHERE stripe_event_id IS NULL
   const today = new Date().toISOString().split('T')[0]
   const movementRows: Record<string, unknown>[] = []
+
+  const { data: priorChurnRows } = await supabase
+    .from('mrr_movements')
+    .select('account_id')
+    .eq('organization_id', organizationId)
+    .eq('movement_type', 'churn')
+  const accountsWithPriorChurn = new Set((priorChurnRows ?? []).map((r: { account_id: string }) => r.account_id))
 
   for (const acctId of customerToAccount.values()) {
     const subs = accountSubMeta.get(acctId) ?? []
     const newMrr = subs.reduce((sum, s) => sum + s.mrrCents, 0)
     const prevMrr = prevMrrByAccount.get(acctId) ?? 0
 
-    let movementType: string | null = null
-    let amount = 0
+    const movement = classifyMovement({
+      // mrr_status précédent non encore persisté (colonne accounts.mrr_status
+      // arrive en migration 20260804000001) — traité comme 'ok' par défaut
+      // pour cette phase intermédiaire ; les runs suivants liront la vraie
+      // valeur persistée une fois la migration appliquée.
+      previous: { mrr_cents: prevMrr, mrr_status: 'ok' },
+      current: { mrr_cents: newMrr, mrr_status: accountMrrStatus.get(acctId) ?? 'ok' },
+      hasPriorChurnMovement: accountsWithPriorChurn.has(acctId),
+    })
 
-    if (prevMrr === 0 && newMrr > 0) {
-      movementType = 'new'; amount = newMrr
-    } else if (newMrr > prevMrr && prevMrr > 0) {
-      movementType = 'expansion'; amount = newMrr - prevMrr
-    } else if (newMrr > 0 && newMrr < prevMrr) {
-      movementType = 'contraction'; amount = newMrr - prevMrr  // valeur négative
-    } else if (newMrr === 0 && prevMrr > 0) {
-      movementType = 'churn'; amount = -prevMrr
-    }
-
-    if (movementType) {
+    if (movement) {
       movementRows.push({
         organization_id: organizationId,
         account_id: acctId,
-        movement_type: movementType,
-        amount_cents: amount,
+        movement_type: movement.movement_type,
+        amount_cents: movement.amount_cents,
         movement_date: today,
         stripe_event_id: null,
       })

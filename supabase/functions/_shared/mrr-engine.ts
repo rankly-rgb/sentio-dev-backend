@@ -61,8 +61,11 @@ export interface StripeSubscriptionLike {
   cancel_at?: number | null
   cancel_at_period_end?: boolean
   canceled_at?: number | null
-  current_period_start: number
-  current_period_end: number
+  // Non lus par calcSubscriptionMrrCents (les dates de contrat restent gérées
+  // côté appelant) — optionnels pour ne pas contraindre la forme exacte des
+  // types Stripe locaux de sync-stripe/stripe-webhook.
+  current_period_start?: number | null
+  current_period_end?: number | null
 }
 
 // ── Types de sortie ──────────────────────────────────────────

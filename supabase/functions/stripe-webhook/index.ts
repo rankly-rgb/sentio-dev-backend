@@ -11,6 +11,7 @@ import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
 import { writeToDLQ } from '../_shared/dlq.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { verifyStripeSignature } from '../_shared/stripe-signature.ts'
+import { calcSubscriptionMrrCents, classifyMovement, type StripeSubscriptionLike } from '../_shared/mrr-engine.ts'
 
 // ── Résolution de l'organization depuis stripe_account_id ───
 async function resolveOrganization(
@@ -86,7 +87,6 @@ async function handleSubscriptionEvent(
   logger: DataSyncLogger,
 ): Promise<void> {
   const sub = event.data.object as StripeSubscription
-  const previousSub = event.data.previous_attributes as Partial<StripeSubscription> | undefined
 
   // Résoudre l'account via le customer
   const { data: accountRow } = await supabase
@@ -101,23 +101,21 @@ async function handleSubscriptionEvent(
     return
   }
 
-  const unitAmount = sub.plan?.amount ?? sub.items?.data?.[0]?.price?.unit_amount ?? 0
-  const qty = sub.quantity ?? 1
-  const interval = sub.plan?.interval ?? sub.items?.data?.[0]?.price?.recurring?.interval ?? 'month'
-  const mrrCents = Math.round((unitAmount * qty) / (interval === 'year' ? 12 : 1))
+  // calcSubscriptionMrrCents (_shared/mrr-engine.ts) : tous les items,
+  // interval_count, remises, trials, metered/null-unit_amount -> unavailable.
+  // Seule implémentation autorisée du calcul MRR (docs/openspec.md §13) —
+  // plus de formule locale dupliquée avec sync-stripe.
+  const mrrResult = calcSubscriptionMrrCents(sub)
+  const mrrCents = mrrResult.mrr_cents
   const cancelAt = sub.cancel_at ? new Date(sub.cancel_at * 1000).toISOString().split('T')[0] : null
   const canceledAt = sub.canceled_at ? new Date(sub.canceled_at * 1000).toISOString() : null
   const trialEnd = sub.trial_end ? new Date(sub.trial_end * 1000).toISOString().split('T')[0] : null
   const contractStart = sub.current_period_start ? new Date(sub.current_period_start * 1000).toISOString() : null
   const contractEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null
 
-  // Fetch previous MRR for THIS subscription BEFORE upsert (TOCTOU fix)
-  const { data: prevSubRow } = await supabase
-    .from('subscriptions')
-    .select('mrr_cents')
-    .eq('stripe_sub_id', sub.id)
-    .maybeSingle()
-  const prevSubMrr = prevSubRow?.mrr_cents ?? 0
+  // accountRow.mrr_cents a été lu AVANT toute écriture de ce handler (TOCTOU
+  // fix déjà en place) — c'est le snapshot "previous" au niveau compte.
+  const prevAccountMrr = accountRow.mrr_cents ?? 0
 
   // Upsert subscription
   const { error: subError } = await supabase
@@ -147,64 +145,81 @@ async function handleSubscriptionEvent(
 
   logger.increment('subscriptions_processed')
 
-  // Calculer le mouvement MRR
-  let movementType: string | null = null
-  const previousStatus = previousSub?.status
+  // Aggregate MRR from ALL billable subscriptions for this account (pas
+  // seulement la subscription de cet event, pour gérer les comptes
+  // multi-subscriptions). past_due/unpaid inclus (docs/openspec.md §5) : un
+  // compte délinquant reste compté, jamais mis à zéro silencieusement.
+  const { data: accountSubs } = await supabase
+    .from('subscriptions')
+    .select('mrr_cents, status')
+    .eq('account_id', accountRow.id)
+    .in('status', ['active', 'trialing', 'past_due', 'unpaid'])
 
-  if (event.type === 'customer.subscription.created') {
-    movementType = 'new'
-  } else if (event.type === 'customer.subscription.deleted') {
-    movementType = 'churn'
-  } else if (event.type === 'customer.subscription.updated') {
-    if (prevSubMrr === 0 && mrrCents > 0) {
-      movementType = previousStatus === 'canceled' ? 'reactivation' : 'new'
-    } else if (mrrCents > prevSubMrr) {
-      movementType = 'expansion'
-    } else if (mrrCents < prevSubMrr) {
-      movementType = 'contraction'
-    }
-  }
+  const newAccountMrr = (accountSubs ?? []).reduce(
+    (sum: number, s: { mrr_cents: number }) => sum + (s.mrr_cents ?? 0), 0,
+  )
+  // mrr_status au niveau compte : cette subscription seule est vérifiée ici
+  // (calcSubscriptionMrrCents détecte déjà metered/unit_amount null sans
+  // contexte org) — la détection de devise minoritaire nécessite un vote
+  // majoritaire à l'échelle de l'organisation, hors de portée d'un event
+  // unitaire : elle est recalculée au prochain sync-stripe quotidien
+  // (docs/openspec.md §9).
+  const newAccountMrrStatus: 'ok' | 'unavailable' = mrrResult.mrr_status === 'unavailable' ? 'unavailable' : 'ok'
 
-  if (movementType) {
-    const amount = movementType === 'churn'
-      ? -prevSubMrr
-      : movementType === 'contraction'
-      ? mrrCents - prevSubMrr
-      : mrrCents
+  // Classification unique — même fonction pure que sync-stripe
+  // (_shared/mrr-engine.ts), garantissant des classifications identiques
+  // pour le même événement quel que soit le chemin d'ingestion
+  // (AUDIT_LOGIQUE_METIER_STRIPE.md point 11/17). Réactivation détectée au
+  // niveau compte (docs/openspec.md §7), pas au niveau objet subscription.
+  const { data: priorChurnRow } = await supabase
+    .from('mrr_movements')
+    .select('id')
+    .eq('account_id', accountRow.id)
+    .eq('movement_type', 'churn')
+    .limit(1)
+    .maybeSingle()
 
+  const movement = classifyMovement({
+    previous: { mrr_cents: prevAccountMrr, mrr_status: 'ok' },
+    current: { mrr_cents: newAccountMrr, mrr_status: newAccountMrrStatus },
+    hasPriorChurnMovement: priorChurnRow !== null,
+  })
+
+  if (movement) {
     const { error: mvtError } = await supabase
       .from('mrr_movements')
       .insert({
         organization_id: organizationId,
         account_id: accountRow.id,
-        movement_type: movementType,
-        amount_cents: amount,
+        movement_type: movement.movement_type,
+        amount_cents: movement.amount_cents,
         movement_date: new Date().toISOString().split('T')[0],
         stripe_event_id: event.id,
       })
 
     if (!mvtError) {
       logger.increment('movements_processed')
+    } else if (mvtError.code === '23505') {
+      // Collision sur la contrainte unique (stripe_event_id) — rejeu légitime
+      // du même event Stripe, pas une erreur (Phase 2.6 pour le traitement
+      // complet de l'idempotence webhook).
+      console.log(JSON.stringify({
+        level: 'info', function_name: 'stripe-webhook', event_id: event.id,
+        message: 'mrr_movements insert skipped: duplicate stripe_event_id (legitimate replay)',
+      }))
+    } else {
+      console.error(JSON.stringify({
+        level: 'error', function_name: 'stripe-webhook', event_id: event.id,
+        message: `mrr_movements insert failed: ${mvtError.message}`,
+      }))
     }
   }
-
-  // Aggregate MRR from ALL active subscriptions for this account
-  // (not just the current event's subscription, to handle multi-sub accounts)
-  const { data: activeSubs } = await supabase
-    .from('subscriptions')
-    .select('mrr_cents')
-    .eq('account_id', accountRow.id)
-    .in('status', ['active', 'trialing'])
-
-  const totalMrr = (activeSubs ?? []).reduce(
-    (sum: number, s: { mrr_cents: number }) => sum + (s.mrr_cents ?? 0), 0,
-  )
 
   await supabase
     .from('accounts')
     .update({
-      mrr_cents: totalMrr,
-      arr_cents: totalMrr * 12,
+      mrr_cents: newAccountMrr,
+      arr_cents: newAccountMrr * 12,
       last_stripe_sync_at: new Date().toISOString(),
       ...(contractStart !== null && { contract_start_date: contractStart }),
       ...(contractEnd !== null && { contract_end_date: contractEnd }),
@@ -312,15 +327,30 @@ interface StripeCustomer {
   id: string
 }
 
-interface StripeSubscription {
+interface StripeSubscription extends StripeSubscriptionLike {
   id: string
   customer: string
   status: string
   quantity?: number
-  plan?: { amount: number; interval: string }
-  items?: { data: Array<{ price: { id: string; unit_amount: number; product: string; recurring?: { interval: string } } }> }
+  plan?: { amount: number; interval: string; currency?: string }
+  items?: {
+    data: Array<{
+      price: {
+        id: string
+        unit_amount: number | null
+        currency?: string
+        product: string
+        recurring?: { interval: string; interval_count?: number; usage_type?: string }
+        billing_scheme?: string
+      }
+      quantity?: number
+    }>
+  }
+  discount?: { coupon: { percent_off?: number | null; amount_off?: number | null; duration: 'forever' | 'repeating' | 'once'; duration_in_months?: number | null } } | null
+  discounts?: Array<{ coupon: { percent_off?: number | null; amount_off?: number | null; duration: 'forever' | 'repeating' | 'once'; duration_in_months?: number | null } }> | null
   trial_end?: number | null
   cancel_at?: number | null
+  cancel_at_period_end?: boolean
   canceled_at?: number | null
   current_period_start?: number | null
   current_period_end?: number | null

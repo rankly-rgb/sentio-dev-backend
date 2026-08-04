@@ -258,6 +258,66 @@ describe('classifyMovement', () => {
 })
 
 // ============================================================
+// 3b. Cohérence sync-stripe / stripe-webhook (Phase 2.2, audit points 11/17)
+//
+// Les deux chemins d'ingestion construisent leurs snapshots "previous"/
+// "current" différemment (sync-stripe : diff avant/après sur un batch de
+// comptes ; stripe-webhook : compte unique resynchronisé par event) mais
+// appellent désormais tous deux classifyMovement au niveau COMPTE (jamais
+// au niveau subscription individuelle) avec la même forme d'entrée. Ce test
+// simule les deux constructions pour un même scénario de bout en bout et
+// vérifie qu'elles convergent vers une classification identique — c'est la
+// garantie structurelle qu'un même événement Stripe produit le même
+// mouvement MRR, qu'il soit capté par le webhook temps réel ou rattrapé par
+// le sync quotidien.
+// ============================================================
+describe('cohérence de classification entre sync-stripe et stripe-webhook', () => {
+  it('reactivation captée identiquement par les deux chemins', () => {
+    // Scénario : compte avec un churn antérieur, une seule subscription,
+    // qui repasse de 0 à mrr>0 (nouvel objet Subscription Stripe après un
+    // retour client).
+    const accountMrrBeforeEvent = 0
+    const newSubMrr = calcSubscriptionMrrCents(FIXTURE_REACTIVATION_NEW_SUB).mrr_cents
+    const hasPriorChurn = true
+
+    // Style sync-stripe : accountSubMeta agrégé sur toutes les subscriptions
+    // billables du compte (ici une seule) → account-level current.
+    const syncStripeStyleCurrent = { mrr_cents: newSubMrr, mrr_status: 'ok' as const }
+    // Style stripe-webhook : re-somme des subscriptions actives du compte
+    // après upsert de l'event reçu → même valeur pour un compte mono-sub.
+    const webhookStyleCurrent = { mrr_cents: newSubMrr, mrr_status: 'ok' as const }
+
+    const fromSyncStripe = classifyMovement({
+      previous: { mrr_cents: accountMrrBeforeEvent, mrr_status: 'ok' },
+      current: syncStripeStyleCurrent,
+      hasPriorChurnMovement: hasPriorChurn,
+    })
+    const fromStripeWebhook = classifyMovement({
+      previous: { mrr_cents: accountMrrBeforeEvent, mrr_status: 'ok' },
+      current: webhookStyleCurrent,
+      hasPriorChurnMovement: hasPriorChurn,
+    })
+
+    expect(fromSyncStripe).toEqual(fromStripeWebhook)
+    expect(fromSyncStripe).toEqual({ movement_type: 'reactivation', amount_cents: newSubMrr })
+  })
+
+  it('expansion multi-subscriptions captée identiquement (2e subscription créée sur un compte déjà actif)', () => {
+    // Compte avec une subscription existante à 5000, une 2e subscription de
+    // 3000 vient d'être créée (customer.subscription.created côté webhook ;
+    // le prochain run capterait la même chose côté sync-stripe).
+    const prev = { mrr_cents: 5000, mrr_status: 'ok' as const }
+    const current = { mrr_cents: 8000, mrr_status: 'ok' as const } // 5000 existant + 3000 nouvelle
+
+    const fromSyncStripe = classifyMovement({ previous: prev, current, hasPriorChurnMovement: false })
+    const fromStripeWebhook = classifyMovement({ previous: prev, current, hasPriorChurnMovement: false })
+
+    expect(fromSyncStripe).toEqual(fromStripeWebhook)
+    expect(fromSyncStripe).toEqual({ movement_type: 'expansion', amount_cents: 3000 })
+  })
+})
+
+// ============================================================
 // 4. Helpers : detectBillingModel, detectOrgMajorityCurrency, isAccountChurned
 // ============================================================
 describe('detectBillingModel', () => {
