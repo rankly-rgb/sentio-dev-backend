@@ -407,6 +407,8 @@ Response 200 : `{ "data": { "id": "uuid", "display_name": "string | null" } }`
 
 **Codes d'erreur** : `400`, `401`, `404`, `500`
 
+`mrr_status` (Phase 5.5, `AUDIT_LOGIQUE_METIER_STRIPE.md` point 22) : `'ok' | 'unavailable'`, exposé sur `mrr_cents`/`account_fields` de la liste ET du détail — copie directe de `accounts.mrr_status` (`docs/openspec.md` §1/§8, "no data ≠ neutral data"). `'unavailable'` = compte non-chiffrable (metered, prix sans `unit_amount`, devise minoritaire) ou jamais eu de subscription connue (invoice-only, pas encore synchronisé) ; `mrr_cents` peut alors être un total partiel plutôt qu'un vrai `0` — le frontend doit afficher "Not billable" plutôt que le montant brut pour ces comptes.
+
 ---
 
 ### account-summary (GET)
