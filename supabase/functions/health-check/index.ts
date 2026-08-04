@@ -4,10 +4,10 @@
 // stale cron locks, and stuck syncs.
 // ============================================================
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
-import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse, errorResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth } from '../_shared/auth.ts'
+import { computeSyncFreshness } from '../_shared/sync-freshness.ts'
 
 interface HealthCheck {
   name: string
@@ -15,40 +15,9 @@ interface HealthCheck {
   message?: string
 }
 
-// Seuil de fraîcheur (docs/openspec.md Phase 3, miroir du contrat frontend
-// déjà déclaré — src/types/ops.ts HealthCheckResponse.hubspot_stale —
-// jamais réellement peuplé côté backend avant ce chantier). sync-stripe et
-// sync-hubspot tournent quotidiennement (CLAUDE.md) : > 48h = au moins
-// 2 runs manqués consécutifs.
-const STALE_THRESHOLD_HOURS = 48
-
-interface SyncFreshness {
-  stale: boolean
-  lastSyncHoursAgo: number | null
-}
-
-async function computeSyncFreshness(
-  supabase: SupabaseClient,
-  organizationId: string,
-  syncSource: 'stripe' | 'hubspot',
-): Promise<SyncFreshness> {
-  const { data } = await supabase
-    .from('data_syncs')
-    .select('completed_at')
-    .eq('organization_id', organizationId)
-    .eq('sync_source', syncSource)
-    .eq('sync_status', 'completed')
-    .order('completed_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-
-  if (!data?.completed_at) {
-    return { stale: true, lastSyncHoursAgo: null }
-  }
-
-  const hoursAgo = (Date.now() - new Date(data.completed_at).getTime()) / (1000 * 60 * 60)
-  return { stale: hoursAgo > STALE_THRESHOLD_HOURS, lastSyncHoursAgo: Math.round(hoursAgo * 10) / 10 }
-}
+// computeSyncFreshness vit dans _shared/sync-freshness.ts (Phase 4) —
+// réutilisée par dashboard-api/portfolio-metrics (stripe_stale), même
+// principe que _shared/mrr-engine.ts : une seule implémentation du calcul.
 
 Deno.serve(async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)

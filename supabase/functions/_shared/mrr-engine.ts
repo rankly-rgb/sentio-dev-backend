@@ -446,3 +446,83 @@ export function classifyMovement(input: MovementClassificationInput): MovementRe
   }
   return null
 }
+
+// ── NRR / churn rate (Phase 4 — endpoint portfolio-metrics) ──
+
+export interface MrrMovementForNrr {
+  movement_type: MovementType
+  amount_cents: number
+}
+
+/**
+ * NRR (Net Revenue Retention) sur l'historique complet des mouvements
+ * fournis par l'appelant — `movements` doit déjà exclure movement_type
+ * = 'correction' (docs/openspec.md §10, jamais compté dans le NRR).
+ *
+ * Convention de signe : `contraction` et `churn` sont stockés comme des
+ * montants NÉGATIFS dans mrr_movements (voir classifyMovement ci-dessus —
+ * `amount_cents: newMrr - prevMrr` pour contraction, `amount_cents:
+ * -prevMrr` pour churn), donc on les ADDITIONNE pour obtenir le net, pas
+ * question de les soustraire une seconde fois (ça inverserait leur effet).
+ *
+ * `null` si moins de 3 mois d'historique (`hasAtLeastThreeMonthsOfHistory`
+ * à charge de l'appelant, ex. date du premier mouvement/compte de l'org)
+ * ou si le MRR de départ calculé serait ≤ 0 (rien à mesurer).
+ */
+export function calcNrrPercentage(
+  currentMrrCents: number,
+  movements: MrrMovementForNrr[],
+  hasAtLeastThreeMonthsOfHistory: boolean,
+): number | null {
+  if (!hasAtLeastThreeMonthsOfHistory) return null
+
+  let newSum = 0
+  let expansionSum = 0
+  let contractionSum = 0
+  let churnSum = 0
+  let reactivationSum = 0
+
+  for (const m of movements) {
+    switch (m.movement_type) {
+      case 'new': newSum += m.amount_cents; break
+      case 'expansion': expansionSum += m.amount_cents; break
+      case 'contraction': contractionSum += m.amount_cents; break // déjà négatif
+      case 'churn': churnSum += m.amount_cents; break // déjà négatif
+      case 'reactivation': reactivationSum += m.amount_cents; break
+      // 'correction' : ignoré si présent malgré la consigne à l'appelant —
+      // ne doit jamais influencer le NRR.
+    }
+  }
+
+  const netMovements = newSum + expansionSum + reactivationSum + contractionSum + churnSum
+  const mrrStartCents = currentMrrCents - netMovements
+  if (mrrStartCents <= 0) return null
+
+  const endingMrrExistingCents = currentMrrCents - newSum
+  return Math.round((endingMrrExistingCents / mrrStartCents) * 1000) / 10
+}
+
+/**
+ * % de MRR perdu sur les 30 derniers jours — `movementsLast30d` doit déjà
+ * être filtré sur les 30 derniers jours et exclure 'correction'. Dénominateur
+ * = MRR au début de la fenêtre de 30 jours (dérivé des mêmes mouvements que
+ * le numérateur, cohérent avec calcNrrPercentage — pas une source séparée).
+ * `null` si ce MRR de départ serait ≤ 0.
+ */
+export function calcChurnRate30d(
+  currentMrrCents: number,
+  movementsLast30d: MrrMovementForNrr[],
+): number | null {
+  let netMovements = 0
+  let churnSum = 0
+  for (const m of movementsLast30d) {
+    if (m.movement_type === 'correction') continue
+    netMovements += m.amount_cents
+    if (m.movement_type === 'churn') churnSum += m.amount_cents // déjà négatif
+  }
+
+  const mrrStart30dCents = currentMrrCents - netMovements
+  if (mrrStart30dCents <= 0) return null
+
+  return Math.round((Math.abs(churnSum) / mrrStart30dCents) * 1000) / 10
+}

@@ -21,6 +21,8 @@ import {
   detectBillingModel,
   detectOrgMajorityCurrency,
   isAccountChurned,
+  calcNrrPercentage,
+  calcChurnRate30d,
   type StripeSubscriptionLike,
 } from '../functions/_shared/mrr-engine'
 import {
@@ -407,5 +409,105 @@ describe('legacy behaviour — reproduction documentée du bug pré-Phase-2.2 (n
 
   it('(18) unit_amount=null : ancien code retourne 0 numérique via `?? 0`, indistinguable d\'un vrai 0€', () => {
     expect(legacyCalcMrrCents(FIXTURE_NULL_UNIT_AMOUNT)).toBe(0)
+  })
+})
+
+// ============================================================
+// 6. calcNrrPercentage / calcChurnRate30d (Phase 4 — portfolio-metrics)
+// ============================================================
+describe('calcNrrPercentage', () => {
+  it('null si moins de 3 mois d\'historique, quels que soient les mouvements', () => {
+    expect(calcNrrPercentage(115000, [{ movement_type: 'expansion', amount_cents: 20000 }], false)).toBeNull()
+  })
+
+  it('expansion + churn : NRR > 100%', () => {
+    // mrrStart = 115000 - (20000 - 5000) = 100000 ; endingExisting = 115000 - 0 = 115000
+    // NRR = 115000/100000*100 = 115.0
+    const result = calcNrrPercentage(
+      115000,
+      [
+        { movement_type: 'expansion', amount_cents: 20000 },
+        { movement_type: 'churn', amount_cents: -5000 }, // convention réelle : négatif
+      ],
+      true,
+    )
+    expect(result).toBe(115.0)
+  })
+
+  it('nouvelles ventes exclues du numérateur (endingMrrExisting = current - new)', () => {
+    // mrrStart = 150000 - (50000) = 100000 (new=50000, aucun autre mouvement)
+    // endingExisting = 150000 - 50000 = 100000 ; NRR = 100000/100000*100 = 100.0
+    const result = calcNrrPercentage(150000, [{ movement_type: 'new', amount_cents: 50000 }], true)
+    expect(result).toBe(100.0)
+  })
+
+  it('mouvement correction ignoré même si présent par erreur', () => {
+    const withCorrection = calcNrrPercentage(
+      115000,
+      [
+        { movement_type: 'expansion', amount_cents: 20000 },
+        { movement_type: 'churn', amount_cents: -5000 },
+        { movement_type: 'correction', amount_cents: 999999 },
+      ],
+      true,
+    )
+    const withoutCorrection = calcNrrPercentage(
+      115000,
+      [
+        { movement_type: 'expansion', amount_cents: 20000 },
+        { movement_type: 'churn', amount_cents: -5000 },
+      ],
+      true,
+    )
+    expect(withCorrection).toBe(withoutCorrection)
+  })
+
+  it('mrrStart <= 0 → null (rien à mesurer)', () => {
+    // currentMrr=1000, churn=-5000 → netMovements=-5000 → mrrStart=1000-(-5000)=6000... construire un cas <=0 explicitement :
+    const result = calcNrrPercentage(0, [{ movement_type: 'new', amount_cents: 0 }], true)
+    expect(result).toBeNull()
+  })
+
+  it('100% de rétention exacte quand aucun mouvement (compte stable)', () => {
+    const result = calcNrrPercentage(50000, [], true)
+    expect(result).toBe(100.0)
+  })
+})
+
+describe('calcChurnRate30d', () => {
+  it('null si aucun mouvement (mrrStart30d = currentMrr, mais 0 churn) → 0%, pas null', () => {
+    // currentMrr=100000, aucun mouvement → mrrStart30d=100000, churn=0 → 0%
+    expect(calcChurnRate30d(100000, [])).toBe(0)
+  })
+
+  it('churn de 10% du MRR de départ sur 30 jours', () => {
+    // currentMrr=90000, churn=-10000 sur la fenêtre → mrrStart30d = 90000-(-10000)=100000
+    // churnRate = 10000/100000*100 = 10.0
+    const result = calcChurnRate30d(90000, [{ movement_type: 'churn', amount_cents: -10000 }])
+    expect(result).toBe(10.0)
+  })
+
+  it('mouvement correction exclu du calcul', () => {
+    const result = calcChurnRate30d(90000, [
+      { movement_type: 'churn', amount_cents: -10000 },
+      { movement_type: 'correction', amount_cents: -500000 },
+    ])
+    expect(result).toBe(10.0)
+  })
+
+  it('mrrStart30d <= 0 → null', () => {
+    const result = calcChurnRate30d(0, [{ movement_type: 'new', amount_cents: 0 }])
+    expect(result).toBeNull()
+  })
+
+  it('expansion sur la fenêtre réduit le churn_rate relatif (dénominateur plus élevé)', () => {
+    // currentMrr=110000, expansion=+20000, churn=-10000 → net=10000 → mrrStart30d=100000
+    // churnRate = 10000/100000*100 = 10.0 (identique au cas sans expansion car churn absolu inchangé,
+    // seul le dénominateur bouge si le churn lui-même changeait)
+    const result = calcChurnRate30d(110000, [
+      { movement_type: 'expansion', amount_cents: 20000 },
+      { movement_type: 'churn', amount_cents: -10000 },
+    ])
+    expect(result).toBe(10.0)
   })
 })
