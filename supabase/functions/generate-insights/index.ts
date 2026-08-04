@@ -32,6 +32,7 @@ interface AccountRow {
   organization_id: string
   health_score: number | null
   churn_risk_score: number | null
+  churn_risk_band: string | null
   expansion_score: number | null
   product_usage_score: number | null
   mrr_cents: number | null
@@ -333,7 +334,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
           const { data: batch, error: batchError } = await supabase
             .from('accounts')
-            .select('id, organization_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, contract_end_date, created_at')
+            .select('id, organization_id, health_score, churn_risk_score, churn_risk_band, expansion_score, product_usage_score, mrr_cents, contract_end_date, created_at')
             .eq('organization_id', organizationId)
             .not('scores_calculated_at', 'is', null)
             .range(batchOffset, batchOffset + BATCH_SIZE - 1)
@@ -364,14 +365,27 @@ Deno.serve(async (req: Request): Promise<Response> => {
               const usagePrevious = usageHistoryMap.get(account.id)
               const input = buildInsightInput(account, invoiceData, usagePrevious)
 
-              // D1 (2026-08-02) : un compte churné (mrr_cents=0) n'est pas
-              // "à risque", il est perdu — aucune règle ne doit produire de
-              // nouvel insight (payment_risk sur une vieille facture,
-              // renewal_alert sur une date de contrat obsolète, etc. peuvent
-              // sinon rester "vrais" alors que le compte est déjà parti).
-              // candidates=[] déclenche l'auto-résolution existante de
-              // syncInsights pour tout insight resté actif sur ce compte.
-              const candidates = account.mrr_cents === 0 ? [] : evaluateInsightRules(input)
+              // D1 (2026-08-02) : un compte churné n'est pas "à risque", il
+              // est perdu — aucune règle ne doit produire de nouvel insight
+              // (payment_risk sur une vieille facture, renewal_alert sur une
+              // date de contrat obsolète, etc. peuvent sinon rester "vrais"
+              // alors que le compte est déjà parti). candidates=[] déclenche
+              // l'auto-résolution existante de syncInsights pour tout
+              // insight resté actif sur ce compte.
+              //
+              // D-NEXT (2026-08-04, docs/openspec.md §5, CLAUDE.md) : ce
+              // garde-fou lisait encore `account.mrr_cents === 0`, l'ancienne
+              // définition D1 de "churné" — trouvée lors de l'auto-
+              // vérification adversariale, jamais mise à jour quand D-NEXT a
+              // découplé isChurned de mrr_cents===0. Un compte facturé
+              // manuellement (invoice_only) ou entièrement metered a
+              // mrr_status='unavailable' et mrr_cents=0 sans être churné —
+              // c'est précisément le type de compte que D-NEXT visait à ne
+              // plus geler par erreur, et qui a le plus besoin d'insights.
+              // `churn_risk_band` est déjà réconcilié avec isAccountChurned()
+              // par scoreAccountPure (calculate-scores/index.ts) — même
+              // source que dashboard-api/get-today-status pour ce prédicat.
+              const candidates = account.churn_risk_band === 'churned' ? [] : evaluateInsightRules(input)
               const { created, resolved } = await syncInsights(
                 supabase,
                 organizationId,
