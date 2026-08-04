@@ -54,7 +54,7 @@ npm run verify       # typecheck + lint + test + build (post-modification)
 
 ## Scoring SaaS — Engine V2/V3 (`_shared/scoring.ts`)
 
-**IMPORTANT** : c'est le seul moteur de scoring actif (`model_version 'v3'` en base, branché depuis `calculate-scores/index.ts`). Les anciennes fonctions V1 (`calcHealthScore`, `calcChurnRiskScore`, `determineSegmentTypes` — formule `Health = Usage×35% + Financial×25% + Engagement×20% + Contract×20%` / `Churn = 100 - Health + additifs`) ont été supprimées le 2026-08-02 : zéro appelant en production, remplacées depuis par le moteur ci-dessous. Ne pas les réintroduire.
+**IMPORTANT** : c'est le seul moteur de scoring actif (`model_version 'v3'` en base, branché depuis `calculate-scores/index.ts`). Les anciennes fonctions V1 (`calcHealthScore`, `calcChurnRiskScore`, `determineSegmentTypes` — formule `Health = Usage×35% + Financial×25% + Engagement×20% + Contract×20%` / `Churn = 100 - Health + additifs`) ont été supprimées le 2026-08-02 : zéro appelant en production, remplacées depuis par le moteur ci-dessous. Ne pas les réintroduire. Correctif 2026-08-04 (`AUDIT_LOGIQUE_METIER_STRIPE.md` point 16) : les fonctions de sous-scores V1 sous-jacentes (`calcUsageScore`, `calcFinancialScore`, `calcEngagementScore`, `calcContractScore`, `calcExpansionScore` — jamais appelées non plus, mais oubliées de ce nettoyage du 2026-08-02) ont maintenant aussi été supprimées de `_shared/scoring.ts`, avec `supabase/tests/scoring.test.ts` (leur unique consommateur).
 
 **Health Score** (`calcHealthScoreV3`) — 3 dimensions Stripe-only, poids org configurables (`organizations.scoring_weights`), défaut `payment_health=35 / revenue_dynamics=35 / contract_renewal=30` :
 

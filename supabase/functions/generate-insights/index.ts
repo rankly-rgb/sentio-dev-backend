@@ -80,11 +80,28 @@ async function prefetchInsightData(
     }
   }
 
-  // Build usage history map (most recent score ~14 days ago per account)
+  // Build usage history map (most recent score ~14 days ago per account).
+  // Note (2026-08-04, AUDIT_LOGIQUE_METIER_STRIPE.md point 19) : ce map
+  // n'est plus consommé par aucune règle active — evaluateUsageDrop est
+  // gelée (_shared/insight-rules.ts) tant que product_usage_score reste
+  // une dimension retirée du modèle v3. Conservé et corrigé pour une
+  // réactivation propre le jour où une vraie dimension usage v3 existe,
+  // plutôt que retiré silencieusement.
+  //
+  // Bug corrigé : la boucle marquait un compte "visité" uniquement quand
+  // une valeur non-nulle était trouvée — un compte dont la ligne la plus
+  // récente avait product_usage_score=null retombait alors sur une ligne
+  // plus ancienne (potentiellement vieille de plusieurs mois), lue comme
+  // si elle datait de ~14 jours. `visitedAccounts` marque désormais le
+  // compte dès la première ligne rencontrée (la plus récente, tri
+  // snapshot_date DESC), null ou pas — jamais de retombée sur une valeur
+  // périmée.
   const usageHistoryMap = new Map<string, number>()
+  const visitedAccounts = new Set<string>()
   if (usageHistoryResult.data) {
     for (const row of usageHistoryResult.data) {
-      if (usageHistoryMap.has(row.account_id)) continue // most recent first
+      if (visitedAccounts.has(row.account_id)) continue
+      visitedAccounts.add(row.account_id)
       if (row.product_usage_score !== null) {
         usageHistoryMap.set(row.account_id, row.product_usage_score)
       }
