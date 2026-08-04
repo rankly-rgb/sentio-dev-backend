@@ -453,13 +453,16 @@ describe('determineSegmentTypesV3 — exactly-one-health-segment invariant', () 
     ['watch churn band', { churnRiskBand: 'watch' }],
     ['high churn band', { churnRiskBand: 'high' }],
     ['overdue invoices', { hasOverdueInvoices: true }],
-    ['mrr=0', { mrrCents: 0 }],
-    ['subscription canceled', { subscriptionCanceled: true }],
+    // mrr=0 alone (churnRiskBand not 'churned') is the D-NEXT invoice-only/
+    // usage-based case — must NOT resolve to en_churn (see bug fix below).
+    ['mrr=0 without churned band (D-NEXT: invoice-only/usage-based, not churned)', { mrrCents: 0 }],
+    ['subscription canceled flag alone, without churned band (superseded by churnRiskBand — D-NEXT)', { subscriptionCanceled: true }],
+    ['churned band (D-NEXT source of truth for en_churn)', { churnRiskBand: 'churned' }],
     ['insufficient health data', { healthScoreStatus: 'insufficient', healthScoreBand: null }],
     ['insufficient health data + high churn (churn signals still computable — S5 decoupled)', { healthScoreStatus: 'insufficient', healthScoreBand: null, churnRiskBand: 'high' }],
     ['insufficient health data + overdue invoice', { healthScoreStatus: 'insufficient', healthScoreBand: null, hasOverdueInvoices: true }],
     ['overdue invoice + high churn (impayes wins)', { hasOverdueInvoices: true, churnRiskBand: 'high' }],
-    ['mrr=0 + overdue invoice (en_churn wins)', { mrrCents: 0, hasOverdueInvoices: true }],
+    ['overdue invoice + churned band (en_churn wins)', { churnRiskBand: 'churned', hasOverdueInvoices: true }],
     ['partial health, watch churn', { healthScoreStatus: 'partial', churnRiskBand: 'watch' }],
     ['at_risk health band, low churn (no expansion signal → stables)', { healthScoreBand: 'at_risk' }],
   ]
@@ -492,6 +495,28 @@ describe('determineSegmentTypesV3 — exactly-one-health-segment invariant', () 
     expect(segments).toContain('nouveaux')
     const health = segments.filter((s) => healthSegments.includes(s))
     expect(health).toHaveLength(1)
+  })
+
+  // ── en_churn gated on churnRiskBand, not mrrCents (D-NEXT) ──────────
+  // Bug found in the 2026-08-04 adversarial self-review of D-NEXT's isChurned
+  // consumers (IMPLEMENTATION_LOG.md): this function still assigned en_churn
+  // on `mrrCents === 0 || subscriptionCanceled` (the old D1 predicate),
+  // independently of `churnRiskBand`, even though churnRiskBand is already
+  // the D-NEXT-reconciled value (isAccountChurned()) passed in by
+  // calculate-scores/index.ts for this exact purpose.
+  it('REGRESSION: mrr_cents=0 alone (invoice-only/usage-based, not churned) no longer assigns en_churn', () => {
+    const segments = determineSegmentTypesV3({ ...baseInput, mrrCents: 0, churnRiskBand: 'low' })
+    expect(segments).not.toContain('en_churn')
+  })
+
+  it('REGRESSION: subscriptionCanceled=true alone (churnRiskBand not churned) no longer assigns en_churn', () => {
+    const segments = determineSegmentTypesV3({ ...baseInput, subscriptionCanceled: true, churnRiskBand: 'low' })
+    expect(segments).not.toContain('en_churn')
+  })
+
+  it('churnRiskBand=churned assigns en_churn regardless of mrrCents/subscriptionCanceled', () => {
+    const segments = determineSegmentTypesV3({ ...baseInput, churnRiskBand: 'churned', mrrCents: 50000, subscriptionCanceled: false })
+    expect(segments).toContain('en_churn')
   })
 })
 

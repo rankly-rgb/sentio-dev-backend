@@ -72,7 +72,7 @@ Principe fondateur : **« no data ≠ neutral data »**. Aucune fonction ne reto
 
 **Segmentation V3** (`determineSegmentTypesV3`) — 8 segments (`en_expansion` conservé dans `SYSTEM_SEGMENT_TYPES`/CHECK constraint pour compat descendante mais plus jamais assigné — fusionné dans `champions`, qui exige désormais un signal d'expansion). Priorité décroissante, exclusif sauf `nouveaux` :
 1. `nouveaux` — < 90 jours (non-exclusif)
-2. `en_churn` — `mrr_cents = 0` **ou** `subscriptionCanceled`
+2. `en_churn` — `churn_risk_band = 'churned'` (corrigé 2026-08-04, D-NEXT : ancien critère `mrr_cents = 0` **ou** `subscriptionCanceled` classait à tort les comptes invoice-only/usage-based en `en_churn`)
 3. `impayes` — factures en retard
 4. `donnees_insuffisantes` — `health_score_status = 'insufficient'`
 5. `en_danger_critique` — `churn_risk_band = 'high'`

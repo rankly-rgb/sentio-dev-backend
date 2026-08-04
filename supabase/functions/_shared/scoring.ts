@@ -552,7 +552,19 @@ export function determineSegmentTypesV3(input: SegmentInputV3): SegmentTypeV3[] 
   const daysSinceCreation = Math.floor((Date.now() - new Date(input.accountCreatedAt).getTime()) / 86400000)
   if (daysSinceCreation < 90) segments.push('nouveaux')
 
-  if (input.mrrCents === 0 || input.subscriptionCanceled) {
+  // Bug trouvé lors de l'auto-vérification adversariale du 2026-08-04
+  // (IMPLEMENTATION_LOG.md, audit des consommateurs isChurned) : cette
+  // condition datait de D1 (mrr_cents=0 ou subscription canceled) et n'a
+  // jamais été mise à jour quand D-NEXT a redéfini "churned" comme
+  // isAccountChurned() (toutes les subscriptions connues canceled — voir
+  // docs/openspec.md §5). Un compte invoice-only ou usage-based non
+  // chiffrable a mrr_cents=0 sans être churned ; il tombait quand même dans
+  // 'en_churn' ici. input.churnRiskBand est déjà la valeur réconciliée avec
+  // isAccountChurned() par scoreAccountPure (calculate-scores/index.ts) —
+  // même source que dashboard-api/get-today-status/generate-insights pour
+  // ce même prédicat. mrrCents/subscriptionCanceled restent sur
+  // SegmentInputV3 (appelants existants) mais ne pilotent plus ce segment.
+  if (input.churnRiskBand === 'churned') {
     segments.push('en_churn')
   } else if (input.hasOverdueInvoices) {
     segments.push('impayes')
