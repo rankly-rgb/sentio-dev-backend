@@ -54,7 +54,7 @@ npm run verify       # typecheck + lint + test + build (post-modification)
 
 ## Scoring SaaS — Engine V2/V3 (`_shared/scoring.ts`)
 
-**IMPORTANT** : c'est le seul moteur de scoring actif (`model_version 'v3'` en base, branché depuis `calculate-scores/index.ts`). Les anciennes fonctions V1 (`calcHealthScore`, `calcChurnRiskScore`, `determineSegmentTypes` — formule `Health = Usage×35% + Financial×25% + Engagement×20% + Contract×20%` / `Churn = 100 - Health + additifs`) ont été supprimées le 2026-08-02 : zéro appelant en production, remplacées depuis par le moteur ci-dessous. Ne pas les réintroduire.
+**IMPORTANT** : c'est le seul moteur de scoring actif (`model_version 'v3'` en base, branché depuis `calculate-scores/index.ts`). Les anciennes fonctions V1 (`calcHealthScore`, `calcChurnRiskScore`, `determineSegmentTypes` — formule `Health = Usage×35% + Financial×25% + Engagement×20% + Contract×20%` / `Churn = 100 - Health + additifs`) ont été supprimées le 2026-08-02 : zéro appelant en production, remplacées depuis par le moteur ci-dessous. Ne pas les réintroduire. Correctif 2026-08-04 (`AUDIT_LOGIQUE_METIER_STRIPE.md` point 16) : les fonctions de sous-scores V1 sous-jacentes (`calcUsageScore`, `calcFinancialScore`, `calcEngagementScore`, `calcContractScore`, `calcExpansionScore` — jamais appelées non plus, mais oubliées de ce nettoyage du 2026-08-02) ont maintenant aussi été supprimées de `_shared/scoring.ts`, avec `supabase/tests/scoring.test.ts` (leur unique consommateur).
 
 **Health Score** (`calcHealthScoreV3`) — 3 dimensions Stripe-only, poids org configurables (`organizations.scoring_weights`), défaut `payment_health=35 / revenue_dynamics=35 / contract_renewal=30` :
 
@@ -72,7 +72,7 @@ Principe fondateur : **« no data ≠ neutral data »**. Aucune fonction ne reto
 
 **Segmentation V3** (`determineSegmentTypesV3`) — 8 segments (`en_expansion` conservé dans `SYSTEM_SEGMENT_TYPES`/CHECK constraint pour compat descendante mais plus jamais assigné — fusionné dans `champions`, qui exige désormais un signal d'expansion). Priorité décroissante, exclusif sauf `nouveaux` :
 1. `nouveaux` — < 90 jours (non-exclusif)
-2. `en_churn` — `mrr_cents = 0` **ou** `subscriptionCanceled`
+2. `en_churn` — `churn_risk_band = 'churned'` (corrigé 2026-08-04, D-NEXT : ancien critère `mrr_cents = 0` **ou** `subscriptionCanceled` classait à tort les comptes invoice-only/usage-based en `en_churn`)
 3. `impayes` — factures en retard
 4. `donnees_insuffisantes` — `health_score_status = 'insufficient'`
 5. `en_danger_critique` — `churn_risk_band = 'high'`
@@ -94,6 +94,14 @@ Cette décision est explicite et ne doit pas être remise en cause sans repasser
 ### Décision actée — comptes churnés exclus du churn risk (D1, 2026-08-02)
 
 Un compte à `mrr_cents = 0` ou dont l'abonnement est `canceled` reçoit un état figé `churned` : il **sort** du calcul de `churn_risk_score`/`churn_risk_band` (plus de score calculé sur ses signaux historiques) et est **exclu** des listes « at risk », des KPIs « accounts at risk »/« MRR at risk » et des insights de churn. Un compte parti n'est pas « à risque », il est perdu. `determineSegmentTypesV3` assigne déjà `en_churn` sur ce critère (segment) et `churn_risk_band` est désormais réconcilié avec cet état (`scoreAccountPure`, `calculate-scores/index.ts` — implémenté 2026-08-02, chantier C2.1, voir `docs/CHANGELOG_STABILITY.md`) : `churn_risk_score` reste `NULL` (jamais un clamp à 0, qui se lirait comme « aucun risque » plutôt que « non applicable »), `churn_risk_band = 'churned'`. Revue explicite des KPIs/listes agrégés effectuée (C2.2, 2026-08-02, voir `docs/CHANGELOG_STABILITY.md`) : `get-today-status`/`dashboard-api` (comptes critiques), la vue `accounts_with_priority` et `onboarding-first-win` corrigés pour ne plus classer un compte churné comme « à risque » via son `health_score` (dimension non gelée par D1) ; `generate-insights` ne génère plus aucun nouvel insight pour un compte à `mrr_cents = 0`, ce qui auto-résout les insights restés actifs sur un compte qui vient de churner. `AccountPriorityLabel` côté frontend (attendait encore des valeurs françaises `'critique'/'surveillance'` alors que le backend produit de l'anglais depuis `20260725000002`) corrigé séparément (C2.2b, 2026-08-02) en même temps que l'ajout de la valeur `'churned'` au même contrat — un seul passage plutôt que deux PRs qui se marchent dessus.
+
+### Décision actée — correctif de l'intention de D1 : délinquence ≠ départ (D-NEXT, 2026-08-04)
+
+`AUDIT_LOGIQUE_METIER_STRIPE.md` (2026-08-04) a établi que l'implémentation de D1 (`isChurned = mrrCurrentCents === 0 || subscriptionCanceled`) capturait plus large que son intention affichée. Un compte `past_due`/`unpaid` (délinquent, pas parti), un compte facturé manuellement (`billing_model = 'invoice_only'`, aucune Subscription Stripe) ou un compte en configuration non-standard (usage-based non chiffrable) pouvait se retrouver à `mrr_cents = 0` pour des raisons n'ayant rien à voir avec un départ client — et se faisait alors geler `churned` au même titre qu'un compte réellement annulé, disparaissant de toutes les listes « at risk », insights et éligibilités playbook exclues par D1/C2.2. Précisément l'inverse de l'objectif de D1 : ces comptes sont ceux qui ont le plus besoin d'attention.
+
+**Changement** (`scoreAccountPure`, `calculate-scores/index.ts`) : `isChurned = isAccountChurned(subscriptions.map(s => s.status))` (`_shared/mrr-engine.ts`, docs/openspec.md §5) — plus de branche `mrrCurrentCents === 0`. Un compte est `churned` **uniquement** quand toutes ses subscriptions connues sont `canceled`. Un compte sans aucune subscription connue (invoice-only, ou pas encore synchronisé) n'est structurellement jamais `churned` par défaut. `is_delinquent` (nouveau champ `accounts.is_delinquent`, migration `20260804000001`) alimente les signaux de risque déjà existants (`invoice_overdue_15d`, `payment_failures_90d`) — aucun nouveau signal créé, ces comptes sortent simplement du court-circuit et repassent par le scoring normal.
+
+Ce n'est pas une remise en cause de D1 — c'est sa correction : l'intention de D1 (« un compte parti n'est pas à risque, il est perdu ») reste intacte et continue de s'appliquer exactement aux comptes réellement annulés. Voir `docs/openspec.md` §5 pour la convention complète et `IMPLEMENTATION_LOG.md` (hors repo, session d'implémentation du 2026-08-04) pour le détail du chantier.
 
 ### Décision actée — eligibility_criteria vide/absent ne matche plus rien (C2.5, 2026-08-02)
 

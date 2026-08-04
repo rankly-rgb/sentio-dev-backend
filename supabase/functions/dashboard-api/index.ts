@@ -1,7 +1,7 @@
 // ============================================================
 // Edge Function : dashboard-api
 // Données agrégées pour la page "Aujourd'hui" : briefing matinal,
-// wins de la semaine et benchmarks sectoriels.
+// wins de la semaine, benchmarks sectoriels et métriques de portefeuille.
 //
 // CONTRAT API
 // ──────────────────────────────────────────────────────────
@@ -89,6 +89,28 @@
 //       }
 //     }
 //
+// GET /dashboard-api/portfolio-metrics
+//   Endpoint métriques autoritaire du portefeuille (Phase 4, docs/openspec.md) —
+//   toutes les définitions exactes sont dans API_CONTRACTS.md, pas dupliquées ici.
+//
+//   Response 200 :
+//     {
+//       data: {
+//         mrr_cents: number,
+//         arr_cents: number,
+//         trial_mrr_cents: number,
+//         nrr_percentage: number | null,
+//         churn_rate: number | null,
+//         accounts_at_risk: number,
+//         mrr_at_risk_cents: number,
+//         expansion_opportunities: number,
+//         currency: string | null,
+//         mrr_unavailable_accounts: number,
+//         billing_profile: "standard" | "needs_review" | null,
+//         stripe_stale: boolean
+//       }
+//     }
+//
 // Auth : JWT utilisateur vérifié dans le code (ES256 via verifyUserAuth)
 // ============================================================
 
@@ -96,6 +118,8 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { calcNrrPercentage, calcChurnRate30d, type MrrMovementForNrr } from '../_shared/mrr-engine.ts'
+import { computeSyncFreshness } from '../_shared/sync-freshness.ts'
 
 // Seuil minimum pour qualifier un "win" (en points de health_score)
 const WIN_THRESHOLD = 10
@@ -165,8 +189,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (path === 'briefing') return handleBriefing(supabase, orgId)
   if (path === 'wins') return handleWins(supabase, orgId)
   if (path === 'benchmarks') return handleBenchmarks(supabase, orgId)
+  if (path === 'portfolio-metrics') return handlePortfolioMetrics(supabase, orgId)
 
-  return errorResponse('Not found. Use /dashboard-api/briefing, /dashboard-api/wins or /dashboard-api/benchmarks', 404)
+  return errorResponse('Not found. Use /dashboard-api/briefing, /dashboard-api/wins, /dashboard-api/benchmarks or /dashboard-api/portfolio-metrics', 404)
 })
 
 // ── GET /dashboard-api/briefing ──────────────────────────────
@@ -199,6 +224,7 @@ async function handleBriefing(
     p0InsightsRes,
     churnedAccountsRes,
     snapshotRes,
+    orgBillingProfileRes,
   ] = await Promise.all([
     // Scores actuels par compte (nécessaire pour insight_du_jour, pas pour la moyenne)
     supabase.from('accounts')
@@ -246,6 +272,9 @@ async function handleBriefing(
 
     // Snapshot portefeuille partagé (chantier 5.1) — source de current_avg_health
     supabase.rpc('get_portfolio_snapshot', { p_organization_id: orgId }).maybeSingle(),
+
+    // Phase 3 (docs/openspec.md §11) : profil de facturation détecté par sync-stripe
+    supabase.from('organizations').select('billing_profile').eq('id', orgId).maybeSingle(),
   ])
 
   // ── Portfolio health delta ────────────────────────────────
@@ -331,6 +360,110 @@ async function handleBriefing(
         new Set((churnedAccountsRes.data ?? []).map((a: { id: string }) => a.id)),
       ),
       insight_du_jour: insightDuJour,
+      billing_profile: (orgBillingProfileRes.data as { billing_profile?: string } | null)?.billing_profile ?? null,
+    },
+  })
+}
+
+// ── GET /dashboard-api/portfolio-metrics ─────────────────────
+// Endpoint métriques autoritaire (Phase 4, docs/openspec.md) : tous les
+// champs sont précalculés côté serveur — le frontend ne doit plus jamais
+// recalculer un total de portefeuille lui-même (AUDIT_LOGIQUE_METIER_
+// STRIPE.md point 22). Chaque champ documenté avec sa définition exacte
+// dans API_CONTRACTS.md — ces définitions alimentent les tooltips (Phase 5.4).
+
+const EXPANSION_OPPORTUNITY_THRESHOLD = 75 // cohérent avec kpi-cards.tsx historique (frontend, Phase 5.2)
+const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
+
+async function handlePortfolioMetrics(
+  supabase: ReturnType<typeof createServiceClient>,
+  orgId: string,
+): Promise<Response> {
+  const now = Date.now()
+  const thirtyDaysAgoDate = new Date(now - THIRTY_DAYS_MS).toISOString().split('T')[0]
+
+  const [
+    accountsRes,
+    allMovementsRes,
+    last30dMovementsRes,
+    firstMovementRes,
+    orgRes,
+    stripeFreshness,
+  ] = await Promise.all([
+    supabase.from('accounts')
+      .select('mrr_cents, trial_mrr_cents, mrr_status, churn_risk_band, expansion_score, expansion_score_status')
+      .eq('organization_id', orgId)
+      .limit(20000),
+    // NRR : historique complet, 'correction' exclu par construction (jamais
+    // écrit par aucun chemin normal — filet de sécurité explicite ici aussi).
+    supabase.from('mrr_movements')
+      .select('movement_type, amount_cents')
+      .eq('organization_id', orgId)
+      .neq('movement_type', 'correction')
+      .limit(50000),
+    supabase.from('mrr_movements')
+      .select('movement_type, amount_cents')
+      .eq('organization_id', orgId)
+      .neq('movement_type', 'correction')
+      .gte('movement_date', thirtyDaysAgoDate)
+      .limit(20000),
+    supabase.from('mrr_movements')
+      .select('movement_date')
+      .eq('organization_id', orgId)
+      .order('movement_date', { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+    supabase.from('organizations')
+      .select('currency, billing_profile, created_at')
+      .eq('id', orgId)
+      .maybeSingle(),
+    computeSyncFreshness(supabase, orgId, 'stripe'),
+  ])
+
+  if (accountsRes.error) {
+    console.error(JSON.stringify({ level: 'error', function_name: 'dashboard-api', route: 'portfolio-metrics', message: accountsRes.error.message }))
+    return errorResponse('Failed to fetch accounts', 500)
+  }
+
+  const accounts = accountsRes.data ?? []
+  const mrrCents = accounts.reduce((sum: number, a: { mrr_cents: number | null }) => sum + (a.mrr_cents ?? 0), 0)
+  const trialMrrCents = accounts.reduce((sum: number, a: { trial_mrr_cents: number | null }) => sum + (a.trial_mrr_cents ?? 0), 0)
+  const mrrUnavailableAccounts = accounts.filter((a: { mrr_status: string | null }) => a.mrr_status === 'unavailable').length
+
+  const atRiskAccounts = accounts.filter((a: { churn_risk_band: string | null }) => a.churn_risk_band === 'high')
+  const mrrAtRiskCents = atRiskAccounts.reduce((sum: number, a: { mrr_cents: number | null }) => sum + (a.mrr_cents ?? 0), 0)
+
+  const expansionOpportunities = accounts.filter((a: { expansion_score_status: string | null; expansion_score: number | null }) =>
+    a.expansion_score_status === 'available' && (a.expansion_score ?? 0) > EXPANSION_OPPORTUNITY_THRESHOLD,
+  ).length
+
+  // Au moins 3 mois d'historique : premier mouvement MRR connu, ou à
+  // défaut date de création de l'org (aucun mouvement pour une org neuve
+  // n'est pas "3 mois d'historique" non plus — created_at reste le plancher).
+  const firstMovementDate = firstMovementRes.data?.movement_date ?? orgRes.data?.created_at ?? null
+  const hasThreeMonthsHistory = firstMovementDate !== null && (now - new Date(firstMovementDate).getTime()) >= THREE_MONTHS_MS
+
+  const allMovements: MrrMovementForNrr[] = (allMovementsRes.data ?? []) as MrrMovementForNrr[]
+  const last30dMovements: MrrMovementForNrr[] = (last30dMovementsRes.data ?? []) as MrrMovementForNrr[]
+
+  const nrrPercentage = calcNrrPercentage(mrrCents, allMovements, hasThreeMonthsHistory)
+  const churnRate = calcChurnRate30d(mrrCents, last30dMovements)
+
+  return jsonResponse({
+    data: {
+      mrr_cents: mrrCents,
+      arr_cents: mrrCents * 12,
+      trial_mrr_cents: trialMrrCents,
+      nrr_percentage: nrrPercentage,
+      churn_rate: churnRate,
+      accounts_at_risk: atRiskAccounts.length,
+      mrr_at_risk_cents: mrrAtRiskCents,
+      expansion_opportunities: expansionOpportunities,
+      currency: orgRes.data?.currency ?? null,
+      mrr_unavailable_accounts: mrrUnavailableAccounts,
+      billing_profile: orgRes.data?.billing_profile ?? null,
+      stripe_stale: stripeFreshness.stale,
     },
   })
 }

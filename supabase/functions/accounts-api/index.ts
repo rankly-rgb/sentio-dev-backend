@@ -135,7 +135,7 @@ async function handleList(
   let query = supabase
     .from('accounts_with_priority')
     .select(
-      'id, stripe_customer_id, display_name, plan_tier, billing_interval, mrr_cents, ' +
+      'id, stripe_customer_id, display_name, plan_tier, billing_interval, mrr_cents, mrr_status, ' +
       'seat_count, seat_limit, ' +
       'health_score, health_score_status, health_score_band, trend_30d, ' +
       'churn_risk_score, churn_risk_band, ' +
@@ -300,6 +300,7 @@ export async function handleGetOne(
     overdue_amount_cents: overdueAmountCents,
     contract_end_date: account.contract_end_date ?? null,
     billing_interval: account.billing_interval ?? null,
+    churn_risk_band: account.churn_risk_band,
   })
 
   // usage_frozen_v2/engagement_frozen_v2 : dimensions retirées du modèle v3
@@ -343,6 +344,7 @@ export async function handleGetOne(
       plan_tier: account.plan_tier,
       billing_interval: account.billing_interval,
       mrr_cents: account.mrr_cents,
+      mrr_status: account.mrr_status,
       arr_cents: account.arr_cents,
       seat_count: account.seat_count,
       seat_limit: account.seat_limit,

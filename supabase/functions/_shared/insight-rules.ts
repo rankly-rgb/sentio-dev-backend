@@ -198,8 +198,25 @@ export function evaluatePaymentRisk(input: InsightInput): InsightCandidate | nul
   }
 }
 
-// ── Règle 5 : Usage Drop ────────────────────────────────────
-
+// ── Règle 5 : Usage Drop — GELÉE (retirée du jeu de règles actif, 2026-08-04) ─
+//
+// AUDIT_LOGIQUE_METIER_STRIPE.md point 19 : `product_usage_score` est gelé
+// depuis le passage au moteur de scoring v3 (dimension retirée du modèle,
+// même statut que `financial_score`/`engagement_score`/`contract_score` —
+// voir `accounts-api/index.ts`, pattern "gelé"/"Score à venir"). Rien ne
+// l'écrit plus depuis `calculate-scores/index.ts` : `usage_score_current`
+// (buildInsightInput, generate-insights/index.ts) retombe systématiquement
+// sur le défaut `?? 50`, et `usage_score_previous` (lu depuis
+// `score_history.product_usage_score`, colonne également gelée) est soit
+// `null`, soit une valeur figée d'avant le cutover v3 — jamais une donnée
+// à 14 jours malgré ce que dit le texte de l'insight ci-dessous. La règle
+// comparait donc une valeur figée à une valeur figée/nulle, générant des
+// insights sur des données mortes.
+//
+// Fonction conservée (pas supprimée) pour permettre une réactivation
+// propre le jour où une vraie dimension "usage produit" v3 existe — retirée
+// uniquement du tableau `rules` de `evaluateInsightRules` ci-dessous. Ne
+// pas la réintroduire sans réintroduire d'abord un vrai signal usage.
 export function evaluateUsageDrop(input: InsightInput): InsightCandidate | null {
   if (input.usage_score_previous === null || input.usage_score_previous === 0) return null
   if (input.usage_score_current >= input.usage_score_previous * 0.7) return null
@@ -302,7 +319,8 @@ export function evaluateInsightRules(input: InsightInput): InsightCandidate[] {
     evaluateExpansionOpportunity,
     evaluateRenewalAlert,
     evaluatePaymentRisk,
-    evaluateUsageDrop,
+    // evaluateUsageDrop retirée (product_usage_score gelé depuis le v3 —
+    // voir commentaire sur la fonction ci-dessus).
   ]
 
   for (const rule of rules) {

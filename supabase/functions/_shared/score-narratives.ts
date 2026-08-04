@@ -169,6 +169,8 @@ export interface NarrativeInputsV3 {
   overdue_amount_cents: number
   contract_end_date: string | null
   billing_interval: string | null
+  // D-NEXT (2026-08-04) : distinct de mrr_cents=0, voir narrativePaymentHealth.
+  churn_risk_band: 'low' | 'watch' | 'high' | 'churned' | null
 }
 
 export interface ScoreNarrativesV3 {
@@ -180,7 +182,7 @@ export interface ScoreNarrativesV3 {
 export function generateNarrativesV3(inputs: NarrativeInputsV3): ScoreNarrativesV3 {
   return {
     health_narrative: narrativeHealthV3(inputs.health_score_points, inputs.health_score_status),
-    financial_narrative: narrativePaymentHealth(inputs.payment_health_score, inputs.mrr_cents, inputs.overdue_count, inputs.overdue_amount_cents),
+    financial_narrative: narrativePaymentHealth(inputs.payment_health_score, inputs.mrr_cents, inputs.overdue_count, inputs.overdue_amount_cents, inputs.churn_risk_band),
     contract_narrative: inputs.contract_renewal_score !== null
       ? narrativeContract(inputs.contract_renewal_score, inputs.contract_end_date, inputs.billing_interval)
       : 'Contract renewal score not available — missing billing interval or contract dates.',
@@ -202,8 +204,16 @@ function narrativePaymentHealth(
   mrrCents: number,
   overdueCount: number,
   overdueAmountCents: number,
+  churnRiskBand: 'low' | 'watch' | 'high' | 'churned' | null,
 ): string {
-  if (mrrCents === 0) return 'Account with no active MRR — subscription canceled or suspended.'
+  // Bug trouvé lors de l'auto-vérification adversariale du 2026-08-04
+  // (IMPLEMENTATION_LOG.md) : cette branche testait mrrCents === 0 (le
+  // critère D1), qui matche aussi bien un compte réellement churned qu'un
+  // compte invoice-only/usage-based non chiffrable (mrr_cents=0 sans être
+  // parti — voir D-NEXT, docs/openspec.md §5). Le texte "canceled or
+  // suspended" était donc trompeur pour ce second cas. churnRiskBand est
+  // la valeur déjà réconciliée avec isAccountChurned() par scoreAccountPure.
+  if (churnRiskBand === 'churned') return 'Account churned — subscription canceled.'
   if (score === null) return 'Payment health score not available — not enough invoice history yet.'
   const mrrUsd = (mrrCents / 100).toFixed(0)
   if (score >= 90) return `No overdue invoices. MRR: $${mrrUsd}.`

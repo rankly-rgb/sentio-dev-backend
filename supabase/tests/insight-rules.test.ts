@@ -315,8 +315,24 @@ describe('evaluateInsightRules', () => {
     const types = result.map((r) => r.insight_type)
     expect(types).toContain('churn_prediction')
     expect(types).toContain('payment_risk')
-    expect(types).toContain('usage_drop')
-    expect(result.length).toBeGreaterThanOrEqual(3)
+    expect(result.length).toBeGreaterThanOrEqual(2)
+  })
+
+  // 2026-08-04 (AUDIT_LOGIQUE_METIER_STRIPE.md point 19) : evaluateUsageDrop
+  // retirée du jeu de règles actif (_shared/insight-rules.ts) —
+  // product_usage_score est gelé depuis le passage au v3, plus jamais
+  // écrit par calculate-scores/index.ts. La fonction elle-même reste
+  // testée directement ci-dessus (describe('evaluateUsageDrop')) ; ce test
+  // couvre spécifiquement qu'elle ne se déclenche plus via l'orchestrateur.
+  it('never returns usage_drop via the orchestrator, even with a severe drop in the input', () => {
+    const input: InsightInput = {
+      ...baseInput,
+      usage_score_current: 30,
+      usage_score_previous: 80,
+    }
+    const result = evaluateInsightRules(input)
+    const types = result.map((r) => r.insight_type)
+    expect(types).not.toContain('usage_drop')
   })
 
   it('returns renewal_alert for contract ending soon', () => {

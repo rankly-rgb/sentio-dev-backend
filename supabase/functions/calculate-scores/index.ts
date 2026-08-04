@@ -49,6 +49,7 @@ import {
   computeTrend30d,
 } from '../_shared/scoring.ts'
 import { generateNarrativesV3 } from '../_shared/score-narratives.ts'
+import { isAccountChurned } from '../_shared/mrr-engine.ts'
 
 // ── Types internes ──────────────────────────────────────────
 interface AccountWithCreatedAt extends Account {
@@ -408,16 +409,30 @@ function scoreAccountPure(input: ScoreAccountInput, now: number = Date.now()): S
 
   const hasDowngrade6mo = movements6mo.some((m) => m.movement_type === 'contraction')
 
-  const subscriptionCanceled = subscriptions.length > 0 && subscriptions.every((s) => s.status === 'canceled')
+  const subscriptionCanceled = isAccountChurned(subscriptions.map((s) => s.status))
 
-  // D1 (2026-08-02) : un compte churné (mrr_cents=0 ou abonnement canceled)
-  // sort du calcul de churn risk — état figé 'churned', pas un score calculé
-  // sur des signaux historiques (invoice/contraction/tenure passés). Un
-  // compte parti n'est pas "à risque", il est perdu. churn_risk_score reste
-  // `null` (S1 : no data ≠ neutral data — pas un 0 qui se lirait comme
-  // "aucun risque"). Ne jamais recalculer sur ce chemin, même si des signaux
-  // seraient techniquement disponibles.
-  const isChurned = mrrCurrentCents === 0 || subscriptionCanceled
+  // D1 (2026-08-02) : un compte churné sort du calcul de churn risk — état
+  // figé 'churned', pas un score calculé sur des signaux historiques
+  // (invoice/contraction/tenure passés). Un compte parti n'est pas "à
+  // risque", il est perdu. churn_risk_score reste `null` (S1 : no data ≠
+  // neutral data — pas un 0 qui se lirait comme "aucun risque"). Ne jamais
+  // recalculer sur ce chemin, même si des signaux seraient techniquement
+  // disponibles.
+  //
+  // D-NEXT (docs/openspec.md §5, correctif de l'intention de D1, voir
+  // CLAUDE.md) : la branche `mrrCurrentCents === 0` est retirée. Elle
+  // capturait aussi des comptes délinquants (past_due/unpaid — jamais
+  // vraiment "partis", D1 les visait explicitement pas eux) et des comptes
+  // en configuration Stripe non-standard où mrr_cents tombait à 0 par
+  // angle mort du moteur plutôt que par départ réel (invoice-only,
+  // usage-based non chiffré — AUDIT_LOGIQUE_METIER_STRIPE.md point 6/20).
+  // isAccountChurned (_shared/mrr-engine.ts) = toutes les subscriptions du
+  // compte sont 'canceled' : un compte sans aucune subscription connue
+  // (invoice-only, ou pas encore synchronisé) n'est structurellement
+  // jamais churned par défaut (subscriptions.length === 0 → false), un
+  // compte metered/devise-minoritaire non plus (son unique subscription
+  // reste 'active', jamais 'canceled').
+  const isChurned = subscriptionCanceled
 
   let churn: { churn_risk_score: number | null; churn_risk_band: 'low' | 'watch' | 'high' | 'churned'; risk_signals_triggered: Array<{ code: string; label: string; severity: string; points: number }>; risk_signals_evaluated: number }
 
@@ -810,6 +825,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 overdue_amount_cents: overdueAmountMap.get(account.id) ?? 0,
                 contract_end_date: account.contract_end_date ?? null,
                 billing_interval: account.billing_interval ?? null,
+                churn_risk_band: scores.churn_risk_band,
               })
 
               historyRows.push({

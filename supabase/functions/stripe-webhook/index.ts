@@ -11,6 +11,8 @@ import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
 import { writeToDLQ } from '../_shared/dlq.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { verifyStripeSignature } from '../_shared/stripe-signature.ts'
+import { calcSubscriptionMrrCents, aggregateAccountMrr, classifyMovement, type StripeSubscriptionLike } from '../_shared/mrr-engine.ts'
+import { isCronLockHeld } from '../_shared/cron-lock.ts'
 
 // ── Résolution de l'organization depuis stripe_account_id ───
 async function resolveOrganization(
@@ -86,12 +88,33 @@ async function handleSubscriptionEvent(
   logger: DataSyncLogger,
 ): Promise<void> {
   const sub = event.data.object as StripeSubscription
-  const previousSub = event.data.previous_attributes as Partial<StripeSubscription> | undefined
+
+  // Garde d'ordonnancement (docs/openspec.md §10) : Stripe ne garantit pas
+  // la livraison des webhooks dans l'ordre. Si un event plus ancien que le
+  // dernier déjà appliqué à cette subscription arrive en retard, l'ignorer
+  // plutôt que d'écraser un état plus récent avec des données périmées.
+  const { data: existingSub } = await supabase
+    .from('subscriptions')
+    .select('last_event_created_at')
+    .eq('stripe_sub_id', sub.id)
+    .maybeSingle()
+
+  if (existingSub?.last_event_created_at && event.created) {
+    const lastAppliedMs = new Date(existingSub.last_event_created_at).getTime()
+    const thisEventMs = event.created * 1000
+    if (thisEventMs < lastAppliedMs) {
+      console.warn(JSON.stringify({
+        level: 'warn', function_name: 'stripe-webhook', event_id: event.id,
+        message: `Ignored out-of-order event for subscription ${sub.id}: event.created=${new Date(thisEventMs).toISOString()} older than last applied ${existingSub.last_event_created_at}`,
+      }))
+      return
+    }
+  }
 
   // Résoudre l'account via le customer
   const { data: accountRow } = await supabase
     .from('accounts')
-    .select('id, mrr_cents')
+    .select('id, mrr_cents, mrr_status')
     .eq('organization_id', organizationId)
     .eq('stripe_customer_id', sub.customer)
     .maybeSingle()
@@ -101,23 +124,23 @@ async function handleSubscriptionEvent(
     return
   }
 
-  const unitAmount = sub.plan?.amount ?? sub.items?.data?.[0]?.price?.unit_amount ?? 0
-  const qty = sub.quantity ?? 1
-  const interval = sub.plan?.interval ?? sub.items?.data?.[0]?.price?.recurring?.interval ?? 'month'
-  const mrrCents = Math.round((unitAmount * qty) / (interval === 'year' ? 12 : 1))
+  // calcSubscriptionMrrCents (_shared/mrr-engine.ts) : tous les items,
+  // interval_count, remises, trials, metered/null-unit_amount -> unavailable.
+  // Seule implémentation autorisée du calcul MRR (docs/openspec.md §13) —
+  // plus de formule locale dupliquée avec sync-stripe.
+  const mrrResult = calcSubscriptionMrrCents(sub)
+  const mrrCents = mrrResult.mrr_cents
   const cancelAt = sub.cancel_at ? new Date(sub.cancel_at * 1000).toISOString().split('T')[0] : null
   const canceledAt = sub.canceled_at ? new Date(sub.canceled_at * 1000).toISOString() : null
   const trialEnd = sub.trial_end ? new Date(sub.trial_end * 1000).toISOString().split('T')[0] : null
   const contractStart = sub.current_period_start ? new Date(sub.current_period_start * 1000).toISOString() : null
   const contractEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null
 
-  // Fetch previous MRR for THIS subscription BEFORE upsert (TOCTOU fix)
-  const { data: prevSubRow } = await supabase
-    .from('subscriptions')
-    .select('mrr_cents')
-    .eq('stripe_sub_id', sub.id)
-    .maybeSingle()
-  const prevSubMrr = prevSubRow?.mrr_cents ?? 0
+  // accountRow.mrr_cents/mrr_status ont été lus AVANT toute écriture de ce
+  // handler (TOCTOU fix déjà en place) — c'est le snapshot "previous" au
+  // niveau compte.
+  const prevAccountMrr = accountRow.mrr_cents ?? 0
+  const prevAccountMrrStatus: 'ok' | 'unavailable' = accountRow.mrr_status === 'unavailable' ? 'unavailable' : 'ok'
 
   // Upsert subscription
   const { error: subError } = await supabase
@@ -131,10 +154,16 @@ async function handleSubscriptionEvent(
         stripe_product_id: sub.items?.data?.[0]?.price?.product ?? null,
         status: sub.status,
         mrr_cents: mrrCents,
+        trial_mrr_cents: mrrResult.trial_mrr_cents,
+        mrr_status: mrrResult.mrr_status,
+        currency: mrrResult.currency,
+        interval_raw: mrrResult.interval_raw,
+        interval_count: mrrResult.interval_count,
         quantity: sub.quantity ?? 1,
         trial_end_date: trialEnd,
         cancel_at: cancelAt,
         canceled_at: canceledAt,
+        ...(event.created && { last_event_created_at: new Date(event.created * 1000).toISOString() }),
       },
       { onConflict: 'stripe_sub_id', ignoreDuplicates: false },
     )
@@ -147,65 +176,154 @@ async function handleSubscriptionEvent(
 
   logger.increment('subscriptions_processed')
 
-  // Calculer le mouvement MRR
-  let movementType: string | null = null
-  const previousStatus = previousSub?.status
-
-  if (event.type === 'customer.subscription.created') {
-    movementType = 'new'
-  } else if (event.type === 'customer.subscription.deleted') {
-    movementType = 'churn'
-  } else if (event.type === 'customer.subscription.updated') {
-    if (prevSubMrr === 0 && mrrCents > 0) {
-      movementType = previousStatus === 'canceled' ? 'reactivation' : 'new'
-    } else if (mrrCents > prevSubMrr) {
-      movementType = 'expansion'
-    } else if (mrrCents < prevSubMrr) {
-      movementType = 'contraction'
-    }
+  // Différer la mise à jour du MRR compte / la classification de mouvement
+  // si un RESTATEMENT tourne actuellement pour cet org — sync-stripe et
+  // stripe-webhook n'ont sinon aucune coordination pendant ce mode (trouvé
+  // lors de l'auto-vérification adversariale du 2026-08-04). La subscription
+  // elle-même vient d'être upsertée ci-dessus avec l'état Stripe le plus
+  // récent (toujours sûr, même calcul que sync-stripe) — seuls le niveau
+  // compte (accounts.mrr_cents) et mrr_movements sont sensibles à un
+  // "previous" à moitié restaté. Le prochain sync-stripe normal (quotidien)
+  // relira cette subscription déjà à jour et régénérera le bon mouvement en
+  // comparant au vrai état pré-migration — rien n'est perdu, juste retardé
+  // jusqu'à la fin du restatement en cours.
+  //
+  // Lock dédié `restatement-<org_id>` (distinct du lock partagé
+  // `sync-stripe-<org_id>` qui empêche restatement/sync normal de tourner
+  // en même temps) — corrigé en revue de merge du 2026-08-04 : vérifier le
+  // lock partagé ici aurait aussi différé ce traitement pendant N'IMPORTE
+  // QUEL sync-stripe normal (quotidien), pas seulement un restatement,
+  // dégradant la latence temps réel des webhooks jusqu'à 24h sans que ce
+  // soit voulu ni acté.
+  if (await isCronLockHeld(supabase, `restatement-${organizationId}`)) {
+    console.log(JSON.stringify({
+      level: 'info', function_name: 'stripe-webhook', event_id: event.id, organization_id: organizationId,
+      message: `Deferred account-level MRR update / movement classification for subscription ${sub.id}: restatement in progress for this org. Will be reconciled by the next normal sync-stripe run.`,
+    }))
+    return
   }
 
-  if (movementType) {
-    const amount = movementType === 'churn'
-      ? -prevSubMrr
-      : movementType === 'contraction'
-      ? mrrCents - prevSubMrr
-      : mrrCents
+  // Aggregate MRR from ALL subscriptions for this account (pas seulement la
+  // subscription de cet event, pour gérer les comptes multi-subscriptions).
+  // aggregateAccountMrr (_shared/mrr-engine.ts) — même fonction que
+  // sync-stripe, reconstruite ici à partir des colonnes persistées
+  // (is_delinquent/pending_cancellation ne sont pas stockés par
+  // subscription, dérivés de status/cancel_at, seule information
+  // équivalente disponible après écriture en base).
+  const { data: accountSubs } = await supabase
+    .from('subscriptions')
+    .select('status, mrr_cents, trial_mrr_cents, mrr_status, currency, cancel_at')
+    .eq('account_id', accountRow.id)
+
+  const accountAgg = aggregateAccountMrr(
+    (accountSubs ?? []).map((s: {
+      status: string
+      mrr_cents: number
+      trial_mrr_cents: number
+      mrr_status: string
+      currency: string | null
+      cancel_at: string | null
+    }) => ({
+      status: s.status,
+      result: {
+        mrr_cents: s.mrr_cents ?? 0,
+        trial_mrr_cents: s.trial_mrr_cents ?? 0,
+        mrr_status: s.mrr_status === 'unavailable' ? 'unavailable' : 'ok',
+        currency: s.currency,
+        is_delinquent: s.status === 'past_due' || s.status === 'unpaid',
+        pending_cancellation: s.status === 'active' && s.cancel_at !== null,
+        interval_raw: '',
+        interval_count: 1,
+      },
+    })),
+    // Détection de devise minoritaire hors de portée d'un event unitaire
+    // (vote majoritaire à l'échelle de l'org) — recalculée au prochain
+    // sync-stripe quotidien (docs/openspec.md §9). null ici = pas de
+    // filtre appliqué, toute devise connue est acceptée pour ce compte.
+    null,
+  )
+  const newAccountMrr = accountAgg.mrr_cents
+  const newAccountMrrStatus = accountAgg.mrr_status
+
+  // Classification unique — même fonction pure que sync-stripe
+  // (_shared/mrr-engine.ts), garantissant des classifications identiques
+  // pour le même événement quel que soit le chemin d'ingestion
+  // (AUDIT_LOGIQUE_METIER_STRIPE.md point 11/17). Réactivation détectée au
+  // niveau compte (docs/openspec.md §7), pas au niveau objet subscription.
+  const { data: priorChurnRow } = await supabase
+    .from('mrr_movements')
+    .select('id')
+    .eq('account_id', accountRow.id)
+    .eq('movement_type', 'churn')
+    .limit(1)
+    .maybeSingle()
+
+  const movement = classifyMovement({
+    previous: { mrr_cents: prevAccountMrr, mrr_status: prevAccountMrrStatus },
+    current: { mrr_cents: newAccountMrr, mrr_status: newAccountMrrStatus },
+    hasPriorChurnMovement: priorChurnRow !== null,
+  })
+
+  if (movement) {
+    // movement_date = date effective de l'événement Stripe (event.created),
+    // jamais la date de traitement (docs/openspec.md §10) — un webhook
+    // rattrapé en retard (redémarrage, backlog DLQ) ne doit pas dater le
+    // mouvement du jour où il a été rejoué.
+    const movementDate = event.created
+      ? new Date(event.created * 1000).toISOString().split('T')[0]
+      : new Date().toISOString().split('T')[0]
 
     const { error: mvtError } = await supabase
       .from('mrr_movements')
       .insert({
         organization_id: organizationId,
         account_id: accountRow.id,
-        movement_type: movementType,
-        amount_cents: amount,
-        movement_date: new Date().toISOString().split('T')[0],
+        movement_type: movement.movement_type,
+        amount_cents: movement.amount_cents,
+        movement_date: movementDate,
         stripe_event_id: event.id,
       })
 
     if (!mvtError) {
       logger.increment('movements_processed')
+    } else if (mvtError.code === '23505') {
+      // Collision sur la contrainte unique (stripe_event_id) — rejeu légitime
+      // du même event Stripe, pas une erreur.
+      console.log(JSON.stringify({
+        level: 'info', function_name: 'stripe-webhook', event_id: event.id,
+        message: 'mrr_movements insert skipped: duplicate stripe_event_id (legitimate replay)',
+      }))
+    } else {
+      console.error(JSON.stringify({
+        level: 'error', function_name: 'stripe-webhook', event_id: event.id,
+        message: `mrr_movements insert failed: ${mvtError.message}`,
+      }))
+      await writeToDLQ(supabase, {
+        organization_id: organizationId,
+        provider: 'stripe',
+        event_type: event.type,
+        payload: event,
+        error_message: `mrr_movements insert failed: ${mvtError.message}`,
+      })
     }
   }
-
-  // Aggregate MRR from ALL active subscriptions for this account
-  // (not just the current event's subscription, to handle multi-sub accounts)
-  const { data: activeSubs } = await supabase
-    .from('subscriptions')
-    .select('mrr_cents')
-    .eq('account_id', accountRow.id)
-    .in('status', ['active', 'trialing'])
-
-  const totalMrr = (activeSubs ?? []).reduce(
-    (sum: number, s: { mrr_cents: number }) => sum + (s.mrr_cents ?? 0), 0,
-  )
 
   await supabase
     .from('accounts')
     .update({
-      mrr_cents: totalMrr,
-      arr_cents: totalMrr * 12,
+      mrr_cents: newAccountMrr,
+      arr_cents: newAccountMrr * 12,
+      trial_mrr_cents: accountAgg.trial_mrr_cents,
+      mrr_status: accountAgg.mrr_status,
+      is_delinquent: accountAgg.is_delinquent,
+      pending_cancellation: accountAgg.pending_cancellation,
+      is_zero_dollar_active: accountAgg.is_zero_dollar_active,
+      // billing_model='subscription' : recevoir un event de subscription
+      // implique par définition que ce compte a un objet Subscription
+      // Stripe — jamais invoice_only depuis ce chemin (docs/openspec.md §8.2).
+      billing_model: 'subscription',
       last_stripe_sync_at: new Date().toISOString(),
+      ...(accountAgg.currency !== null && { currency: accountAgg.currency }),
       ...(contractStart !== null && { contract_start_date: contractStart }),
       ...(contractEnd !== null && { contract_end_date: contractEnd }),
     })
@@ -280,13 +398,12 @@ async function handleInvoiceEvent(
     return
   }
 
-  // Même logique que sync-stripe : propage la devise du compte Stripe
-  // connecté vers organizations.currency dès la première invoice reçue
-  // en temps réel, pas seulement lors du sync quotidien.
-  await supabase
-    .from('organizations')
-    .update({ currency: invoiceCurrency })
-    .eq('id', organizationId)
+  // organizations.currency n'est plus mis à jour depuis ce chemin (Phase
+  // 2.6) : sync-stripe le dérive désormais d'un vote majoritaire sur les
+  // subscriptions de l'org (docs/openspec.md §9) — propager la devise
+  // d'une seule invoice ici referait flapper la valeur à chaque event pour
+  // toute org multi-devises, exactement le bug que le vote majoritaire
+  // corrige côté sync-stripe (AUDIT_LOGIQUE_METIER_STRIPE.md point 7).
 
   logger.increment('records_processed')
   logger.increment('invoices_processed')
@@ -297,11 +414,65 @@ async function handleInvoiceEvent(
   }
 }
 
+// customer.subscription.trial_will_end — signal informatif uniquement
+// (docs/openspec.md §4). Aucune écriture MRR, juste un accusé de réception
+// journalisé pour observabilité/futurs insights.
+function handleTrialWillEnd(event: StripeEvent, logger: DataSyncLogger): void {
+  const trial = event.data.object as StripeTrialWillEnd
+  console.log(JSON.stringify({
+    level: 'info', function_name: 'stripe-webhook', event_id: event.id,
+    message: `trial_will_end received for customer ${trial.customer} (subscription ${trial.id}) — no financial field updated, informational only (docs/openspec.md §4)`,
+  }))
+  logger.increment('records_processed')
+}
+
+// charge.refunded / credit_note.created — met à jour uniquement le statut
+// de l'invoice liée (docs/openspec.md §10). Aucun impact rétroactif sur
+// mrr_movements/score_history : l'historique n'est jamais réécrit
+// silencieusement, seul le ledger d'invoices reste honnête.
+async function handleRefundEvent(
+  supabase: SupabaseClient,
+  organizationId: string,
+  event: StripeEvent,
+  logger: DataSyncLogger,
+): Promise<void> {
+  const obj = event.data.object as StripeCharge | StripeCreditNote
+  const stripeInvoiceId = obj.invoice
+  if (!stripeInvoiceId) {
+    // Remboursement/avoir non lié à une invoice (ex. charge one-off) —
+    // rien à mettre à jour côté MRR/invoices dans cette itération.
+    logger.increment('records_processed')
+    return
+  }
+
+  const { error } = await supabase
+    .from('invoices')
+    .update({ status: 'refunded' })
+    .eq('organization_id', organizationId)
+    .eq('stripe_invoice_id', stripeInvoiceId)
+
+  if (error) {
+    console.error(JSON.stringify({
+      level: 'error', function_name: 'stripe-webhook', event_id: event.id,
+      message: `Failed to mark invoice ${stripeInvoiceId} as refunded: ${error.message}`,
+    }))
+    logger.increment('records_failed')
+    return
+  }
+
+  logger.increment('records_processed')
+  logger.increment('records_updated')
+}
+
 // ── Types Stripe minimalistes ────────────────────────────────
 interface StripeEvent {
   id: string
   type: string
   account?: string
+  // Timestamp Unix (secondes) de l'événement côté Stripe — garde
+  // d'ordonnancement (docs/openspec.md §10) et movement_date effectif,
+  // jamais la date de traitement local.
+  created?: number
   data: {
     object: unknown
     previous_attributes?: unknown
@@ -312,15 +483,30 @@ interface StripeCustomer {
   id: string
 }
 
-interface StripeSubscription {
+interface StripeSubscription extends StripeSubscriptionLike {
   id: string
   customer: string
   status: string
   quantity?: number
-  plan?: { amount: number; interval: string }
-  items?: { data: Array<{ price: { id: string; unit_amount: number; product: string; recurring?: { interval: string } } }> }
+  plan?: { amount: number; interval: string; currency?: string }
+  items?: {
+    data: Array<{
+      price: {
+        id: string
+        unit_amount: number | null
+        currency?: string
+        product: string
+        recurring?: { interval: string; interval_count?: number; usage_type?: string }
+        billing_scheme?: string
+      }
+      quantity?: number
+    }>
+  }
+  discount?: { coupon: { percent_off?: number | null; amount_off?: number | null; duration: 'forever' | 'repeating' | 'once'; duration_in_months?: number | null } } | null
+  discounts?: Array<{ coupon: { percent_off?: number | null; amount_off?: number | null; duration: 'forever' | 'repeating' | 'once'; duration_in_months?: number | null } }> | null
   trial_end?: number | null
   cancel_at?: number | null
+  cancel_at_period_end?: boolean
   canceled_at?: number | null
   current_period_start?: number | null
   current_period_end?: number | null
@@ -338,6 +524,29 @@ interface StripeInvoice {
   status_transitions?: { paid_at?: number }
 }
 
+// charge.refunded / credit_note.created (docs/openspec.md §10) : handlers
+// minimaux — mettent à jour uniquement invoices.status, aucun impact
+// rétroactif sur mrr_movements/score_history. L'historique n'est jamais
+// réécrit silencieusement.
+interface StripeCharge {
+  id: string
+  invoice?: string | null
+}
+
+interface StripeCreditNote {
+  id: string
+  invoice?: string | null
+}
+
+// customer.subscription.trial_will_end : aucun champ financier modifié
+// (docs/openspec.md §4) — signal informatif pour de futurs insights/
+// playbooks, hors périmètre du moteur MRR dans cette itération. Le handler
+// se contente d'accuser réception (utile pour l'idempotence/observabilité).
+interface StripeTrialWillEnd {
+  id: string
+  customer: string
+}
+
 // ── Handlers routés par event type ──────────────────────────
 const ROUTED_EVENTS = new Set([
   'customer.created',
@@ -345,10 +554,13 @@ const ROUTED_EVENTS = new Set([
   'customer.subscription.created',
   'customer.subscription.updated',
   'customer.subscription.deleted',
+  'customer.subscription.trial_will_end',
   'invoice.created',
   'invoice.paid',
   'invoice.payment_failed',
   'invoice.voided',
+  'charge.refunded',
+  'credit_note.created',
 ])
 
 // ── Entrypoint ───────────────────────────────────────────────
@@ -518,6 +730,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
             })
           }
         }
+        break
+      case 'customer.subscription.trial_will_end':
+        handleTrialWillEnd(event, logger)
+        break
+      case 'charge.refunded':
+      case 'credit_note.created':
+        await handleRefundEvent(supabase, organizationId, event, logger)
         break
     }
 

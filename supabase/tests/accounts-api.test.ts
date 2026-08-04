@@ -39,6 +39,7 @@ const baseAccountFields = {
   plan_tier: 'growth',
   billing_interval: 'annual',
   mrr_cents: 149900,
+  mrr_status: 'ok' as const,
   arr_cents: 1798800,
   seat_count: 12,
   seat_limit: 20,
@@ -186,6 +187,7 @@ describe('accounts-api handleGetOne — payload shape by health_score_status', (
     expect(json.data.scores.payment_health.value).toBe(91)
     expect(json.data.scores.churn_risk.band).toBe('low')
     expect(json.data.scores.expansion.status).toBe('available')
+    expect(json.data.mrr_status).toBe('ok')
     expect(json.data.primary_segment).toBe('champions')
     expect(json.data.score_breakdown.payment_health.status).toBe('available')
     expect(json.data.segments[0].risk_score).toBe(json.data.scores.churn_risk.value)
@@ -239,5 +241,11 @@ describe('accounts-api handleGetOne — payload shape by health_score_status', (
     // segments array only contains 'nouveaux' (non-exclusive lifecycle segment,
     // no health segment membership yet) — primary_segment must be null, not 'nouveaux'
     expect(withNouveaux.data.primary_segment).toBeNull()
+  })
+
+  it('mrr_status=unavailable passes through unchanged (frontend renders "Not billable" instead of $0, Phase 5.5)', async () => {
+    const unavailableAccount = { ...completeAccount, mrr_status: 'unavailable' as const, mrr_cents: 0 }
+    const json = await runHandleGetOne(unavailableAccount, 'champions')
+    expect(json.data.mrr_status).toBe('unavailable')
   })
 })

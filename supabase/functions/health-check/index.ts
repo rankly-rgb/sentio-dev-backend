@@ -6,12 +6,18 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse, errorResponse } from '../_shared/supabase-client.ts'
+import { verifyUserAuth } from '../_shared/auth.ts'
+import { computeSyncFreshness } from '../_shared/sync-freshness.ts'
 
 interface HealthCheck {
   name: string
   status: 'ok' | 'warning' | 'critical'
   message?: string
 }
+
+// computeSyncFreshness vit dans _shared/sync-freshness.ts (Phase 4) —
+// réutilisée par dashboard-api/portfolio-metrics (stripe_stale), même
+// principe que _shared/mrr-engine.ts : une seule implémentation du calcul.
 
 Deno.serve(async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
@@ -105,6 +111,29 @@ Deno.serve(async (req: Request): Promise<Response> => {
     checks.push({ name: 'dlq', status: 'warning', message: 'Could not check DLQ' })
   }
 
+  // Fraîcheur de sync par org (docs/openspec.md Phase 3) — endpoint
+  // volontairement appelable sans JWT (moniteur externe existant), un JWT
+  // valide ajoute simplement les champs *_stale/*_sync_hours_ago pour
+  // l'org résolue. stripe_stale mirrore exactement hubspot_stale, jusque-là
+  // déclaré côté frontend (src/types/ops.ts) mais jamais réellement peuplé.
+  let freshnessFields: Record<string, boolean | number | null> = {}
+  try {
+    const { organizationId } = await verifyUserAuth(req)
+    const [stripeFreshness, hubspotFreshness] = await Promise.all([
+      computeSyncFreshness(supabase, organizationId, 'stripe'),
+      computeSyncFreshness(supabase, organizationId, 'hubspot'),
+    ])
+    freshnessFields = {
+      stripe_stale: stripeFreshness.stale,
+      last_stripe_sync_hours_ago: stripeFreshness.lastSyncHoursAgo,
+      hubspot_stale: hubspotFreshness.stale,
+      last_hubspot_sync_hours_ago: hubspotFreshness.lastSyncHoursAgo,
+    }
+  } catch {
+    // Pas de JWT (ou invalide) — comportement inchangé pour les moniteurs
+    // externes non authentifiés, champs de fraîcheur simplement absents.
+  }
+
   const statusCode = overallStatus === 'unhealthy' ? 503 : 200
-  return jsonResponse({ status: overallStatus, checks, timestamp: new Date().toISOString() }, statusCode)
+  return jsonResponse({ status: overallStatus, checks, timestamp: new Date().toISOString(), ...freshnessFields }, statusCode)
 })

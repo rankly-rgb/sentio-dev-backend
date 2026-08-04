@@ -32,6 +32,7 @@ interface AccountRow {
   organization_id: string
   health_score: number | null
   churn_risk_score: number | null
+  churn_risk_band: string | null
   expansion_score: number | null
   product_usage_score: number | null
   mrr_cents: number | null
@@ -80,11 +81,28 @@ async function prefetchInsightData(
     }
   }
 
-  // Build usage history map (most recent score ~14 days ago per account)
+  // Build usage history map (most recent score ~14 days ago per account).
+  // Note (2026-08-04, AUDIT_LOGIQUE_METIER_STRIPE.md point 19) : ce map
+  // n'est plus consommé par aucune règle active — evaluateUsageDrop est
+  // gelée (_shared/insight-rules.ts) tant que product_usage_score reste
+  // une dimension retirée du modèle v3. Conservé et corrigé pour une
+  // réactivation propre le jour où une vraie dimension usage v3 existe,
+  // plutôt que retiré silencieusement.
+  //
+  // Bug corrigé : la boucle marquait un compte "visité" uniquement quand
+  // une valeur non-nulle était trouvée — un compte dont la ligne la plus
+  // récente avait product_usage_score=null retombait alors sur une ligne
+  // plus ancienne (potentiellement vieille de plusieurs mois), lue comme
+  // si elle datait de ~14 jours. `visitedAccounts` marque désormais le
+  // compte dès la première ligne rencontrée (la plus récente, tri
+  // snapshot_date DESC), null ou pas — jamais de retombée sur une valeur
+  // périmée.
   const usageHistoryMap = new Map<string, number>()
+  const visitedAccounts = new Set<string>()
   if (usageHistoryResult.data) {
     for (const row of usageHistoryResult.data) {
-      if (usageHistoryMap.has(row.account_id)) continue // most recent first
+      if (visitedAccounts.has(row.account_id)) continue
+      visitedAccounts.add(row.account_id)
       if (row.product_usage_score !== null) {
         usageHistoryMap.set(row.account_id, row.product_usage_score)
       }
@@ -316,7 +334,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
           const { data: batch, error: batchError } = await supabase
             .from('accounts')
-            .select('id, organization_id, health_score, churn_risk_score, expansion_score, product_usage_score, mrr_cents, contract_end_date, created_at')
+            .select('id, organization_id, health_score, churn_risk_score, churn_risk_band, expansion_score, product_usage_score, mrr_cents, contract_end_date, created_at')
             .eq('organization_id', organizationId)
             .not('scores_calculated_at', 'is', null)
             .range(batchOffset, batchOffset + BATCH_SIZE - 1)
@@ -347,14 +365,27 @@ Deno.serve(async (req: Request): Promise<Response> => {
               const usagePrevious = usageHistoryMap.get(account.id)
               const input = buildInsightInput(account, invoiceData, usagePrevious)
 
-              // D1 (2026-08-02) : un compte churné (mrr_cents=0) n'est pas
-              // "à risque", il est perdu — aucune règle ne doit produire de
-              // nouvel insight (payment_risk sur une vieille facture,
-              // renewal_alert sur une date de contrat obsolète, etc. peuvent
-              // sinon rester "vrais" alors que le compte est déjà parti).
-              // candidates=[] déclenche l'auto-résolution existante de
-              // syncInsights pour tout insight resté actif sur ce compte.
-              const candidates = account.mrr_cents === 0 ? [] : evaluateInsightRules(input)
+              // D1 (2026-08-02) : un compte churné n'est pas "à risque", il
+              // est perdu — aucune règle ne doit produire de nouvel insight
+              // (payment_risk sur une vieille facture, renewal_alert sur une
+              // date de contrat obsolète, etc. peuvent sinon rester "vrais"
+              // alors que le compte est déjà parti). candidates=[] déclenche
+              // l'auto-résolution existante de syncInsights pour tout
+              // insight resté actif sur ce compte.
+              //
+              // D-NEXT (2026-08-04, docs/openspec.md §5, CLAUDE.md) : ce
+              // garde-fou lisait encore `account.mrr_cents === 0`, l'ancienne
+              // définition D1 de "churné" — trouvée lors de l'auto-
+              // vérification adversariale, jamais mise à jour quand D-NEXT a
+              // découplé isChurned de mrr_cents===0. Un compte facturé
+              // manuellement (invoice_only) ou entièrement metered a
+              // mrr_status='unavailable' et mrr_cents=0 sans être churné —
+              // c'est précisément le type de compte que D-NEXT visait à ne
+              // plus geler par erreur, et qui a le plus besoin d'insights.
+              // `churn_risk_band` est déjà réconcilié avec isAccountChurned()
+              // par scoreAccountPure (calculate-scores/index.ts) — même
+              // source que dashboard-api/get-today-status pour ce prédicat.
+              const candidates = account.churn_risk_band === 'churned' ? [] : evaluateInsightRules(input)
               const { created, resolved } = await syncInsights(
                 supabase,
                 organizationId,

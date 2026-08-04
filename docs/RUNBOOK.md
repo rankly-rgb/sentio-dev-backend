@@ -226,6 +226,91 @@ this back into Phase 3's planned logistic regression over historical churn.
 
 ---
 
+## One-Time Migration Procedures
+
+### MRR Engine v2 — Restatement (Phase 2.4, docs/openspec.md)
+
+The MRR derivation formula changed (`_shared/mrr-engine.ts`): all subscription
+items are now summed instead of only `items.data[0]`, `interval_count` is
+respected (quarterly/weekly no longer miscounted as monthly), active
+discounts are applied, and trials are excluded from `mrr_cents`. Existing
+`accounts.mrr_cents` values were computed with the old formula and must be
+restated **before** relying on `mrr_movements`/NRR for any org synced prior
+to this deploy — otherwise the very next normal sync would generate a wave
+of fake `contraction`/`expansion`/`churn` movements purely from the formula
+change, permanently polluting NRR.
+
+**Run once per org, before/immediately after deploying this change**:
+
+```bash
+curl -X POST "$SUPABASE_URL/functions/v1/sync-stripe" \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"organization_id": "<org-uuid>", "restatement_mode": true}'
+```
+
+Omit `organization_id` to restate all active organizations in one call
+(sequential dispatch, same as a normal multi-org sync run).
+
+**What it does**: recomputes `accounts.mrr_cents`/`arr_cents` with the new
+formula, generates **zero** `mrr_movements` rows, and logs every account
+whose value actually changed into `mrr_restatements` (`old_mrr_cents`,
+`new_mrr_cents`, `reason`). The MRR-collapse anomaly guard
+(`sync-anomaly-guard.ts`) is explicitly bypassed for this run — a formula
+change legitimately shifts many accounts at once, which is not the
+regression that guard exists to catch.
+
+**Verify**:
+```sql
+SELECT organization_id, COUNT(*), SUM(new_mrr_cents - old_mrr_cents) AS net_delta_cents
+FROM mrr_restatements
+WHERE reason = 'mrr_engine_v2_migration'
+GROUP BY organization_id
+ORDER BY ABS(SUM(new_mrr_cents - old_mrr_cents)) DESC;
+```
+Review orgs with the largest deltas manually before trusting their NRR
+going forward. Confirm zero `mrr_movements` were written for this run:
+```sql
+SELECT COUNT(*) FROM mrr_movements WHERE created_at > '<restatement run timestamp>';
+-- expect 0, or only rows from unrelated concurrent webhook activity
+```
+
+**After running**: the normal cron/webhook sync resumes automatically (no
+flag to unset) — the next scheduled `sync-stripe` run will see
+`prevMrr ≈ newMrr` for every restated account and generate no spurious
+movements.
+
+**Concurrency**: `sync-stripe` locks per-org (`cron_locks`, key
+`sync-stripe-<org_id>`) — a normal cron/webhook-triggered sync for the same
+org cannot run while a restatement is in progress for it, and vice versa; one
+of the two gets a clean `409 Sync already in progress` rather than
+interleaving writes. The lock TTL is 600s in `restatement_mode` (vs 300s for
+a normal sync) since a full recompute can legitimately take longer on a
+large org.
+
+`restatement_mode` additionally holds a second, dedicated lock
+(`restatement-<org_id>`, same 600s TTL) for the duration of the run. This is
+the lock `stripe-webhook` checks (read-only, `isCronLockHeld`) before writing
+`accounts.mrr_cents`/classifying a movement for an incoming event — **only**
+while an actual restatement is running for that org, never during a normal
+daily sync. A webhook arriving in that window still upserts the
+`subscriptions` row immediately (always safe); only the account-level MRR
+write and movement generation are deferred until the next normal sync
+reconciles them (see `docs/openspec.md` §10bis for the full rationale, and
+why checking the shared `sync-stripe-<org_id>` lock instead — an earlier
+draft did this — would have wrongly deferred webhooks during every normal
+daily sync too, up to a 24h real-time-latency regression that was never an
+intended tradeoff).
+
+**If interrupted mid-run** (crash, timeout, dropped connection): re-run the
+exact same curl command. The restatement is idempotent — `mrr_restatements`
+is written before `accounts` on each account and upserted on
+`(account_id, reason)` (migration `20260804000006`), so a replay recomputes
+and safely re-confirms the same audit row for any account whose delta wasn't
+fully persisted yet, then finishes writing `accounts`. Accounts that
+completed on the first pass are unaffected (delta is 0 on replay, both
+writes are skipped for them).
+
 ## Monitoring Endpoints
 
 | Endpoint | Purpose | Frequency |
