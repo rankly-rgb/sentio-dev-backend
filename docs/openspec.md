@@ -33,14 +33,16 @@ Ces deux principes, déjà actés ailleurs dans le projet (`CLAUDE.md`, section 
 **Décision actée** :
 
 ```
-mrr_cents = amount_total_after_discount / périodes_par_mois
+mrr_cents = amount_total_after_discount / durée_periode_en_mois
 
-périodes_par_mois selon interval Stripe :
+durée_periode_en_mois (T, durée d'une période de facturation exprimée en mois) selon interval Stripe :
   year   →  12 × interval_count
   month  →       interval_count
-  week   →       interval_count / 4.345   (moyenne de semaines par mois)
-  day    →       interval_count / 30.437  (moyenne de jours par mois)
+  week   →       interval_count / 4.345   (1 semaine ≈ 1/4.345 mois)
+  day    →       interval_count / 30.437  (1 jour ≈ 1/30.437 mois)
 ```
+
+Exemple hebdomadaire : `interval='week', interval_count=1` → `T = 1/4.345 ≈ 0.230` mois/période → `mrr = amount / 0.230 = amount × 4.345` (une charge hebdomadaire de $10 vaut ≈ $43.45/mois — le montant est bien multiplié, pas divisé, T étant `< 1`).
 
 `interval_count` (ex. `interval: 'month', interval_count: 3` = trimestriel) est toujours lu — plus jamais ignoré comme dans l'ancienne implémentation dupliquée (`sync-stripe`/`stripe-webhook`, qui ne géraient que `month`/`year` avec `interval_count` implicitement traité comme 1).
 
