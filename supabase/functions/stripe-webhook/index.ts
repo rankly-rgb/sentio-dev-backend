@@ -11,7 +11,7 @@ import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
 import { writeToDLQ } from '../_shared/dlq.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { verifyStripeSignature } from '../_shared/stripe-signature.ts'
-import { calcSubscriptionMrrCents, classifyMovement, type StripeSubscriptionLike } from '../_shared/mrr-engine.ts'
+import { calcSubscriptionMrrCents, aggregateAccountMrr, classifyMovement, type StripeSubscriptionLike } from '../_shared/mrr-engine.ts'
 
 // ── Résolution de l'organization depuis stripe_account_id ───
 async function resolveOrganization(
@@ -91,7 +91,7 @@ async function handleSubscriptionEvent(
   // Résoudre l'account via le customer
   const { data: accountRow } = await supabase
     .from('accounts')
-    .select('id, mrr_cents')
+    .select('id, mrr_cents, mrr_status')
     .eq('organization_id', organizationId)
     .eq('stripe_customer_id', sub.customer)
     .maybeSingle()
@@ -113,9 +113,11 @@ async function handleSubscriptionEvent(
   const contractStart = sub.current_period_start ? new Date(sub.current_period_start * 1000).toISOString() : null
   const contractEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null
 
-  // accountRow.mrr_cents a été lu AVANT toute écriture de ce handler (TOCTOU
-  // fix déjà en place) — c'est le snapshot "previous" au niveau compte.
+  // accountRow.mrr_cents/mrr_status ont été lus AVANT toute écriture de ce
+  // handler (TOCTOU fix déjà en place) — c'est le snapshot "previous" au
+  // niveau compte.
   const prevAccountMrr = accountRow.mrr_cents ?? 0
+  const prevAccountMrrStatus: 'ok' | 'unavailable' = accountRow.mrr_status === 'unavailable' ? 'unavailable' : 'ok'
 
   // Upsert subscription
   const { error: subError } = await supabase
@@ -129,6 +131,11 @@ async function handleSubscriptionEvent(
         stripe_product_id: sub.items?.data?.[0]?.price?.product ?? null,
         status: sub.status,
         mrr_cents: mrrCents,
+        trial_mrr_cents: mrrResult.trial_mrr_cents,
+        mrr_status: mrrResult.mrr_status,
+        currency: mrrResult.currency,
+        interval_raw: mrrResult.interval_raw,
+        interval_count: mrrResult.interval_count,
         quantity: sub.quantity ?? 1,
         trial_end_date: trialEnd,
         cancel_at: cancelAt,
@@ -145,26 +152,47 @@ async function handleSubscriptionEvent(
 
   logger.increment('subscriptions_processed')
 
-  // Aggregate MRR from ALL billable subscriptions for this account (pas
-  // seulement la subscription de cet event, pour gérer les comptes
-  // multi-subscriptions). past_due/unpaid inclus (docs/openspec.md §5) : un
-  // compte délinquant reste compté, jamais mis à zéro silencieusement.
+  // Aggregate MRR from ALL subscriptions for this account (pas seulement la
+  // subscription de cet event, pour gérer les comptes multi-subscriptions).
+  // aggregateAccountMrr (_shared/mrr-engine.ts) — même fonction que
+  // sync-stripe, reconstruite ici à partir des colonnes persistées
+  // (is_delinquent/pending_cancellation ne sont pas stockés par
+  // subscription, dérivés de status/cancel_at, seule information
+  // équivalente disponible après écriture en base).
   const { data: accountSubs } = await supabase
     .from('subscriptions')
-    .select('mrr_cents, status')
+    .select('status, mrr_cents, trial_mrr_cents, mrr_status, currency, cancel_at')
     .eq('account_id', accountRow.id)
-    .in('status', ['active', 'trialing', 'past_due', 'unpaid'])
 
-  const newAccountMrr = (accountSubs ?? []).reduce(
-    (sum: number, s: { mrr_cents: number }) => sum + (s.mrr_cents ?? 0), 0,
+  const accountAgg = aggregateAccountMrr(
+    (accountSubs ?? []).map((s: {
+      status: string
+      mrr_cents: number
+      trial_mrr_cents: number
+      mrr_status: string
+      currency: string | null
+      cancel_at: string | null
+    }) => ({
+      status: s.status,
+      result: {
+        mrr_cents: s.mrr_cents ?? 0,
+        trial_mrr_cents: s.trial_mrr_cents ?? 0,
+        mrr_status: s.mrr_status === 'unavailable' ? 'unavailable' : 'ok',
+        currency: s.currency,
+        is_delinquent: s.status === 'past_due' || s.status === 'unpaid',
+        pending_cancellation: s.status === 'active' && s.cancel_at !== null,
+        interval_raw: '',
+        interval_count: 1,
+      },
+    })),
+    // Détection de devise minoritaire hors de portée d'un event unitaire
+    // (vote majoritaire à l'échelle de l'org) — recalculée au prochain
+    // sync-stripe quotidien (docs/openspec.md §9). null ici = pas de
+    // filtre appliqué, toute devise connue est acceptée pour ce compte.
+    null,
   )
-  // mrr_status au niveau compte : cette subscription seule est vérifiée ici
-  // (calcSubscriptionMrrCents détecte déjà metered/unit_amount null sans
-  // contexte org) — la détection de devise minoritaire nécessite un vote
-  // majoritaire à l'échelle de l'organisation, hors de portée d'un event
-  // unitaire : elle est recalculée au prochain sync-stripe quotidien
-  // (docs/openspec.md §9).
-  const newAccountMrrStatus: 'ok' | 'unavailable' = mrrResult.mrr_status === 'unavailable' ? 'unavailable' : 'ok'
+  const newAccountMrr = accountAgg.mrr_cents
+  const newAccountMrrStatus = accountAgg.mrr_status
 
   // Classification unique — même fonction pure que sync-stripe
   // (_shared/mrr-engine.ts), garantissant des classifications identiques
@@ -180,7 +208,7 @@ async function handleSubscriptionEvent(
     .maybeSingle()
 
   const movement = classifyMovement({
-    previous: { mrr_cents: prevAccountMrr, mrr_status: 'ok' },
+    previous: { mrr_cents: prevAccountMrr, mrr_status: prevAccountMrrStatus },
     current: { mrr_cents: newAccountMrr, mrr_status: newAccountMrrStatus },
     hasPriorChurnMovement: priorChurnRow !== null,
   })
@@ -220,7 +248,17 @@ async function handleSubscriptionEvent(
     .update({
       mrr_cents: newAccountMrr,
       arr_cents: newAccountMrr * 12,
+      trial_mrr_cents: accountAgg.trial_mrr_cents,
+      mrr_status: accountAgg.mrr_status,
+      is_delinquent: accountAgg.is_delinquent,
+      pending_cancellation: accountAgg.pending_cancellation,
+      is_zero_dollar_active: accountAgg.is_zero_dollar_active,
+      // billing_model='subscription' : recevoir un event de subscription
+      // implique par définition que ce compte a un objet Subscription
+      // Stripe — jamais invoice_only depuis ce chemin (docs/openspec.md §8.2).
+      billing_model: 'subscription',
       last_stripe_sync_at: new Date().toISOString(),
+      ...(accountAgg.currency !== null && { currency: accountAgg.currency }),
       ...(contractStart !== null && { contract_start_date: contractStart }),
       ...(contractEnd !== null && { contract_end_date: contractEnd }),
     })

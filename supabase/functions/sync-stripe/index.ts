@@ -15,7 +15,14 @@ import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
 import { CircuitBreaker } from '../_shared/circuit-breaker.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { detectMrrCollapseAnomaly, type AccountMrrUpdate } from '../_shared/sync-anomaly-guard.ts'
-import { calcSubscriptionMrrCents, classifyMovement, type StripeSubscriptionLike } from '../_shared/mrr-engine.ts'
+import {
+  calcSubscriptionMrrCents,
+  aggregateAccountMrr,
+  classifyMovement,
+  detectOrgMajorityCurrency,
+  type SubscriptionMrrResult,
+  type StripeSubscriptionLike,
+} from '../_shared/mrr-engine.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
@@ -262,24 +269,25 @@ async function syncSubscriptions(
   const extraParams: Record<string, string> = { status: 'all' }
 
   // Pre-build stripe_customer_id → account.id Map (eliminates N+1 queries)
-  // + snapshot du MRR actuel pour détecter les mouvements
+  // + snapshot du MRR/mrr_status actuels pour détecter les mouvements
   const { data: subSyncAccounts } = await supabase
     .from('accounts')
-    .select('id, stripe_customer_id, mrr_cents')
+    .select('id, stripe_customer_id, mrr_cents, mrr_status')
     .eq('organization_id', organizationId)
 
   const customerToAccount = new Map<string, string>()
   const prevMrrByAccount = new Map<string, number>()
+  const prevMrrStatusByAccount = new Map<string, 'ok' | 'unavailable'>()
   for (const a of subSyncAccounts ?? []) {
     if (a.stripe_customer_id) customerToAccount.set(a.stripe_customer_id, a.id)
     prevMrrByAccount.set(a.id, a.mrr_cents ?? 0)
+    prevMrrStatusByAccount.set(a.id, a.mrr_status === 'unavailable' ? 'unavailable' : 'ok')
   }
 
   // Track per-account metadata from active subs for MRR aggregation
   const accountSubMeta = new Map<string, Array<{
     status: string
-    mrrCents: number
-    mrrStatus: 'ok' | 'unavailable'
+    result: SubscriptionMrrResult
     billingInterval: string
     quantity: number
     contractStart: string | null
@@ -287,6 +295,15 @@ async function syncSubscriptions(
     priceId: string | null
     createdAt: number
   }>>()
+
+  // Comptes ayant au moins une subscription connue, tous statuts confondus
+  // (y compris canceled) — sert à détecter billing_model='invoice_only'
+  // (docs/openspec.md §8.2) : un compte ici n'est jamais invoice_only, peu
+  // importe qu'il soit actif ou churned.
+  const accountsWithAnySubscription = new Set<string>()
+  // Devises des subscriptions billables de l'org, pour le vote majoritaire
+  // (docs/openspec.md §9) appliqué ci-dessous par compte.
+  const orgSubscriptionCurrencies: Array<{ currency: string | null }> = []
 
   // Collect all subscription rows — batch upsert at the end
   const subRows: Record<string, unknown>[] = []
@@ -297,6 +314,8 @@ async function syncSubscriptions(
       logger.increment('records_failed')
       continue
     }
+
+    accountsWithAnySubscription.add(accountId)
 
     const mrrResult = calcSubscriptionMrrCents(sub)
     const qty = sub.items?.data?.[0]?.quantity ?? sub.quantity ?? 1
@@ -309,6 +328,11 @@ async function syncSubscriptions(
       stripe_product_id: sub.items?.data?.[0]?.price?.product ?? null,
       status: sub.status,
       mrr_cents: mrrResult.mrr_cents,
+      trial_mrr_cents: mrrResult.trial_mrr_cents,
+      mrr_status: mrrResult.mrr_status,
+      currency: mrrResult.currency,
+      interval_raw: mrrResult.interval_raw,
+      interval_count: mrrResult.interval_count,
       quantity: qty,
       trial_end_date: sub.trial_end ? new Date(sub.trial_end * 1000).toISOString().split('T')[0] : null,
       cancel_at: sub.cancel_at ? new Date(sub.cancel_at * 1000).toISOString().split('T')[0] : null,
@@ -316,10 +340,10 @@ async function syncSubscriptions(
     })
 
     // Collect metadata from billable subs for account MRR propagation.
-    // past_due ajouté ici (docs/openspec.md §5) : un compte délinquant reste
-    // compté dans le MRR, jamais silencieusement mis à zéro — c'est ce qui
-    // évite qu'il se retrouve, en aval, court-circuité comme "churned"
-    // (AUDIT_LOGIQUE_METIER_STRIPE.md point 6).
+    // past_due/unpaid ajoutés ici (docs/openspec.md §5) : un compte
+    // délinquant reste compté dans le MRR, jamais silencieusement mis à
+    // zéro — c'est ce qui évite qu'il se retrouve, en aval, court-circuité
+    // comme "churned" (AUDIT_LOGIQUE_METIER_STRIPE.md point 6).
     if (sub.status === 'active' || sub.status === 'trialing' || sub.status === 'past_due' || sub.status === 'unpaid') {
       const periodStart = sub.current_period_start
         ? new Date(sub.current_period_start * 1000).toISOString().split('T')[0]
@@ -330,8 +354,7 @@ async function syncSubscriptions(
       const list = accountSubMeta.get(accountId) ?? []
       list.push({
         status: sub.status,
-        mrrCents: mrrResult.mrr_cents,
-        mrrStatus: mrrResult.mrr_status,
+        result: mrrResult,
         billingInterval: mrrResult.interval_raw === 'year' ? 'annual' : 'monthly',
         quantity: qty,
         contractStart: periodStart,
@@ -340,6 +363,27 @@ async function syncSubscriptions(
         createdAt: sub.created,
       })
       accountSubMeta.set(accountId, list)
+      orgSubscriptionCurrencies.push({ currency: mrrResult.currency })
+    }
+  }
+
+  const orgMajorityCurrency = detectOrgMajorityCurrency(orgSubscriptionCurrencies)
+
+  // Devise d'affichage de l'org : vote majoritaire sur les subscriptions de
+  // CE run (docs/openspec.md §9), remplace l'ancienne convention "première
+  // ligne d'invoice du batch" (syncInvoices avant ce chantier) qui flappait
+  // selon l'ordre de pagination Stripe plutôt que de refléter un état
+  // stable de l'org (AUDIT_LOGIQUE_METIER_STRIPE.md point 7).
+  if (orgMajorityCurrency) {
+    const { error: currencyError } = await supabase
+      .from('organizations')
+      .update({ currency: orgMajorityCurrency })
+      .eq('id', organizationId)
+    if (currencyError) {
+      console.error(JSON.stringify({
+        level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
+        message: `Failed to update organizations.currency: ${currencyError.message}`,
+      }))
     }
   }
 
@@ -367,24 +411,29 @@ async function syncSubscriptions(
     }) => [m.stripe_price_id, m]),
   )
 
-  // mrr_status par compte (en mémoire pour ce run — persisté sur accounts
-  // à partir de la migration 20260804000001, docs/openspec.md §12). Un
-  // compte dont au moins une subscription billable est 'unavailable'
-  // (metered, devise minoritaire, unit_amount null) ne classe aucun
-  // mouvement MRR ce run (classifyMovement) plutôt que de fabriquer un
-  // mouvement à partir d'un chiffre partiellement connu.
+  // mrr_status/mrr_cents par compte, désormais persisté sur accounts
+  // (migration 20260804000001, docs/openspec.md §12) — conservés en mémoire
+  // ici aussi pour la classification des mouvements (Phase 3 ci-dessous),
+  // qui doit réutiliser exactement la valeur agrégée par aggregateAccountMrr
+  // (exclusion des devises minoritaires notamment) plutôt que la
+  // recalculer naïvement.
   const accountMrrStatus = new Map<string, 'ok' | 'unavailable'>()
+  const newMrrByAccount = new Map<string, number>()
 
   const accountUpdateRows: Record<string, unknown>[] = []
   for (const acctId of customerToAccount.values()) {
     const subs = accountSubMeta.get(acctId) ?? []
-    const totalMrr = subs.reduce((sum, s) => sum + s.mrrCents, 0)
+    const agg = aggregateAccountMrr(
+      subs.map((s) => ({ status: s.status, result: s.result })),
+      orgMajorityCurrency,
+    )
     const totalSeats = subs.reduce((sum, s) => sum + s.quantity, 0)
-    const primary = subs.length > 0 ? subs.slice().sort((a, b) => b.mrrCents - a.mrrCents)[0] : null
-    accountMrrStatus.set(acctId, subs.some((s) => s.mrrStatus === 'unavailable') ? 'unavailable' : 'ok')
+    const primary = subs.length > 0 ? subs.slice().sort((a, b) => b.result.mrr_cents - a.result.mrr_cents)[0] : null
+    newMrrByAccount.set(acctId, agg.mrr_cents)
+    accountMrrStatus.set(acctId, agg.mrr_status)
 
     // Résoudre le mapping produit à partir du price_id de l'abonnement principal
-    const primaryPriceId = getPrimaryPriceId(subs)
+    const primaryPriceId = getPrimaryPriceId(subs.map((s) => ({ mrrCents: s.result.mrr_cents, createdAt: s.createdAt, priceId: s.priceId })))
     const mapping = primaryPriceId ? mappingByPriceId.get(primaryPriceId) : undefined
     const planTier = mapping?.plan_tier ?? null
     // seat_limit = NULL si mapping absent, non configuré, ou unlimited_seats = true
@@ -393,12 +442,23 @@ async function syncSubscriptions(
     const row: Record<string, unknown> = {
       id: acctId,
       organization_id: organizationId,
-      mrr_cents: totalMrr,
-      arr_cents: totalMrr * 12,
+      mrr_cents: agg.mrr_cents,
+      arr_cents: agg.mrr_cents * 12,
+      trial_mrr_cents: agg.trial_mrr_cents,
+      mrr_status: agg.mrr_status,
+      is_delinquent: agg.is_delinquent,
+      pending_cancellation: agg.pending_cancellation,
+      is_zero_dollar_active: agg.is_zero_dollar_active,
       seat_count: totalSeats > 0 ? totalSeats : null,
       plan_tier: planTier,
       seat_limit: seatLimit,
     }
+    if (agg.currency) row.currency = agg.currency
+    // billing_model : écrit uniquement quand ce compte a des subscriptions
+    // connues ce run — sinon laissé à syncInvoices (qui tourne juste après
+    // dans le même run) pour distinguer invoice_only d'un compte simplement
+    // pas encore synchronisé (docs/openspec.md §8.2).
+    if (accountsWithAnySubscription.has(acctId)) row.billing_model = 'subscription'
     if (primary) {
       row.billing_interval = primary.billingInterval
       row.contract_start_date = primary.contractStart
@@ -458,8 +518,7 @@ async function syncSubscriptions(
     // le mrr_cents n'a pas changé ne sont pas journalisés (bruit inutile).
     const restatementRows: Record<string, unknown>[] = []
     for (const acctId of customerToAccount.values()) {
-      const subs = accountSubMeta.get(acctId) ?? []
-      const newMrr = subs.reduce((sum, s) => sum + s.mrrCents, 0)
+      const newMrr = newMrrByAccount.get(acctId) ?? 0
       const prevMrr = prevMrrByAccount.get(acctId) ?? 0
       if (newMrr !== prevMrr) {
         restatementRows.push({
@@ -508,16 +567,11 @@ async function syncSubscriptions(
   const accountsWithPriorChurn = new Set((priorChurnRows ?? []).map((r: { account_id: string }) => r.account_id))
 
   for (const acctId of customerToAccount.values()) {
-    const subs = accountSubMeta.get(acctId) ?? []
-    const newMrr = subs.reduce((sum, s) => sum + s.mrrCents, 0)
+    const newMrr = newMrrByAccount.get(acctId) ?? 0
     const prevMrr = prevMrrByAccount.get(acctId) ?? 0
 
     const movement = classifyMovement({
-      // mrr_status précédent non encore persisté (colonne accounts.mrr_status
-      // arrive en migration 20260804000001) — traité comme 'ok' par défaut
-      // pour cette phase intermédiaire ; les runs suivants liront la vraie
-      // valeur persistée une fois la migration appliquée.
-      previous: { mrr_cents: prevMrr, mrr_status: 'ok' },
+      previous: { mrr_cents: prevMrr, mrr_status: prevMrrStatusByAccount.get(acctId) ?? 'ok' },
       current: { mrr_cents: newMrr, mrr_status: accountMrrStatus.get(acctId) ?? 'ok' },
       hasPriorChurnMovement: accountsWithPriorChurn.has(acctId),
     })
@@ -569,7 +623,7 @@ async function syncInvoices(
   // Pre-build lookup Maps (eliminates N+1 queries)
   const [acctResult, subResult] = await Promise.all([
     supabase.from('accounts').select('id, stripe_customer_id').eq('organization_id', organizationId),
-    supabase.from('subscriptions').select('id, stripe_sub_id').eq('organization_id', organizationId),
+    supabase.from('subscriptions').select('id, stripe_sub_id, account_id').eq('organization_id', organizationId),
   ])
 
   const invoiceCustomerMap = new Map<string, string>()
@@ -578,11 +632,14 @@ async function syncInvoices(
   }
 
   const stripeSubMap = new Map<string, string>()
+  const accountsWithSubscriptions = new Set<string>()
   for (const s of subResult.data ?? []) {
     if (s.stripe_sub_id) stripeSubMap.set(s.stripe_sub_id, s.id)
+    if (s.account_id) accountsWithSubscriptions.add(s.account_id)
   }
 
   const invoiceRows: Record<string, unknown>[] = []
+  const accountsWithInvoices = new Set<string>()
   let orphaned = 0 // invoices for Stripe customers not yet in accounts — not a failure
 
   for await (const invoice of paginateStripe<StripeInvoice>('/invoices', apiKey, extraParams, logger)) {
@@ -591,6 +648,7 @@ async function syncInvoices(
       orphaned++
       continue
     }
+    accountsWithInvoices.add(accountId)
 
     const subscriptionId = invoice.subscription ? (stripeSubMap.get(invoice.subscription) ?? null) : null
     const paidAt = invoice.status_transitions?.paid_at
@@ -616,23 +674,28 @@ async function syncInvoices(
   logger.increment('invoices_processed', processed)
   logger.increment('records_failed', failed)
 
-  // Propage la devise du compte Stripe connecté vers organizations.currency
-  // (affichage $/€/etc. côté frontend) — dérivée des invoices déjà
-  // synchronisées plutôt qu'un appel Stripe API dédié (toutes les invoices
-  // d'un même compte Stripe partagent la même devise dans l'écrasante
-  // majorité des cas). Prend la première ligne de ce batch, pas de
-  // recalcul par invoice.
-  const syncedCurrency = invoiceRows[0]?.currency as string | undefined
-  if (syncedCurrency) {
-    const { error: currencyError } = await supabase
-      .from('organizations')
-      .update({ currency: syncedCurrency })
-      .eq('id', organizationId)
-
-    if (currencyError) {
+  // Détection billing_model='invoice_only' (docs/openspec.md §8.2) : un
+  // customer avec ≥1 invoice mais 0 subscription connue est facturé
+  // manuellement (send_invoice). mrr_status='unavailable' déjà écrit par
+  // syncSubscriptions pour ces comptes (aggregateAccountMrr sur une liste
+  // vide) — ce correctif ajoute uniquement la classification explicite,
+  // jamais un MRR de repli dans cette itération (hors périmètre, voir
+  // docs/openspec.md §11).
+  const invoiceOnlyAccountIds = [...accountsWithInvoices].filter((id) => !accountsWithSubscriptions.has(id))
+  if (invoiceOnlyAccountIds.length > 0) {
+    const { error: invoiceOnlyError } = await supabase
+      .from('accounts')
+      .update({ billing_model: 'invoice_only' })
+      .in('id', invoiceOnlyAccountIds)
+    if (invoiceOnlyError) {
       console.error(JSON.stringify({
         level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
-        message: `Failed to update organizations.currency: ${currencyError.message}`,
+        message: `Failed to flag invoice_only accounts: ${invoiceOnlyError.message}`,
+      }))
+    } else {
+      console.log(JSON.stringify({
+        level: 'info', function_name: 'sync-stripe', organization_id: organizationId,
+        message: `${invoiceOnlyAccountIds.length} comptes classés billing_model='invoice_only'`,
       }))
     }
   }
