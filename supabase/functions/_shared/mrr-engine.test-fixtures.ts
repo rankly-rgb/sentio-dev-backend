@@ -153,6 +153,48 @@ export const FIXTURE_COUPON_ONCE: StripeSubscriptionLike = {
 }
 export const EXPECTED_COUPON_ONCE_CENTS = 10000
 
+// ── (8b) Coupon amount_off, mensuel (T=1, sanity — l'ordre remise/T ne
+// change rien à T=1, sert de témoin isolé de la logique amount_off) ──
+// raw=5000, amount_off=1000 (forever) → 4000
+export const FIXTURE_COUPON_AMOUNT_OFF_MONTHLY: StripeSubscriptionLike = {
+  id: 'sub_coupon_amount_off_monthly',
+  customer: 'cus_h2',
+  status: 'active',
+  created: 1000,
+  items: {
+    data: [{ price: { unit_amount: 5000, currency: 'usd', recurring: { interval: 'month', interval_count: 1 } }, quantity: 1 }],
+  },
+  discounts: [{ coupon: { amount_off: 1000, duration: 'forever' } }],
+  current_period_start: 1000,
+  current_period_end: 2000,
+}
+export const EXPECTED_COUPON_AMOUNT_OFF_MONTHLY_CENTS = 4000
+
+// ── (8c) Coupon amount_off, trimestriel — piège d'ordre remise/normalisation
+// d'intervalle (docs/openspec.md §2/§3 : "amount_total_after_discount /
+// durée_periode_en_mois" — la remise s'applique au total PAR FACTURE, avant
+// division par T, jamais après). Stripe déduit `amount_off` du sous-total
+// d'UNE facture — sur un abonnement trimestriel, un coupon "$30 off" retire
+// $30 du trimestre, pas $30 par mois.
+// Correct : (10000 - 3000) / 3 = 2333.33 → 2333
+// Bug historique (amount_off appliqué après division par T, corrigé le
+// 2026-08-04 lors de l'auto-vérification adversariale — jamais couvert par
+// le golden dataset avant ce correctif) : 10000/3 - 3000 = 333.33 → 333
+export const FIXTURE_COUPON_AMOUNT_OFF_QUARTERLY: StripeSubscriptionLike = {
+  id: 'sub_coupon_amount_off_quarterly',
+  customer: 'cus_h3',
+  status: 'active',
+  created: 1000,
+  items: {
+    data: [{ price: { unit_amount: 10000, currency: 'usd', recurring: { interval: 'month', interval_count: 3 } }, quantity: 1 }],
+  },
+  discounts: [{ coupon: { amount_off: 3000, duration: 'forever' } }],
+  current_period_start: 1000,
+  current_period_end: 2000,
+}
+export const EXPECTED_COUPON_AMOUNT_OFF_QUARTERLY_CENTS = 2333
+export const LEGACY_BUGGY_COUPON_AMOUNT_OFF_QUARTERLY_CENTS = 333
+
 // ── (9) Trial (exclu du MRR confirmé) ───────────────────────
 export const FIXTURE_TRIAL: StripeSubscriptionLike = {
   id: 'sub_trial',

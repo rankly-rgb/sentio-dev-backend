@@ -36,6 +36,9 @@ import {
   EXPECTED_COUPON_REPEATING_ACTIVE_CENTS, EXPECTED_COUPON_REPEATING_EXPIRED_CENTS,
   EXPECTED_COUPON_EXPIRY_MOVEMENT_DELTA,
   FIXTURE_COUPON_ONCE, EXPECTED_COUPON_ONCE_CENTS,
+  FIXTURE_COUPON_AMOUNT_OFF_MONTHLY, EXPECTED_COUPON_AMOUNT_OFF_MONTHLY_CENTS,
+  FIXTURE_COUPON_AMOUNT_OFF_QUARTERLY, EXPECTED_COUPON_AMOUNT_OFF_QUARTERLY_CENTS,
+  LEGACY_BUGGY_COUPON_AMOUNT_OFF_QUARTERLY_CENTS,
   FIXTURE_TRIAL, EXPECTED_TRIAL_MRR_CENTS, EXPECTED_TRIAL_TRIAL_MRR_CENTS,
   FIXTURE_TRIAL_CONVERTED, EXPECTED_TRIAL_CONVERTED_MRR_CENTS,
   FIXTURE_PAST_DUE, EXPECTED_PAST_DUE_MRR_CENTS, EXPECTED_PAST_DUE_IS_DELINQUENT, EXPECTED_PAST_DUE_CHURNED,
@@ -89,6 +92,22 @@ describe('calcSubscriptionMrrCents — golden dataset', () => {
 
   it('(8) coupon once → aucun effet sur le MRR récurrent', () => {
     expect(calcSubscriptionMrrCents(FIXTURE_COUPON_ONCE).mrr_cents).toBe(EXPECTED_COUPON_ONCE_CENTS)
+  })
+
+  it('(8b) coupon amount_off, mensuel (T=1) → net de la remise', () => {
+    expect(calcSubscriptionMrrCents(FIXTURE_COUPON_AMOUNT_OFF_MONTHLY).mrr_cents).toBe(EXPECTED_COUPON_AMOUNT_OFF_MONTHLY_CENTS)
+  })
+
+  // Bug trouvé et corrigé le 2026-08-04 (auto-vérification adversariale,
+  // voir IMPLEMENTATION_LOG.md) : `amount_off` était appliqué APRÈS division
+  // par T (l'intervalle n'ayant aucun effet sur un pourcentage, ce chemin
+  // n'était jamais exercé pour `percent_off` — seul un coupon `amount_off`
+  // combiné à un intervalle non-mensuel le révèle). Aucune fixture du golden
+  // dataset original ne testait `amount_off`, seulement `percent_off`.
+  it('(8c) coupon amount_off, trimestriel → remise appliquée avant la normalisation d\'intervalle (docs/openspec.md §2/§3), pas après', () => {
+    const result = calcSubscriptionMrrCents(FIXTURE_COUPON_AMOUNT_OFF_QUARTERLY).mrr_cents
+    expect(result).toBe(EXPECTED_COUPON_AMOUNT_OFF_QUARTERLY_CENTS)
+    expect(result).not.toBe(LEGACY_BUGGY_COUPON_AMOUNT_OFF_QUARTERLY_CENTS)
   })
 
   it('(9) trial → exclu de mrr_cents, présent dans trial_mrr_cents', () => {
@@ -333,6 +352,31 @@ describe('detectBillingModel', () => {
 
   it('customer sans invoice ni subscription → subscription (défaut)', () => {
     expect(detectBillingModel(0, 0)).toBe('subscription')
+  })
+})
+
+describe('detectOrgMajorityCurrency', () => {
+  it('majorité claire (2 usd contre 1 eur) → usd', () => {
+    expect(detectOrgMajorityCurrency([{ currency: 'usd' }, { currency: 'usd' }, { currency: 'eur' }])).toBe('usd')
+  })
+
+  // Trouvé lors de l'auto-vérification adversariale du 2026-08-04 :
+  // sur une égalité stricte, le résultat doit être indépendant de l'ordre
+  // d'arrivée dans `subs` (non garanti stable entre deux runs de
+  // sync-stripe) — sinon organizations.currency pourrait flapper sans
+  // aucun changement client réel. Départage déterministe : ordre
+  // lexicographique du code devise, jamais "premier arrivé".
+  it('égalité stricte (1 eur + 1 usd) → départage déterministe, indépendant de l\'ordre', () => {
+    expect(detectOrgMajorityCurrency([{ currency: 'eur' }, { currency: 'usd' }])).toBe('eur')
+    expect(detectOrgMajorityCurrency([{ currency: 'usd' }, { currency: 'eur' }])).toBe('eur')
+  })
+
+  it('aucune subscription avec devise connue → null', () => {
+    expect(detectOrgMajorityCurrency([{ currency: null }, { currency: null }])).toBeNull()
+  })
+
+  it('liste vide → null', () => {
+    expect(detectOrgMajorityCurrency([])).toBeNull()
   })
 })
 

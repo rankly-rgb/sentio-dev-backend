@@ -123,17 +123,29 @@ function normalizeDiscounts(sub: StripeSubscriptionLike): StripeDiscountLike[] {
 }
 
 /**
- * Fraction du montant catalogue restant après application des remises
- * actives (coupons "forever"/"repeating" présents sur la subscription au
- * moment de la lecture — un coupon "repeating" expiré n'apparaît déjà plus
- * dans `discounts` côté Stripe, donc aucune logique de décompte de durée
- * n'est nécessaire ici : sa disparition fait naturellement remonter le MRR
- * au prochain calcul, classée `expansion` par classifyMovement). Un coupon
- * "once" ne s'applique qu'à une seule facture — jamais au MRR récurrent,
- * ignoré (docs/openspec.md §2).
+ * Montant catalogue restant après application des remises actives (coupons
+ * "forever"/"repeating" présents sur la subscription au moment de la lecture
+ * — un coupon "repeating" expiré n'apparaît déjà plus dans `discounts` côté
+ * Stripe, donc aucune logique de décompte de durée n'est nécessaire ici : sa
+ * disparition fait naturellement remonter le MRR au prochain calcul, classée
+ * `expansion` par classifyMovement). Un coupon "once" ne s'applique qu'à une
+ * seule facture — jamais au MRR récurrent, ignoré (docs/openspec.md §2).
+ *
+ * IMPORTANT — opère sur le montant PAR PÉRIODE DE FACTURATION (`amount_total`
+ * de docs/openspec.md §3), PAS un montant déjà normalisé au mois. `coupon.
+ * amount_off` chez Stripe est un montant fixe déduit du sous-total d'UNE
+ * facture — un coupon "$10 off" sur un abonnement trimestriel retire $10 du
+ * trimestre, pas $10 par mois. Appliquer amount_off après division par T
+ * (l'ancien ordre, avant ce correctif) transformait silencieusement une
+ * remise "$10/trimestre" en "$10/mois" (= $30/trimestre), pouvant même faire
+ * chuter le MRR à $0 pour un forfait par ailleurs facturé normalement.
+ * `percent_off` commute avec la division par T (l'ordre ne change rien pour
+ * lui) — seul `amount_off` exigeait ce correctif, non couvert par le golden
+ * dataset avant l'auto-vérification adversariale du 2026-08-04 (aucune
+ * fixture n'utilisait `amount_off`).
  */
-function applyDiscounts(rawMonthlyCents: number, discounts: StripeDiscountLike[]): number {
-  let amount = rawMonthlyCents
+function applyDiscounts(rawPeriodCents: number, discounts: StripeDiscountLike[]): number {
+  let amount = rawPeriodCents
   for (const { coupon } of discounts) {
     if (coupon.duration === 'once') continue
     if (typeof coupon.percent_off === 'number') {
@@ -142,7 +154,7 @@ function applyDiscounts(rawMonthlyCents: number, discounts: StripeDiscountLike[]
       amount = amount - coupon.amount_off
     }
   }
-  return Math.max(0, Math.round(amount))
+  return amount
 }
 
 /**
@@ -170,7 +182,8 @@ export function calcSubscriptionMrrCents(sub: StripeSubscriptionLike): Subscript
   if (items.length === 0) {
     if (sub.plan && typeof sub.plan.amount === 'number') {
       const T = periodLengthInMonths(sub.plan.interval, 1)
-      const monthly = applyDiscounts(sub.plan.amount / T, normalizeDiscounts(sub))
+      const discountedPeriodTotal = applyDiscounts(sub.plan.amount, normalizeDiscounts(sub))
+      const monthly = Math.max(0, Math.round(discountedPeriodTotal / T))
       return {
         mrr_cents: isTrial || !isBillable ? 0 : monthly,
         trial_mrr_cents: isTrial ? monthly : 0,
@@ -210,15 +223,24 @@ export function calcSubscriptionMrrCents(sub: StripeSubscriptionLike): Subscript
     }
   }
 
-  const rawMonthly = items.reduce((sum, item) => {
-    const itemInterval = item.price.recurring?.interval ?? interval
-    const itemIntervalCount = item.price.recurring?.interval_count ?? 1
-    const T = periodLengthInMonths(itemInterval, itemIntervalCount)
+  // Stripe exige que tous les items d'une même subscription partagent le
+  // même intervalle de facturation (impossible de mélanger mensuel et
+  // annuel sur une seule Subscription côté API Stripe) — un seul T pour
+  // toute la subscription, dérivé de l'item principal (`interval`/
+  // `intervalCount` ci-dessus), est donc suffisant et cohérent avec
+  // `interval_raw`/`interval_count` retournés plus bas. On somme les
+  // montants PAR PÉRIODE (sans diviser par T) pour que `applyDiscounts`
+  // opère sur le vrai total facturé par cycle — nécessaire pour que
+  // `amount_off` (montant fixe par facture chez Stripe) soit correct ; voir
+  // le commentaire d'`applyDiscounts`.
+  const T = periodLengthInMonths(interval, intervalCount)
+  const rawPeriodTotal = items.reduce((sum, item) => {
     const qty = item.quantity ?? sub.quantity ?? 1
-    return sum + ((item.price.unit_amount as number) * qty) / T
+    return sum + (item.price.unit_amount as number) * qty
   }, 0)
 
-  const monthly = applyDiscounts(rawMonthly, normalizeDiscounts(sub))
+  const discountedPeriodTotal = applyDiscounts(rawPeriodTotal, normalizeDiscounts(sub))
+  const monthly = Math.max(0, Math.round(discountedPeriodTotal / T))
 
   if (!isBillable) {
     // canceled / paused / incomplete : ni MRR confirmé, ni trial pipeline.
@@ -371,6 +393,17 @@ export function detectBillingModel(subscriptionCount: number, invoiceCount: numb
  * Vote majoritaire de devise au niveau organisation (docs/openspec.md §9).
  * À calculer une fois par run de sync sur l'ensemble des subscriptions de
  * l'org, puis passer le résultat à `aggregateAccountMrr` par compte.
+ *
+ * Égalité stricte (ex. 1 subscription USD + 1 EUR) : départage
+ * déterministe par ordre lexicographique du code devise, jamais par ordre
+ * d'arrivée dans `subs` — sans ça, deux runs de `sync-stripe` sur la même
+ * organisation pourraient élire une devise majoritaire différente selon
+ * l'ordre de pagination retourné par Stripe/la requête DB (non garanti
+ * stable d'un run à l'autre), faisant flapper `organizations.currency` et
+ * le `mrr_status` des comptes en devise "minoritaire" sans qu'aucun client
+ * n'ait rien changé. Trouvé lors de l'auto-vérification adversariale du
+ * 2026-08-04 — non couvert par le golden dataset original (le seul test
+ * d'égalité stricte alors présent utilisait une vraie majorité 2 contre 1).
  */
 export function detectOrgMajorityCurrency(subs: Array<{ currency: string | null }>): string | null {
   const counts = new Map<string, number>()
@@ -382,7 +415,7 @@ export function detectOrgMajorityCurrency(subs: Array<{ currency: string | null 
   let best: string | null = null
   let bestCount = -1
   for (const [cur, n] of counts) {
-    if (n > bestCount) {
+    if (n > bestCount || (n === bestCount && best !== null && cur < best)) {
       best = cur
       bestCount = n
     }
