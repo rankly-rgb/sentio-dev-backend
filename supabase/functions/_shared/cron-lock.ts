@@ -48,3 +48,32 @@ export async function releaseCronLock(
 ): Promise<void> {
   await supabase.from('cron_locks').delete().eq('lock_key', lockKey)
 }
+
+/**
+ * Vérification en lecture seule — n'acquiert rien, ne modifie rien.
+ * Utilisée par stripe-webhook (docs/openspec.md, IMPLEMENTATION_LOG.md
+ * "auto-vérification adversariale" 2026-08-04) pour détecter qu'un
+ * sync-stripe (normal ou restatement_mode) tourne actuellement pour cet
+ * org, et différer en conséquence l'écriture de accounts.mrr_cents / la
+ * classification de mouvement pour cet event — sync-stripe et
+ * stripe-webhook n'ont sinon aucune coordination : un event webhook traité
+ * pendant un restatement pourrait comparer son "previous" (accounts.mrr_cents
+ * lu avant que le restatement n'ait écrit) à un "current" déjà recalculé
+ * avec le nouveau moteur, produisant un mouvement mal classé (ex. une
+ * vraie expansion lue comme une grosse contraction), et son écriture finale
+ * sur `accounts` pourrait être silencieusement écrasée par celle, plus
+ * tardive mais basée sur un état Stripe plus ancien, du restatement.
+ */
+export async function isCronLockHeld(
+  supabase: SupabaseClient,
+  lockKey: string,
+): Promise<boolean> {
+  const { data } = await supabase
+    .from('cron_locks')
+    .select('expires_at')
+    .eq('lock_key', lockKey)
+    .maybeSingle()
+
+  if (!data) return false
+  return new Date(data.expires_at).getTime() > Date.now()
+}

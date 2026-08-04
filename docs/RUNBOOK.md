@@ -280,6 +280,23 @@ flag to unset) — the next scheduled `sync-stripe` run will see
 `prevMrr ≈ newMrr` for every restated account and generate no spurious
 movements.
 
+**Concurrency**: `sync-stripe` locks per-org (`cron_locks`, key
+`sync-stripe-<org_id>`) — a normal cron/webhook-triggered sync for the same
+org cannot run while a restatement is in progress for it, and vice versa; one
+of the two gets a clean `409 Sync already in progress` rather than
+interleaving writes. The lock TTL is 600s in `restatement_mode` (vs 300s for
+a normal sync) since a full recompute can legitimately take longer on a
+large org.
+
+**If interrupted mid-run** (crash, timeout, dropped connection): re-run the
+exact same curl command. The restatement is idempotent — `mrr_restatements`
+is written before `accounts` on each account and upserted on
+`(account_id, reason)` (migration `20260804000006`), so a replay recomputes
+and safely re-confirms the same audit row for any account whose delta wasn't
+fully persisted yet, then finishes writing `accounts`. Accounts that
+completed on the first pass are unaffected (delta is 0 on replay, both
+writes are skipped for them).
+
 ## Monitoring Endpoints
 
 | Endpoint | Purpose | Frequency |

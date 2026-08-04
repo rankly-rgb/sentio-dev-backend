@@ -12,6 +12,7 @@ import { writeToDLQ } from '../_shared/dlq.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { verifyStripeSignature } from '../_shared/stripe-signature.ts'
 import { calcSubscriptionMrrCents, aggregateAccountMrr, classifyMovement, type StripeSubscriptionLike } from '../_shared/mrr-engine.ts'
+import { isCronLockHeld } from '../_shared/cron-lock.ts'
 
 // ── Résolution de l'organization depuis stripe_account_id ───
 async function resolveOrganization(
@@ -174,6 +175,25 @@ async function handleSubscriptionEvent(
   }
 
   logger.increment('subscriptions_processed')
+
+  // Différer la mise à jour du MRR compte / la classification de mouvement
+  // si un sync-stripe (normal ou restatement_mode) tourne actuellement pour
+  // cet org — sync-stripe et stripe-webhook n'ont sinon aucune coordination
+  // (trouvé lors de l'auto-vérification adversariale du 2026-08-04). La
+  // subscription elle-même vient d'être upsertée ci-dessus avec l'état
+  // Stripe le plus récent (toujours sûr, même calcul que sync-stripe) —
+  // seuls le niveau compte (accounts.mrr_cents) et mrr_movements sont
+  // sensibles à un "previous" à moitié restaté. Le prochain sync-stripe
+  // normal (quotidien) relira cette subscription déjà à jour et régénérera
+  // le bon mouvement en comparant au vrai état pré-migration — rien n'est
+  // perdu, juste retardé jusqu'à la fin du run en cours.
+  if (await isCronLockHeld(supabase, `sync-stripe-${organizationId}`)) {
+    console.log(JSON.stringify({
+      level: 'info', function_name: 'stripe-webhook', event_id: event.id, organization_id: organizationId,
+      message: `Deferred account-level MRR update / movement classification for subscription ${sub.id}: sync-stripe lock held for this org. Will be reconciled by the next normal sync-stripe run.`,
+    }))
+    return
+  }
 
   // Aggregate MRR from ALL subscriptions for this account (pas seulement la
   // subscription de cet event, pour gérer les comptes multi-subscriptions).

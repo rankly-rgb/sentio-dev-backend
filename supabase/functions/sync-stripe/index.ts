@@ -568,14 +568,26 @@ async function syncSubscriptions(
     }))
   }
 
-  const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id')
-  logger.increment('records_failed', acctFail)
-
   if (restatementMode) {
     // Phase 3 (restatement) : journaliser chaque delta dans mrr_restatements,
     // ZÉRO mrr_movements généré — un changement de formule n'est pas un
     // événement métier (docs/openspec.md §10, Phase 2.4). Les comptes dont
     // le mrr_cents n'a pas changé ne sont pas journalisés (bruit inutile).
+    //
+    // Écrit mrr_restatements AVANT accounts (ordre inversé du chemin normal
+    // ci-dessous, délibéré — trouvé lors de l'auto-vérification
+    // adversariale du 2026-08-04) : si ce run est interrompu entre les deux
+    // écritures (crash, timeout — batchUpsert committe par chunks de
+    // DB_BATCH_SIZE, un run sur un gros org peut prendre plusieurs minutes),
+    // un rejeu doit retrouver l'ancien accounts.mrr_cents encore en base
+    // pour recalculer le même delta et le ré-upserter (idempotent — contrainte
+    // unique account_id+reason, migration 20260804000006) AVANT que accounts
+    // ne bascule vers la nouvelle valeur. Dans l'ordre inverse (accounts
+    // d'abord), un rejeu après une interruption entre les deux verrait déjà
+    // le nouveau accounts.mrr_cents comme "previous", ne détecterait plus
+    // aucun delta pour ces comptes, et perdrait silencieusement leur ligne
+    // d'audit — faussant la requête de vérification du RUNBOOK sans aucune
+    // erreur visible.
     const restatementRows: Record<string, unknown>[] = []
     for (const acctId of customerToAccount.values()) {
       const newMrr = newMrrByAccount.get(acctId) ?? 0
@@ -592,7 +604,7 @@ async function syncSubscriptions(
     }
 
     if (restatementRows.length > 0) {
-      const { failed: restFail } = await batchUpsert(supabase, 'mrr_restatements', restatementRows, 'id')
+      const { failed: restFail } = await batchUpsert(supabase, 'mrr_restatements', restatementRows, 'account_id,reason')
       if (restFail > 0) {
         console.error(JSON.stringify({
           level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
@@ -600,6 +612,10 @@ async function syncSubscriptions(
         }))
       }
     }
+
+    const { failed: acctFailRestate } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id')
+    logger.increment('records_failed', acctFailRestate)
+
     console.log(JSON.stringify({
       level: 'info', function_name: 'sync-stripe', organization_id: organizationId,
       message: `restatement_mode: ${restatementRows.length}/${customerToAccount.size} comptes restated, 0 mrr_movements générés`,
@@ -607,6 +623,9 @@ async function syncSubscriptions(
 
     return { anomalyDetected: false, billingProfile: billingProfileCounts }
   }
+
+  const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id')
+  logger.increment('records_failed', acctFail)
 
   // Phase 3 : générer les mrr_movements — classification centralisée
   // (classifyMovement, _shared/mrr-engine.ts, docs/openspec.md §7 et §11
@@ -922,9 +941,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
     isManual,
   })
 
-  // Lock toujours per-org (pas de lock global) pour permettre les syncs parallèles
+  // Lock toujours per-org (pas de lock global) pour permettre les syncs parallèles.
+  // Même lockName qu'un sync normal (délibéré) : un restatement et un sync
+  // cron/webhook pour le même org ne doivent jamais s'exécuter en même temps
+  // — l'un des deux échoue proprement sur 409 plutôt que d'écrire des
+  // valeurs mrr_cents à moitié restatées en même temps qu'un webhook les
+  // recalcule avec l'état "previous" d'avant restatement (trouvé lors de
+  // l'auto-vérification adversariale du 2026-08-04).
+  //
+  // TTL élevé à 600s (au lieu de 300s) en restatement_mode : ce mode
+  // recalcule TOUTES les subscriptions de l'org (jusqu'à MAX_PAGES=50 pages
+  // × 3 ressources) au lieu d'un sync incrémental, un run peut légitimement
+  // dépasser 300s sur une org avec beaucoup de comptes — avec un TTL de
+  // 300s, le lock serait nettoyé comme "expiré" par le prochain appelant
+  // pendant que le restatement tourne encore, permettant à un cron sync
+  // concurrent de démarrer sur le même org malgré la contrainte UNIQUE.
   const lockName = `sync-stripe-${organizationId}`
-  const lockAcquired = await acquireCronLock(supabase, lockName, 300)
+  const lockTtlSeconds = restatementMode ? 600 : 300
+  const lockAcquired = await acquireCronLock(supabase, lockName, lockTtlSeconds)
   if (!lockAcquired) {
     return errorResponse('Sync already in progress for this organization', 409)
   }
