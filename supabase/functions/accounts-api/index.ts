@@ -300,6 +300,7 @@ export async function handleGetOne(
     overdue_amount_cents: overdueAmountCents,
     contract_end_date: account.contract_end_date ?? null,
     billing_interval: account.billing_interval ?? null,
+    churn_risk_band: account.churn_risk_band,
   })
 
   // usage_frozen_v2/engagement_frozen_v2 : dimensions retirées du modèle v3

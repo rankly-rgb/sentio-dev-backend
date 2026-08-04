@@ -825,6 +825,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 overdue_amount_cents: overdueAmountMap.get(account.id) ?? 0,
                 contract_end_date: account.contract_end_date ?? null,
                 billing_interval: account.billing_interval ?? null,
+                churn_risk_band: scores.churn_risk_band,
               })
 
               historyRows.push({
