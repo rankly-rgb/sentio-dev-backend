@@ -963,6 +963,36 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Sync already in progress for this organization', 409)
   }
 
+  // Second lock, restatement-only (trouvé lors de la revue de merge du
+  // 2026-08-04 : isCronLockHeld côté stripe-webhook lisait à tort le lock
+  // partagé `sync-stripe-<org_id>` ci-dessus — le webhook différait donc sa
+  // mise à jour accounts.mrr_cents/classification de mouvement pendant
+  // N'IMPORTE QUEL sync-stripe, y compris un sync quotidien normal, pas
+  // seulement pendant un restatement. Un webhook arrivant dans la fenêtre
+  // (jusqu'à 300s) d'un sync normal aurait alors attendu le prochain sync
+  // planifié — jusqu'à 24h — pour voir son événement reflété, une
+  // dégradation du temps réel non voulue et jamais actée avec Naima.
+  // Ce second lock, acquis uniquement en restatement_mode, laisse
+  // stripe-webhook distinguer les deux cas sans toucher au lock partagé
+  // ci-dessus (qui reste la garantie de non-chevauchement restatement/sync
+  // normal — inchangée).
+  const restatementLockName = `restatement-${organizationId}`
+  if (restatementMode) {
+    const restatementLockAcquired = await acquireCronLock(supabase, restatementLockName, lockTtlSeconds)
+    if (!restatementLockAcquired) {
+      // Ne devrait jamais arriver (le lock partagé ci-dessus garantit déjà
+      // l'exclusivité) sauf marqueur périmé d'un restatement précédent qui
+      // a crashé sans le libérer — purement informatif pour stripe-webhook,
+      // pas un vrai verrou de concurrence : on continue sans bloquer le run.
+      console.warn(JSON.stringify({
+        level: 'warn',
+        function_name: 'sync-stripe',
+        organization_id: organizationId,
+        message: `Could not acquire restatement marker lock "${restatementLockName}" (stale from a previous run?) — continuing, stripe-webhook may not defer correctly during this run.`,
+      }))
+    }
+  }
+
   await logger.start()
 
   try {
@@ -1060,5 +1090,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse(`Sync failed: ${msg}`, 500)
   } finally {
     await releaseCronLock(supabase, lockName)
+    if (restatementMode) {
+      await releaseCronLock(supabase, restatementLockName)
+    }
   }
 })

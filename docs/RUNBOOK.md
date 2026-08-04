@@ -288,6 +288,20 @@ interleaving writes. The lock TTL is 600s in `restatement_mode` (vs 300s for
 a normal sync) since a full recompute can legitimately take longer on a
 large org.
 
+`restatement_mode` additionally holds a second, dedicated lock
+(`restatement-<org_id>`, same 600s TTL) for the duration of the run. This is
+the lock `stripe-webhook` checks (read-only, `isCronLockHeld`) before writing
+`accounts.mrr_cents`/classifying a movement for an incoming event — **only**
+while an actual restatement is running for that org, never during a normal
+daily sync. A webhook arriving in that window still upserts the
+`subscriptions` row immediately (always safe); only the account-level MRR
+write and movement generation are deferred until the next normal sync
+reconciles them (see `docs/openspec.md` §10bis for the full rationale, and
+why checking the shared `sync-stripe-<org_id>` lock instead — an earlier
+draft did this — would have wrongly deferred webhooks during every normal
+daily sync too, up to a 24h real-time-latency regression that was never an
+intended tradeoff).
+
 **If interrupted mid-run** (crash, timeout, dropped connection): re-run the
 exact same curl command. The restatement is idempotent — `mrr_restatements`
 is written before `accounts` on each account and upserted on

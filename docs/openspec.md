@@ -138,6 +138,20 @@ Hors périmètre de calcul MRR direct dans cette itération (la phase courante d
 
 ---
 
+## 10bis. Concurrence `sync-stripe` × `stripe-webhook` pendant un restatement
+
+**Décision actée** (auto-vérification adversariale + revue de merge, 2026-08-04) : `stripe-webhook` diffère la mise à jour `accounts.mrr_cents`/la classification de mouvement pour un event reçu **uniquement pendant qu'un restatement (`restatement_mode: true`) tourne pour cet org** — jamais pendant un `sync-stripe` normal (quotidien ou déclenché manuellement sans `restatement_mode`).
+
+**Pourquoi cette portée précise, pas plus large** : `sync-stripe` pose deux locks distincts (`_shared/cron-lock.ts`, table `cron_locks`) :
+- `sync-stripe-<org_id>` — partagé entre run normal et restatement, empêche les deux de s'exécuter en même temps pour un même org (409 sur le second appelant).
+- `restatement-<org_id>` — posé uniquement en `restatement_mode: true`, en plus du lock partagé ci-dessus. C'est **ce second lock** que `stripe-webhook` vérifie (`isCronLockHeld`, lecture seule) avant d'écrire `accounts.mrr_cents`/classifier un mouvement.
+
+Un premier passage avait fait vérifier à `stripe-webhook` le lock **partagé** (`sync-stripe-<org_id>`) plutôt que le lock dédié — cela aurait différé le traitement webhook pendant N'IMPORTE QUEL `sync-stripe`, y compris les runs quotidiens normaux (TTL 300s). Un webhook Stripe est censé donner une mise à jour quasi temps réel ; le différer pendant la fenêtre d'un sync normal l'aurait fait attendre jusqu'au **prochain sync planifié** (jusqu'à 24h) avant de voir son événement reflété — une dégradation de la latence temps réel jamais actée comme un tradeoff acceptable. Corrigé avant merge pour scoper strictement au restatement, qui est un événement rare (one-shot par déploiement de moteur MRR) et déjà annoncé comme fenêtre d'indisponibilité partielle dans `docs/RUNBOOK.md`.
+
+**Ce qui est réellement différé, et pour combien de temps** : seuls le niveau compte (`accounts.mrr_cents`/`arr_cents`) et la génération de `mrr_movements` sont différés — la ligne `subscriptions` elle-même est toujours upsertée immédiatement avec l'état Stripe le plus récent (safe, même calcul que `sync-stripe`). Fenêtre de report : la durée du restatement pour cet org, bornée par le TTL du lock `restatement-<org_id>` (600s, voir `docs/RUNBOOK.md` §"Concurrency") — en pratique la durée réelle d'un restatement one-shot, pas un TTL qu'on s'attend à voir expirer en pratique. Rien n'est perdu : le prochain `sync-stripe` normal (quotidien) relit la subscription déjà à jour et régénère le bon mouvement en comparant au véritable état pré-migration.
+
+---
+
 ## 11. Hors périmètre de cette itération (future work)
 
 Explicitement non implémenté maintenant, à ne pas construire dans cette passe :
