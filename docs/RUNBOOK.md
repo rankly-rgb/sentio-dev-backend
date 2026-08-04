@@ -252,6 +252,27 @@ curl -X POST "$SUPABASE_URL/functions/v1/sync-stripe" \
 Omit `organization_id` to restate all active organizations in one call
 (sequential dispatch, same as a normal multi-org sync run).
 
+**If you don't have shell/curl access and must trigger this from the SQL
+Editor instead** (`net.http_post`, e.g. reusing a cron job's stored
+`url`/`headers`): set `timeout_milliseconds` explicitly, generously — the
+existing cron jobs use `25000` for a normal per-org sync, but a multi-org
+`restatement_mode` call fans out sequentially across every active org
+inside ONE invocation (up to `AbortSignal.timeout(280000)` per the code) and
+can legitimately run for minutes. `net.http_post`'s own default timeout is
+**5000ms**, far shorter — hit in practice on 2026-08-04 (`error_msg:
+"Timeout of 5000 ms reached..."`, `status_code: null`, `content: null` in
+`net._http_response`). The function itself was *not* killed by this — it
+kept running server-side and completed real work for every org — but the
+caller got zero visibility into the outcome, exactly the wrong moment to be
+flying blind on a run that mutates every account's MRR. Prefer the `curl`
+above, which has no such default; if you must use `net.http_post`, add
+`timeout_milliseconds := 290000` to the call.
+
+Either way, **do not trust `net._http_response`/a client-side timeout as a
+signal of success or failure** — verify against `mrr_restatements` and
+`data_syncs.sync_status` (see below) regardless of what the calling client
+observed.
+
 **What it does**: recomputes `accounts.mrr_cents`/`arr_cents` with the new
 formula, generates **zero** `mrr_movements` rows, and logs every account
 whose value actually changed into `mrr_restatements` (`old_mrr_cents`,
@@ -260,7 +281,25 @@ whose value actually changed into `mrr_restatements` (`old_mrr_cents`,
 change legitimately shifts many accounts at once, which is not the
 regression that guard exists to catch.
 
-**Verify**:
+**Verify — check `data_syncs` FIRST, before looking at deltas at all**
+(2026-08-04 incident, IMPLEMENTATION_LOG.md — a run can return HTTP 200 and
+still have written nothing):
+```sql
+SELECT organization_id, sync_status, records_processed, records_failed, error_message, sync_summary
+FROM data_syncs
+WHERE sync_source = 'stripe'
+ORDER BY started_at DESC
+LIMIT <number of orgs restated>;
+```
+`sync_status` must be `completed` for every row (`sync_summary.restatement_mode`
+confirms the mode actually ran, `sync_summary.accounts_restated` is the count
+that changed). `completed_with_errors` or `failed` means some/all accounts
+in that org were **not** written — `error_message` now carries the real
+Postgres error (see `_shared/data-sync-logger.ts`) — fix that before trusting
+`mrr_restatements` for the affected org(s) at all; a partial write there is
+worse than no write, not a rounding error to shrug off.
+
+Only once every row above shows `sync_status='completed'`:
 ```sql
 SELECT organization_id, COUNT(*), SUM(new_mrr_cents - old_mrr_cents) AS net_delta_cents
 FROM mrr_restatements
