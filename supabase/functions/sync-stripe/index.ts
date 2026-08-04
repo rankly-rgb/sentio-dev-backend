@@ -257,6 +257,7 @@ async function syncSubscriptions(
   organizationId: string,
   apiKey: string,
   logger: DataSyncLogger,
+  restatementMode = false,
 ): Promise<{ anomalyDetected: boolean }> {
   const extraParams: Record<string, string> = { status: 'all' }
 
@@ -412,11 +413,19 @@ async function syncSubscriptions(
   // (incident documenté : -55,3% de MRR en quelques jours). subscriptions
   // (Phase 1) est déjà écrite — acceptée comme limitation, auto-corrective
   // au prochain run full-sync une fois la cause traitée.
+  //
+  // Bypass explicite en restatementMode (Phase 2.4, docs/openspec.md) : le
+  // passage au moteur MRR v2 change légitimement mrr_cents pour de
+  // nombreux comptes en une seule fois (items multiples désormais sommés,
+  // interval_count respecté, remises appliquées, trials exclus...) — ce
+  // n'est pas l'anomalie que ce garde-fou est censé détecter. Chaque delta
+  // est de toute façon journalisé dans mrr_restatements ci-dessous, jamais
+  // appliqué silencieusement.
   const anomaly = detectMrrCollapseAnomaly(
     prevMrrByAccount,
     accountUpdateRows as unknown as AccountMrrUpdate[],
   )
-  if (anomaly.isAnomaly) {
+  if (anomaly.isAnomaly && !restatementMode) {
     const pct = Math.round(anomaly.ratio * 100)
     console.error(JSON.stringify({
       level: 'error',
@@ -430,9 +439,55 @@ async function syncSubscriptions(
     )
     return { anomalyDetected: true }
   }
+  if (anomaly.isAnomaly && restatementMode) {
+    console.warn(JSON.stringify({
+      level: 'warn',
+      function_name: 'sync-stripe',
+      organization_id: organizationId,
+      message: `restatement_mode: garde-fou d'anomalie MRR bypassé explicitement (${anomaly.affectedCount}/${anomaly.totalCount} comptes) — changement de formule attendu, journalisé dans mrr_restatements.`,
+    }))
+  }
 
   const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id')
   logger.increment('records_failed', acctFail)
+
+  if (restatementMode) {
+    // Phase 3 (restatement) : journaliser chaque delta dans mrr_restatements,
+    // ZÉRO mrr_movements généré — un changement de formule n'est pas un
+    // événement métier (docs/openspec.md §10, Phase 2.4). Les comptes dont
+    // le mrr_cents n'a pas changé ne sont pas journalisés (bruit inutile).
+    const restatementRows: Record<string, unknown>[] = []
+    for (const acctId of customerToAccount.values()) {
+      const subs = accountSubMeta.get(acctId) ?? []
+      const newMrr = subs.reduce((sum, s) => sum + s.mrrCents, 0)
+      const prevMrr = prevMrrByAccount.get(acctId) ?? 0
+      if (newMrr !== prevMrr) {
+        restatementRows.push({
+          organization_id: organizationId,
+          account_id: acctId,
+          old_mrr_cents: prevMrr,
+          new_mrr_cents: newMrr,
+          reason: 'mrr_engine_v2_migration',
+        })
+      }
+    }
+
+    if (restatementRows.length > 0) {
+      const { failed: restFail } = await batchUpsert(supabase, 'mrr_restatements', restatementRows, 'id')
+      if (restFail > 0) {
+        console.error(JSON.stringify({
+          level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
+          message: `${restFail} mrr_restatements rows failed to insert`,
+        }))
+      }
+    }
+    console.log(JSON.stringify({
+      level: 'info', function_name: 'sync-stripe', organization_id: organizationId,
+      message: `restatement_mode: ${restatementRows.length}/${customerToAccount.size} comptes restated, 0 mrr_movements générés`,
+    }))
+
+    return { anomalyDetected: false }
+  }
 
   // Phase 3 : générer les mrr_movements — classification centralisée
   // (classifyMovement, _shared/mrr-engine.ts, docs/openspec.md §7 et §11
@@ -605,6 +660,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
     created_after?: number
     is_manual?: boolean
     triggered_by?: string
+    // Phase 2.4 (docs/openspec.md, IMPLEMENTATION_LOG.md) : mode de
+    // migration one-shot, déclenché explicitement par un opérateur — jamais
+    // par le cron ni par aucun webhook. Recalcule accounts.mrr_cents avec
+    // le nouveau moteur SANS générer de mrr_movements (journalise chaque
+    // delta dans mrr_restatements à la place) et bypass le garde-fou
+    // d'anomalie MRR (le changement de formule affecte légitimement de
+    // nombreux comptes en un seul run).
+    restatement_mode?: boolean
   } = {}
 
   try {
@@ -626,6 +689,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const isManual = body.is_manual ?? false
   const triggeredBy = body.triggered_by ?? 'cron'
   const isOnboarding = triggeredBy === 'onboarding'
+  const restatementMode = body.restatement_mode === true
 
   // ── Résoudre les orgs à traiter ──────────────────────────────
   // Avec organization_id → 1 org ciblée
@@ -668,7 +732,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         const res = await fetch(`${supabaseUrl}/functions/v1/sync-stripe`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${serviceKey}` },
-          body: JSON.stringify({ organization_id: org.id, sync_type: syncType, triggered_by: triggeredBy }),
+          body: JSON.stringify({ organization_id: org.id, sync_type: syncType, triggered_by: triggeredBy, restatement_mode: restatementMode }),
           signal: AbortSignal.timeout(280000), // 280s — laisse 20s de marge avant timeout Edge Function
         })
         results.push({ organization_id: org.id, status: res.ok ? 'triggered' : `http_${res.status}` })
@@ -736,7 +800,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   try {
     await syncCustomers(supabase, organizationId, apiKey, logger, createdAfter)
-    const { anomalyDetected } = await syncSubscriptions(supabase, organizationId, apiKey, logger)
+    const { anomalyDetected } = await syncSubscriptions(supabase, organizationId, apiKey, logger, restatementMode)
     await syncInvoices(supabase, organizationId, apiKey, logger, createdAfter)
 
     if (anomalyDetected) {
@@ -776,6 +840,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       success: true,
       organization_id: organizationId,
       sync_type: syncType,
+      restatement_mode: restatementMode,
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)

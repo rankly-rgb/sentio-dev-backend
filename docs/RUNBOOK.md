@@ -226,6 +226,60 @@ this back into Phase 3's planned logistic regression over historical churn.
 
 ---
 
+## One-Time Migration Procedures
+
+### MRR Engine v2 — Restatement (Phase 2.4, docs/openspec.md)
+
+The MRR derivation formula changed (`_shared/mrr-engine.ts`): all subscription
+items are now summed instead of only `items.data[0]`, `interval_count` is
+respected (quarterly/weekly no longer miscounted as monthly), active
+discounts are applied, and trials are excluded from `mrr_cents`. Existing
+`accounts.mrr_cents` values were computed with the old formula and must be
+restated **before** relying on `mrr_movements`/NRR for any org synced prior
+to this deploy — otherwise the very next normal sync would generate a wave
+of fake `contraction`/`expansion`/`churn` movements purely from the formula
+change, permanently polluting NRR.
+
+**Run once per org, before/immediately after deploying this change**:
+
+```bash
+curl -X POST "$SUPABASE_URL/functions/v1/sync-stripe" \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"organization_id": "<org-uuid>", "restatement_mode": true}'
+```
+
+Omit `organization_id` to restate all active organizations in one call
+(sequential dispatch, same as a normal multi-org sync run).
+
+**What it does**: recomputes `accounts.mrr_cents`/`arr_cents` with the new
+formula, generates **zero** `mrr_movements` rows, and logs every account
+whose value actually changed into `mrr_restatements` (`old_mrr_cents`,
+`new_mrr_cents`, `reason`). The MRR-collapse anomaly guard
+(`sync-anomaly-guard.ts`) is explicitly bypassed for this run — a formula
+change legitimately shifts many accounts at once, which is not the
+regression that guard exists to catch.
+
+**Verify**:
+```sql
+SELECT organization_id, COUNT(*), SUM(new_mrr_cents - old_mrr_cents) AS net_delta_cents
+FROM mrr_restatements
+WHERE reason = 'mrr_engine_v2_migration'
+GROUP BY organization_id
+ORDER BY ABS(SUM(new_mrr_cents - old_mrr_cents)) DESC;
+```
+Review orgs with the largest deltas manually before trusting their NRR
+going forward. Confirm zero `mrr_movements` were written for this run:
+```sql
+SELECT COUNT(*) FROM mrr_movements WHERE created_at > '<restatement run timestamp>';
+-- expect 0, or only rows from unrelated concurrent webhook activity
+```
+
+**After running**: the normal cron/webhook sync resumes automatically (no
+flag to unset) — the next scheduled `sync-stripe` run will see
+`prevMrr ≈ newMrr` for every restated account and generate no spurious
+movements.
+
 ## Monitoring Endpoints
 
 | Endpoint | Purpose | Frequency |
