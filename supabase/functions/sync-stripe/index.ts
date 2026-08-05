@@ -8,7 +8,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
-import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
+import { DataSyncLogger, type WriteError } from '../_shared/data-sync-logger.ts'
 import { acquireCronLock, releaseCronLock } from '../_shared/cron-lock.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
@@ -208,11 +208,18 @@ function getPrimaryPriceId(subs: Array<{
 }
 
 // ── Helpers batch ─────────────────────────────────────────────
+// writeErrors : erreur Postgres réelle de chaque chunk en échec, poussée
+// dans le tableau partagé de l'appelant (un seul par run d'org, passé à
+// travers syncCustomers/syncSubscriptions/syncInvoices) pour que
+// DataSyncLogger.complete() puisse enfin l'écrire dans error_message —
+// avant l'incident du 2026-08-04, elle finissait uniquement en
+// console.error, jamais persistée (voir _shared/data-sync-logger.ts).
 async function batchUpsert<T extends Record<string, unknown>>(
   supabase: SupabaseClient,
   table: string,
   rows: T[],
   onConflict: string,
+  writeErrors: WriteError[],
 ): Promise<{ processed: number; failed: number }> {
   let processed = 0
   let failed = 0
@@ -227,6 +234,7 @@ async function batchUpsert<T extends Record<string, unknown>>(
         error_details: error.details, error_hint: error.hint,
         chunk_size: chunk.length, chunk_offset: i,
       }))
+      writeErrors.push({ table, message: error.message, code: error.code ?? null })
       failed += chunk.length
     } else {
       processed += chunk.length
@@ -241,6 +249,7 @@ async function syncCustomers(
   organizationId: string,
   apiKey: string,
   logger: DataSyncLogger,
+  writeErrors: WriteError[],
   createdAfter?: number,
 ): Promise<void> {
   const extraParams: Record<string, string> = {}
@@ -262,7 +271,7 @@ async function syncCustomers(
     rows.push(row)
   }
 
-  const { processed, failed } = await batchUpsert(supabase, 'accounts', rows, 'organization_id,stripe_customer_id')
+  const { processed, failed } = await batchUpsert(supabase, 'accounts', rows, 'organization_id,stripe_customer_id', writeErrors)
   logger.increment('records_processed', processed)
   logger.increment('accounts_processed', processed)
   logger.increment('records_failed', failed)
@@ -276,8 +285,9 @@ async function syncSubscriptions(
   organizationId: string,
   apiKey: string,
   logger: DataSyncLogger,
+  writeErrors: WriteError[],
   restatementMode = false,
-): Promise<{ anomalyDetected: boolean; billingProfile?: BillingProfileCounts }> {
+): Promise<{ anomalyDetected: boolean; billingProfile?: BillingProfileCounts; restatementAccountsCount?: number }> {
   const extraParams: Record<string, string> = { status: 'all' }
 
   // Détection du profil de facturation (Phase 3, docs/openspec.md §11) —
@@ -320,11 +330,6 @@ async function syncSubscriptions(
     createdAt: number
   }>>()
 
-  // Comptes ayant au moins une subscription connue, tous statuts confondus
-  // (y compris canceled) — sert à détecter billing_model='invoice_only'
-  // (docs/openspec.md §8.2) : un compte ici n'est jamais invoice_only, peu
-  // importe qu'il soit actif ou churned.
-  const accountsWithAnySubscription = new Set<string>()
   // Devises des subscriptions billables de l'org, pour le vote majoritaire
   // (docs/openspec.md §9) appliqué ci-dessous par compte.
   const orgSubscriptionCurrencies: Array<{ currency: string | null }> = []
@@ -346,8 +351,6 @@ async function syncSubscriptions(
       logger.increment('records_failed')
       continue
     }
-
-    accountsWithAnySubscription.add(accountId)
 
     if (sub.status === 'canceled' && sub.canceled_at) {
       const existing = accountLatestCanceledAt.get(accountId) ?? 0
@@ -448,7 +451,7 @@ async function syncSubscriptions(
   }
 
   // Phase 1 : batch upsert subscriptions
-  const { processed: subOk, failed: subFail } = await batchUpsert(supabase, 'subscriptions', subRows, 'stripe_sub_id')
+  const { processed: subOk, failed: subFail } = await batchUpsert(supabase, 'subscriptions', subRows, 'stripe_sub_id', writeErrors)
   logger.increment('records_processed', subOk)
   logger.increment('subscriptions_processed', subOk)
   logger.increment('records_failed', subFail)
@@ -499,6 +502,35 @@ async function syncSubscriptions(
     // seat_limit = NULL si mapping absent, non configuré, ou unlimited_seats = true
     const seatLimit = mapping ? (mapping.unlimited_seats ? null : (mapping.seat_limit ?? null)) : null
 
+    // Forme canonique obligatoire (incident 2026-08-04, IMPLEMENTATION_LOG.md
+    // — régression de la PR MRR engine v2) : batchUpsert() envoie ce tableau
+    // en un seul .upsert() multi-lignes. Quand des lignes du même batch ont
+    // des clés différentes, PostgREST doit unifier la liste de colonnes de
+    // l'INSERT sur tout le batch — les lignes où une clé est absente
+    // reçoivent un NULL explicite pour cette colonne, PAS le DEFAULT de la
+    // table (le DEFAULT ne s'applique que si la colonne est absente de la
+    // liste de colonnes de l'INSERT tout entier, pas ligne par ligne). Une
+    // seule ligne NULL sur une colonne NOT NULL fait échouer l'upsert
+    // ENTIER (tout le chunk, pas juste cette ligne) — c'est exactement ce
+    // qui s'est produit sur `billing_model` (NOT NULL, DEFAULT 'subscription',
+    // mais assignée conditionnellement ci-dessous auparavant) : 100% des
+    // comptes de chaque org sont restés bloqués aux defaults de migration
+    // pendant que `sync_status` restait 'completed' (voir aussi le fix de
+    // DataSyncLogger.complete() qui rendait ça invisible).
+    //
+    // Règle : toute colonne NOT NULL doit apparaître sur CHAQUE ligne du
+    // batch avec une valeur explicite — jamais une affectation conditionnelle
+    // de clé. Vérifié pour les 6 colonnes NOT NULL de ce chantier
+    // (billing_model, mrr_status, is_delinquent, pending_cancellation,
+    // is_zero_dollar_active, trial_mrr_cents) : les 5 autres étaient déjà
+    // inconditionnelles, seule billing_model ne l'était pas.
+    //
+    // billing_model : mise à 'subscription' pour CHAQUE compte de ce batch,
+    // pas seulement ceux avec une subscription connue ce run — sûr par
+    // construction, puisque c'est déjà la valeur DEFAULT de la colonne, et
+    // que syncInvoices() (juste après, même run) corrige explicitement en
+    // 'invoice_only' les comptes qui le sont réellement (docs/openspec.md
+    // §8.2) via un .update() séparé, indépendant de cet upsert.
     const row: Record<string, unknown> = {
       id: acctId,
       organization_id: organizationId,
@@ -512,17 +544,11 @@ async function syncSubscriptions(
       seat_count: totalSeats > 0 ? totalSeats : null,
       plan_tier: planTier,
       seat_limit: seatLimit,
-    }
-    if (agg.currency) row.currency = agg.currency
-    // billing_model : écrit uniquement quand ce compte a des subscriptions
-    // connues ce run — sinon laissé à syncInvoices (qui tourne juste après
-    // dans le même run) pour distinguer invoice_only d'un compte simplement
-    // pas encore synchronisé (docs/openspec.md §8.2).
-    if (accountsWithAnySubscription.has(acctId)) row.billing_model = 'subscription'
-    if (primary) {
-      row.billing_interval = primary.billingInterval
-      row.contract_start_date = primary.contractStart
-      row.contract_end_date = primary.contractEnd
+      currency: agg.currency ?? null,
+      billing_model: 'subscription',
+      billing_interval: primary ? primary.billingInterval : null,
+      contract_start_date: primary ? primary.contractStart : null,
+      contract_end_date: primary ? primary.contractEnd : null,
     }
     accountUpdateRows.push(row)
   }
@@ -604,7 +630,7 @@ async function syncSubscriptions(
     }
 
     if (restatementRows.length > 0) {
-      const { failed: restFail } = await batchUpsert(supabase, 'mrr_restatements', restatementRows, 'account_id,reason')
+      const { failed: restFail } = await batchUpsert(supabase, 'mrr_restatements', restatementRows, 'account_id,reason', writeErrors)
       if (restFail > 0) {
         console.error(JSON.stringify({
           level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
@@ -613,7 +639,7 @@ async function syncSubscriptions(
       }
     }
 
-    const { failed: acctFailRestate } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id')
+    const { failed: acctFailRestate } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id', writeErrors)
     logger.increment('records_failed', acctFailRestate)
 
     console.log(JSON.stringify({
@@ -621,10 +647,10 @@ async function syncSubscriptions(
       message: `restatement_mode: ${restatementRows.length}/${customerToAccount.size} comptes restated, 0 mrr_movements générés`,
     }))
 
-    return { anomalyDetected: false, billingProfile: billingProfileCounts }
+    return { anomalyDetected: false, billingProfile: billingProfileCounts, restatementAccountsCount: restatementRows.length }
   }
 
-  const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id')
+  const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id', writeErrors)
   logger.increment('records_failed', acctFail)
 
   // Phase 3 : générer les mrr_movements — classification centralisée
@@ -702,6 +728,7 @@ async function syncInvoices(
   organizationId: string,
   apiKey: string,
   logger: DataSyncLogger,
+  writeErrors: WriteError[],
   createdAfter?: number,
 ): Promise<{ invoiceOnlyAccountsCount: number }> {
   const extraParams: Record<string, string> = {}
@@ -756,7 +783,7 @@ async function syncInvoices(
     })
   }
 
-  const { processed, failed } = await batchUpsert(supabase, 'invoices', invoiceRows, 'stripe_invoice_id')
+  const { processed, failed } = await batchUpsert(supabase, 'invoices', invoiceRows, 'stripe_invoice_id', writeErrors)
   logger.increment('records_processed', processed)
   logger.increment('invoices_processed', processed)
   logger.increment('records_failed', failed)
@@ -995,10 +1022,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   await logger.start()
 
+  // Partagé par les trois étapes du sync — chaque batchUpsert() en échec y
+  // pousse l'erreur Postgres réelle (voir _shared/data-sync-logger.ts),
+  // transmis à logger.complete() plus bas pour qu'il ne se déclare plus
+  // 'completed' silencieusement quand records_failed > 0.
+  const writeErrors: WriteError[] = []
+
   try {
-    await syncCustomers(supabase, organizationId, apiKey, logger, createdAfter)
-    const { anomalyDetected, billingProfile } = await syncSubscriptions(supabase, organizationId, apiKey, logger, restatementMode)
-    const { invoiceOnlyAccountsCount } = await syncInvoices(supabase, organizationId, apiKey, logger, createdAfter)
+    await syncCustomers(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
+    const { anomalyDetected, billingProfile, restatementAccountsCount } = await syncSubscriptions(supabase, organizationId, apiKey, logger, writeErrors, restatementMode)
+    const { invoiceOnlyAccountsCount } = await syncInvoices(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
 
     if (anomalyDetected) {
       // 'validation_error' — CHECK data_syncs_error_type_check n'inclut pas de valeur
@@ -1043,7 +1076,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .update({ updated_at: new Date().toISOString() })
       .eq('id', organizationId)
 
-    await logger.complete({ sync_type: syncType, created_after: createdAfter })
+    // restatement_mode/accounts_restated persistés explicitement (incident
+    // 2026-08-04, point A du diagnostic, IMPLEMENTATION_LOG.md) : rien en
+    // base ne disait auparavant dans quel mode un run avait tourné — la
+    // seule trace était un console.log jamais persisté. Ambiguïté totale au
+    // moment de diagnostiquer pourquoi un restatement n'avait rien produit.
+    await logger.complete(
+      {
+        sync_type: syncType,
+        created_after: createdAfter,
+        restatement_mode: restatementMode,
+        ...(restatementMode ? { accounts_restated: restatementAccountsCount ?? 0 } : {}),
+      },
+      writeErrors,
+    )
 
     // Déclencher le scoring après chaque sync (EdgeRuntime.waitUntil garantit l'exécution)
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
