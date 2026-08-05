@@ -226,6 +226,73 @@ this back into Phase 3's planned logistic regression over historical churn.
 
 ---
 
+### 8. Deploying backend ahead of its matching frontend
+
+**Incident (2026-08-05)**: #27+#31 were merged and deployed alone, without their
+matching frontend PR (#10). The deployed app broke immediately in production:
+Overview, Accounts list, and Segments all failed with a real Postgres error
+(`column "mrr_status" does not exist`) — not a frontend/backend contract
+mismatch, but a **view left stale by migration ordering**. `accounts_with_priority`
+is defined as `SELECT a.* ... FROM accounts a`. Postgres freezes a `SELECT *`
+view into an explicit column list **at the moment the view is created** — a
+column added to the base table afterward does NOT appear in the view's output
+until the view is dropped/recreated. The migration adding 7 columns from the
+MRR Engine v2 chantier (`20260804000001`: `mrr_status`, `trial_mrr_cents`,
+`is_delinquent`, `pending_cancellation`, `is_zero_dollar_active`,
+`billing_model`, `currency`) ran one day after the view's last recreation
+(`20260803000002`) — **all 7** were invisible to the view, not just
+`mrr_status`. The very next PR (`8ac3223`) started selecting `mrr_status`
+from that view and broke on first use in production; any of the other 6
+would have broken it identically the moment a handler started reading it
+from the view. Fixed by `20260805000001_accounts_with_priority_column_drift_fix.sql`
+(recreates the view, which naturally re-expands `SELECT a.*` to the current
+column list).
+
+**Rules going forward**:
+
+1. **Any migration that adds a column consumed by a `SELECT *` view must
+   recreate that view in the same migration series.** Grep
+   `supabase/migrations/` for `SELECT a\.\*|SELECT \*` before adding a column
+   to a table that has one or more views defined over it, and add a
+   `DROP VIEW` / `CREATE VIEW` for each one in the same PR — never assume a
+   view "just picks up" new columns.
+2. **A backend PR that changes a contract the frontend consumes (new
+   response fields another endpoint now emits, new enum values written to a
+   table the frontend reads) should not be deployed alone to a shared
+   environment** unless the currently-deployed frontend is verified to
+   tolerate the change (e.g. by reading its actual query/type code, not by
+   assuming). If the matching frontend PR exists, deploy both together, or
+   get explicit confirmation the gap is safe before merging the backend PR
+   on its own.
+3. **After any deploy that touches SQL views, sanity-check by replaying the
+   exact `SELECT` your Edge Function handlers issue** against the view/table
+   via `execute_sql` (or an equivalent SQL client) before declaring the
+   deploy verified — a green CI/migration-apply run does not catch a stale
+   view, since `CREATE OR REPLACE VIEW` errors would surface at migration
+   time, but a `DROP`-less oversight (forgetting to touch the view at all)
+   produces no error anywhere until a query actually asks for the missing
+   column.
+4. **This is now enforced structurally, not just documented** — the `SELECT
+   *` freeze is a Postgres property, not a one-off oversight, so the
+   protection can't be "remember to check" alone:
+   - `20260805000001_accounts_with_priority_column_drift_fix.sql` ends with
+     a `DO $$ ... RAISE EXCEPTION` block that fails the migration itself if
+     `accounts_with_priority` is missing any current `accounts` column —
+     catches drift that already exists at the moment this specific
+     migration runs.
+   - `.github/workflows/supabase-deploy.yml`, step "Verify
+     accounts_with_priority has no column drift", runs the same check via
+     the Management API **after every future deploy** (`supabase db push`
+     step) — this is the part that actually protects against the next
+     migration that adds a column to `accounts` without touching the view,
+     since that drift doesn't exist yet at the time any single migration
+     runs and can only be caught by checking the real schema after all
+     migrations for that deploy have applied. Fails the GitHub Actions run
+     (`exit 1`) if drift is found; soft-fails with a `::warning::` (does not
+     block deploy) only if the Management API call itself is unreachable.
+
+---
+
 ## One-Time Migration Procedures
 
 ### MRR Engine v2 — Restatement (Phase 2.4, docs/openspec.md)
