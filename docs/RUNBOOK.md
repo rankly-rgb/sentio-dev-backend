@@ -236,12 +236,17 @@ mismatch, but a **view left stale by migration ordering**. `accounts_with_priori
 is defined as `SELECT a.* ... FROM accounts a`. Postgres freezes a `SELECT *`
 view into an explicit column list **at the moment the view is created** — a
 column added to the base table afterward does NOT appear in the view's output
-until the view is dropped/recreated. The migration adding `mrr_status`
-(`20260804000001`) ran one day after the view's last recreation
-(`20260803000002`), so the column was invisible to the view even though it
-existed on `accounts`. The very next PR (`8ac3223`) started selecting
-`mrr_status` from that view — and broke on first use, in production, the
-moment it deployed.
+until the view is dropped/recreated. The migration adding 7 columns from the
+MRR Engine v2 chantier (`20260804000001`: `mrr_status`, `trial_mrr_cents`,
+`is_delinquent`, `pending_cancellation`, `is_zero_dollar_active`,
+`billing_model`, `currency`) ran one day after the view's last recreation
+(`20260803000002`) — **all 7** were invisible to the view, not just
+`mrr_status`. The very next PR (`8ac3223`) started selecting `mrr_status`
+from that view and broke on first use in production; any of the other 6
+would have broken it identically the moment a handler started reading it
+from the view. Fixed by `20260805000001_accounts_with_priority_column_drift_fix.sql`
+(recreates the view, which naturally re-expands `SELECT a.*` to the current
+column list).
 
 **Rules going forward**:
 
@@ -267,6 +272,24 @@ moment it deployed.
    time, but a `DROP`-less oversight (forgetting to touch the view at all)
    produces no error anywhere until a query actually asks for the missing
    column.
+4. **This is now enforced structurally, not just documented** — the `SELECT
+   *` freeze is a Postgres property, not a one-off oversight, so the
+   protection can't be "remember to check" alone:
+   - `20260805000001_accounts_with_priority_column_drift_fix.sql` ends with
+     a `DO $$ ... RAISE EXCEPTION` block that fails the migration itself if
+     `accounts_with_priority` is missing any current `accounts` column —
+     catches drift that already exists at the moment this specific
+     migration runs.
+   - `.github/workflows/supabase-deploy.yml`, step "Verify
+     accounts_with_priority has no column drift", runs the same check via
+     the Management API **after every future deploy** (`supabase db push`
+     step) — this is the part that actually protects against the next
+     migration that adds a column to `accounts` without touching the view,
+     since that drift doesn't exist yet at the time any single migration
+     runs and can only be caught by checking the real schema after all
+     migrations for that deploy have applied. Fails the GitHub Actions run
+     (`exit 1`) if drift is found; soft-fails with a `::warning::` (does not
+     block deploy) only if the Management API call itself is unreachable.
 
 ---
 

@@ -50,6 +50,41 @@ jobs:
       - name: Push database migrations
         run: supabase db push --include-all
 
+      - name: Verify accounts_with_priority has no column drift
+        # Incident 2026-08-05 (docs/RUNBOOK.md "Deploying backend ahead of
+        # its matching frontend") : accounts_with_priority is `SELECT a.*
+        # FROM accounts a` — Postgres freezes `*` into an explicit column
+        # list at CREATE VIEW time, so a column added to accounts by a LATER
+        # migration silently never appears in the view until it's recreated.
+        # The migration-time DO block in 20260805000001 only catches drift
+        # that already exists when THAT migration runs — it can't see a
+        # future migration that adds a column without recreating the view.
+        # This step is the structural guard for that future case: it runs
+        # after every deploy, against the real post-migration schema.
+        run: |
+          set -euo pipefail
+          DRIFT_QUERY="SELECT string_agg(c.column_name, ', ') FROM information_schema.columns c WHERE c.table_schema='public' AND c.table_name='accounts' AND c.column_name NOT IN (SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='accounts_with_priority');"
+          SQL_BODY=$(jq -Rcs '{"query":.}' <<< "$DRIFT_QUERY")
+          RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/database/query" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$SQL_BODY")
+          CODE=$(printf '%s' "$RESULT" | tail -1)
+          BODY=$(printf '%s' "$RESULT" | head -1)
+          if [ "$CODE" != "200" ] && [ "$CODE" != "201" ]; then
+            echo "::warning::Management API query returned HTTP $CODE — could not verify view drift, not blocking deploy"
+            echo "Body: $BODY"
+            exit 0
+          fi
+          MISSING=$(printf '%s' "$BODY" | jq -r '.[0].string_agg // empty')
+          if [ -n "$MISSING" ]; then
+            echo "::error::accounts_with_priority is missing accounts column(s): $MISSING"
+            echo "SELECT * views freeze their column list at CREATE VIEW time — a migration adding a column to accounts must recreate this view in the same series. See docs/RUNBOOK.md."
+            exit 1
+          fi
+          echo "accounts_with_priority: no column drift."
+
       - name: Set Edge Function secrets
         # N'écrit que les secrets effectivement définis dans GitHub Secrets.
         # Évite d'écraser un secret existant avec une chaîne vide si le
