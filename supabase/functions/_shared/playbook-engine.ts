@@ -107,6 +107,10 @@ export interface AccountData {
   contract_start_date: string | null
   contract_end_date: string | null
   created_at: string
+  // Audit délinquence 2026-08-06, point 10 : sans ce champ, un playbook de
+  // dunning est littéralement impossible à écrire — eligibility_criteria ne
+  // peut cibler que des champs présents sur AccountData.
+  is_delinquent: boolean
 }
 
 // ── Condition evaluation ────────────────────────────────────

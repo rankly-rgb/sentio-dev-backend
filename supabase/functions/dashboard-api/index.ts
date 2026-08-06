@@ -101,8 +101,9 @@
 //         trial_mrr_cents: number,
 //         nrr_percentage: number | null,
 //         churn_rate: number | null,
-//         accounts_at_risk: number,
-//         mrr_at_risk_cents: number,
+//         accounts_at_risk: number,        // churn_risk_band='high' OR is_delinquent (audit 2026-08-06, decision 3)
+//         accounts_at_risk_unpriced: number, // subset of accounts_at_risk with mrr_status='unavailable' — excluded from mrr_at_risk_cents, never silently
+//         mrr_at_risk_cents: number,       // sums only the chargeable (mrr_status != 'unavailable') subset of accounts_at_risk
 //         expansion_opportunities: number,
 //         currency: string | null,
 //         mrr_unavailable_accounts: number,
@@ -376,6 +377,37 @@ const EXPANSION_OPPORTUNITY_THRESHOLD = 75 // cohérent avec kpi-cards.tsx histo
 const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
 
+interface AtRiskAccountRow {
+  churn_risk_band: string | null
+  is_delinquent: boolean
+  mrr_status: string | null
+  mrr_cents: number | null
+}
+
+// Audit délinquence 2026-08-06, décision 3 : "at risk" = churn_risk_band='high'
+// OR is_delinquent (jamais via un seuil numérique conçu pour autre chose — un
+// compte uniquement délinquent, payment_delinquent=35pts, ne franchit jamais
+// 'high' seul). mrr_at_risk_cents ne somme que le sous-ensemble chiffrable
+// (mrr_status != 'unavailable') — la majorité des comptes délinquents ont
+// mrr_status='unavailable' (exclusion de devise minoritaire, IMPLEMENTATION_
+// LOG.md Incident #6) ; les sommer aveuglément ferait grimper accounts_at_risk
+// sans jamais bouger mrr_at_risk_cents, lu à tort comme "rien à risque en
+// argent". unpricedCount expose le nombre exclu au lieu d'un total silencieux.
+function computeAccountsAtRisk(accounts: AtRiskAccountRow[]): {
+  atRiskCount: number
+  mrrAtRiskCents: number
+  unpricedCount: number
+} {
+  const atRisk = accounts.filter((a) => a.churn_risk_band === 'high' || a.is_delinquent)
+  const priced = atRisk.filter((a) => a.mrr_status !== 'unavailable')
+  const mrrAtRiskCents = priced.reduce((sum, a) => sum + (a.mrr_cents ?? 0), 0)
+  return {
+    atRiskCount: atRisk.length,
+    mrrAtRiskCents,
+    unpricedCount: atRisk.length - priced.length,
+  }
+}
+
 async function handlePortfolioMetrics(
   supabase: ReturnType<typeof createServiceClient>,
   orgId: string,
@@ -392,7 +424,7 @@ async function handlePortfolioMetrics(
     stripeFreshness,
   ] = await Promise.all([
     supabase.from('accounts')
-      .select('mrr_cents, trial_mrr_cents, mrr_status, churn_risk_band, expansion_score, expansion_score_status')
+      .select('mrr_cents, trial_mrr_cents, mrr_status, churn_risk_band, is_delinquent, expansion_score, expansion_score_status')
       .eq('organization_id', orgId)
       .limit(20000),
     // NRR : historique complet, 'correction' exclu par construction (jamais
@@ -431,8 +463,7 @@ async function handlePortfolioMetrics(
   const trialMrrCents = accounts.reduce((sum: number, a: { trial_mrr_cents: number | null }) => sum + (a.trial_mrr_cents ?? 0), 0)
   const mrrUnavailableAccounts = accounts.filter((a: { mrr_status: string | null }) => a.mrr_status === 'unavailable').length
 
-  const atRiskAccounts = accounts.filter((a: { churn_risk_band: string | null }) => a.churn_risk_band === 'high')
-  const mrrAtRiskCents = atRiskAccounts.reduce((sum: number, a: { mrr_cents: number | null }) => sum + (a.mrr_cents ?? 0), 0)
+  const { atRiskCount, mrrAtRiskCents, unpricedCount: accountsAtRiskUnpriced } = computeAccountsAtRisk(accounts as AtRiskAccountRow[])
 
   const expansionOpportunities = accounts.filter((a: { expansion_score_status: string | null; expansion_score: number | null }) =>
     a.expansion_score_status === 'available' && (a.expansion_score ?? 0) > EXPANSION_OPPORTUNITY_THRESHOLD,
@@ -457,7 +488,8 @@ async function handlePortfolioMetrics(
       trial_mrr_cents: trialMrrCents,
       nrr_percentage: nrrPercentage,
       churn_rate: churnRate,
-      accounts_at_risk: atRiskAccounts.length,
+      accounts_at_risk: atRiskCount,
+      accounts_at_risk_unpriced: accountsAtRiskUnpriced,
       mrr_at_risk_cents: mrrAtRiskCents,
       expansion_opportunities: expansionOpportunities,
       currency: orgRes.data?.currency ?? null,

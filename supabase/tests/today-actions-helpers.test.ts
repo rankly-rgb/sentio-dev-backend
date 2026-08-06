@@ -26,6 +26,7 @@ function account(overrides: Partial<TodayAccountInput> = {}): TodayAccountInput 
     billing_interval: null,
     created_at: '2026-01-01T00:00:00Z',
     primary_segment: null,
+    is_delinquent: false,
     ...overrides,
   }
 }
@@ -67,35 +68,51 @@ describe('computeDaysToRenewal', () => {
 
 describe('computePriority', () => {
   it('is P0 for churn_risk_score >= 70 with no insights', () => {
-    expect(computePriority(75, null, [])).toBe('P0')
+    expect(computePriority(75, null, [], false)).toBe('P0')
   })
 
   it('is P1 for churn_risk_score >= 50', () => {
-    expect(computePriority(55, null, [])).toBe('P1')
+    expect(computePriority(55, null, [], false)).toBe('P1')
   })
 
   it('is P1 when renewal is within 60 days regardless of churn score', () => {
-    expect(computePriority(10, 45, [])).toBe('P1')
+    expect(computePriority(10, 45, [], false)).toBe('P1')
   })
 
   it('is P2 by default', () => {
-    expect(computePriority(10, null, [])).toBe('P2')
+    expect(computePriority(10, null, [], false)).toBe('P2')
   })
 
   it('a critical insight elevates a low-risk account to P0', () => {
-    expect(computePriority(10, null, ['critical'])).toBe('P0')
+    expect(computePriority(10, null, ['critical'], false)).toBe('P0')
   })
 
   it('a high insight elevates a P2 account to P1 but not P0', () => {
-    expect(computePriority(10, null, ['high'])).toBe('P1')
+    expect(computePriority(10, null, ['high'], false)).toBe('P1')
   })
 
   it('never downgrades priority — a P0 account stays P0 even with a low insight', () => {
-    expect(computePriority(80, null, ['low'])).toBe('P0')
+    expect(computePriority(80, null, ['low'], false)).toBe('P0')
   })
 
   it('takes the worst (most urgent) priority across multiple insights', () => {
-    expect(computePriority(10, null, ['low', 'critical', 'medium'])).toBe('P0')
+    expect(computePriority(10, null, ['low', 'critical', 'medium'], false)).toBe('P0')
+  })
+
+  // ── is_delinquent forces P0 directly (audit 2026-08-06, décision 3) ──
+  // Never via the churn_risk_score >= 70 threshold — a delinquent-only
+  // account (payment_delinquent, 35/150) never crosses it alone.
+
+  it('is_delinquent alone forces P0 even with a low churn score and no insights', () => {
+    expect(computePriority(10, null, [], true)).toBe('P0')
+  })
+
+  it('is_delinquent forces P0 even when renewal/insights would only justify P1', () => {
+    expect(computePriority(10, 45, ['high'], true)).toBe('P0')
+  })
+
+  it('is_delinquent=false does not itself force P0 (baseline unchanged)', () => {
+    expect(computePriority(10, null, [], false)).toBe('P2')
   })
 })
 
@@ -113,6 +130,11 @@ describe('computeTriggerReasons', () => {
   it('adds a low health score reason under 40', () => {
     const reasons = computeTriggerReasons(account({ health_score: 20, churn_risk_score: 0 }), [])
     expect(reasons.some((r) => r.includes('Low health score'))).toBe(true)
+  })
+
+  it('adds a payment past due reason when is_delinquent, independent of churn_risk_score', () => {
+    const reasons = computeTriggerReasons(account({ churn_risk_score: 0, is_delinquent: true }), [])
+    expect(reasons).toContain('Payment past due')
   })
 })
 
@@ -149,6 +171,17 @@ describe('computeTodayActions', () => {
     const criteria = { operator: 'AND' as const, conditions: [{ field: 'mrr_cents', operator: 'gt' as const, value: 999999 }] }
     const actions = computeTodayActions([account()], [playbook({ eligibility_criteria: criteria })], new Map())
     expect(actions).toHaveLength(0)
+  })
+
+  it('a delinquent account matched by a playbook lands as P0 with a payment past due reason (audit 2026-08-06)', () => {
+    const actions = computeTodayActions(
+      [account({ churn_risk_score: 10, is_delinquent: true })],
+      [playbook()],
+      new Map(),
+    )
+    expect(actions).toHaveLength(1)
+    expect(actions[0].priority).toBe('P0')
+    expect(actions[0].trigger_reasons).toContain('Payment past due')
   })
 })
 

@@ -8,6 +8,7 @@ export interface Account {
   contract_end_date: string | null
   health_score: number | null
   churn_risk_score: number | null
+  is_delinquent: boolean
 }
 
 // ── Segmentation ─────────────────────────────────────────────
@@ -453,11 +454,27 @@ export interface ChurnSignalInputs {
   annualRenewal30dPlusWithContraction6mo: boolean | null
   hasDowngrade6mo: boolean | null
   hasInvoiceOverdueUnder15: boolean | null
+  // Subscription status is currently `past_due`/`unpaid` (Stripe-reported,
+  // sync-stripe/stripe-webhook, mrr-engine.ts aggregateAccountMrr). Always a
+  // real boolean, never null — this signal's entire purpose is to be
+  // evaluable independently of invoice data (delinquency audit 2026-08-06,
+  // point 1). Never NOT_EVALUATED like the invoice-derived signals above.
+  isDelinquent: boolean
 }
 
 export function buildChurnSignals(inputs: ChurnSignalInputs): ChurnSignalDefinition[] {
   return [
     { code: 'invoice_overdue_15d', label: 'Invoice overdue for 15+ days', severity: 'CRITIQUE', points: 35, value: inputs.hasInvoiceOverdue15Plus },
+    // Mutual exclusion with invoice_overdue_15d (audit 2026-08-06, point 1,
+    // Naima-approved) : the two are the same underlying fact — "this account
+    // hasn't paid" — observed at different precision (subscription-status
+    // proxy vs. confirmed invoice age). Once invoice_overdue_15d is
+    // confirmed true, the earlier proxy is redundant, not additional
+    // evidence, so it stands down instead of stacking (95→60pt ceiling on
+    // the payment-distress cluster). payment_failures_90d stays fully
+    // independent below — a distinct axis (count of failed-charge events
+    // over 90d), not a restatement of "currently past_due right now".
+    { code: 'payment_delinquent', label: 'Subscription payment past due', severity: 'CRITIQUE', points: 35, value: inputs.hasInvoiceOverdue15Plus === true ? false : inputs.isDelinquent },
     { code: 'mrr_contraction_20pct_3mo', label: 'MRR contraction of 20%+ over 3 months', severity: 'CRITIQUE', points: 30, value: inputs.contractionMrr20PctPlus3mo },
     { code: 'payment_failures_90d', label: '2 or more payment failures in the last 90 days', severity: 'MAJEUR', points: 25, value: inputs.paymentFailures2PlusIn90d },
     { code: 'monthly_young_account', label: 'Monthly billing and account under 6 months old', severity: 'MAJEUR', points: 20, value: inputs.isMonthlyAndTenureUnder6mo },
@@ -544,6 +561,16 @@ export interface SegmentInputV3 {
   hasOverdueInvoices: boolean
   subscriptionCanceled: boolean
   accountCreatedAt: string
+  // Décision produit 2026-08-06 (audit délinquence, décision 2) : un compte
+  // délinquent EST un compte en impayé, que la preuve vienne d'une facture
+  // en retard ou du statut de souscription Stripe — la distinction est un
+  // détail d'implémentation, pas quelque chose que l'utilisateur doit voir
+  // dans sa segmentation. `impayes` étant évalué avant `en_danger_critique`/
+  // `a_risque_leger` dans la chaîne de priorité ci-dessous, un compte
+  // délinquant qui était classé `en_danger_critique`/`a_risque_leger` bascule
+  // désormais en `impayes` — voulu : « impayé » dit quoi faire, « à risque »
+  // non.
+  isDelinquent: boolean
 }
 
 export function determineSegmentTypesV3(input: SegmentInputV3): SegmentTypeV3[] {
@@ -566,7 +593,7 @@ export function determineSegmentTypesV3(input: SegmentInputV3): SegmentTypeV3[] 
   // SegmentInputV3 (appelants existants) mais ne pilotent plus ce segment.
   if (input.churnRiskBand === 'churned') {
     segments.push('en_churn')
-  } else if (input.hasOverdueInvoices) {
+  } else if (input.hasOverdueInvoices || input.isDelinquent) {
     segments.push('impayes')
   } else if (input.healthScoreStatus === 'insufficient') {
     segments.push('donnees_insuffisantes')

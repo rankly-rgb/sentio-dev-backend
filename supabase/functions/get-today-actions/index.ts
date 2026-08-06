@@ -85,7 +85,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // droper par accident un compte pas encore scoré (churn_risk_band NULL).
     supabase
       .from('accounts')
-      .select('id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, mrr_cents, plan_tier, contract_end_date, billing_interval, created_at')
+      .select('id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, mrr_cents, plan_tier, contract_end_date, billing_interval, created_at, is_delinquent')
       .eq('organization_id', orgId)
       .or('churn_risk_band.neq.churned,churn_risk_band.is.null')
       .limit(ACCOUNTS_LIMIT),

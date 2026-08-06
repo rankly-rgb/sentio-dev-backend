@@ -39,6 +39,7 @@ const baseAccount: AccountData = {
   contract_start_date: '2025-01-01',
   contract_end_date: '2026-01-01',
   created_at: '2025-01-01T00:00:00Z',
+  is_delinquent: false,
 }
 
 const baseContext = {

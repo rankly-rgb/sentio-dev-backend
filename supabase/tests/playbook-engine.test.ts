@@ -20,6 +20,9 @@ import {
 const baseAccount: AccountData = {
   id: 'acc-001',
   organization_id: 'org-001',
+  stripe_customer_id: 'cus_001',
+  hubspot_company_id: null,
+  display_name: 'Acme',
   health_score: 65,
   churn_risk_score: 40,
   expansion_score: 55,
@@ -32,6 +35,7 @@ const baseAccount: AccountData = {
   contract_start_date: '2025-06-01',
   contract_end_date: '2026-06-01',
   created_at: '2025-06-01T00:00:00Z',
+  is_delinquent: false,
 }
 
 // ── evaluateCondition ───────────────────────────────────────
@@ -55,6 +59,15 @@ describe('evaluateCondition', () => {
   it('neq: returns false for same values', () => {
     const cond: Condition = { field: 'plan_tier', operator: 'neq', value: 'growth' }
     expect(evaluateCondition(cond, baseAccount)).toBe(false)
+  })
+
+  // Audit délinquence 2026-08-06, point 10 : is_delinquent doit être un champ
+  // ciblable par eligibility_criteria — sans quoi un playbook de dunning est
+  // impossible à écrire, malgré le signal correctement câblé côté scoring.
+  it('eq: is_delinquent is targetable as an eligibility field (dunning playbook use case)', () => {
+    const cond: Condition = { field: 'is_delinquent', operator: 'eq', value: true }
+    expect(evaluateCondition(cond, { ...baseAccount, is_delinquent: true })).toBe(true)
+    expect(evaluateCondition(cond, { ...baseAccount, is_delinquent: false })).toBe(false)
   })
 
   it('gt: returns true when actual > threshold', () => {

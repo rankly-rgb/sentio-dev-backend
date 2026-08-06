@@ -40,6 +40,7 @@ const baseAccountFields = {
   billing_interval: 'annual',
   mrr_cents: 149900,
   mrr_status: 'ok' as const,
+  is_delinquent: false,
   arr_cents: 1798800,
   seat_count: 12,
   seat_limit: 20,
@@ -188,6 +189,7 @@ describe('accounts-api handleGetOne — payload shape by health_score_status', (
     expect(json.data.scores.churn_risk.band).toBe('low')
     expect(json.data.scores.expansion.status).toBe('available')
     expect(json.data.mrr_status).toBe('ok')
+    expect(json.data.is_delinquent).toBe(false)
     expect(json.data.primary_segment).toBe('champions')
     expect(json.data.score_breakdown.payment_health.status).toBe('available')
     expect(json.data.segments[0].risk_score).toBe(json.data.scores.churn_risk.value)
@@ -247,5 +249,11 @@ describe('accounts-api handleGetOne — payload shape by health_score_status', (
     const unavailableAccount = { ...completeAccount, mrr_status: 'unavailable' as const, mrr_cents: 0 }
     const json = await runHandleGetOne(unavailableAccount, 'champions')
     expect(json.data.mrr_status).toBe('unavailable')
+  })
+
+  it('is_delinquent=true passes through unchanged (audit délinquence 2026-08-06, feeds the frontend Past Due badge)', async () => {
+    const delinquentAccount = { ...completeAccount, is_delinquent: true }
+    const json = await runHandleGetOne(delinquentAccount, 'impayes')
+    expect(json.data.is_delinquent).toBe(true)
   })
 })
