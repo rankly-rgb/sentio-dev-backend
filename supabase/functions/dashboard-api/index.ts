@@ -609,11 +609,12 @@ async function handleBenchmarks(
   supabase: ReturnType<typeof createServiceClient>,
   orgId: string,
 ): Promise<Response> {
-  const twelveMonthsAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000)
+  const now = Date.now()
+  const twelveMonthsAgo = new Date(now - 365 * 24 * 60 * 60 * 1000)
     .toISOString()
     .split('T')[0]
 
-  const [snapshotRes, movements12mRes, peersRes] = await Promise.all([
+  const [snapshotRes, movements12mRes, peersRes, firstMovementRes, orgRes] = await Promise.all([
     // Snapshot portefeuille partagé (chantier 5.1) — source de MRR actuel
     supabase.rpc('get_portfolio_snapshot', { p_organization_id: orgId }).maybeSingle(),
 
@@ -630,6 +631,20 @@ async function handleBenchmarks(
       .select('org_count, computed_at, nrr_p25, nrr_p50, nrr_p75, churn_rate_p25, churn_rate_p50, churn_rate_p75, mrr_growth_p25, mrr_growth_p50, mrr_growth_p75')
       .order('computed_at', { ascending: false })
       .limit(1)
+      .maybeSingle(),
+
+    // Bootstrap : même garde que portfolio-metrics (calcNrrPercentage) — un
+    // NRR n'a de sens qu'avec au moins 3 mois d'historique réel, jamais un
+    // 100 déguisé en "pas d'historique = neutre" (Problème 1, audit 2026-08).
+    supabase.from('mrr_movements')
+      .select('movement_date')
+      .eq('organization_id', orgId)
+      .order('movement_date', { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+    supabase.from('organizations')
+      .select('created_at')
+      .eq('id', orgId)
       .maybeSingle(),
   ])
 
@@ -653,15 +668,16 @@ async function handleBenchmarks(
   const netMovements12m = new12m + expansion12m + reactivation12m - contraction12m - churn12m
   const startingMrr = currentMrr - netMovements12m
 
-  // NRR = (MRR existants en fin de période) / (MRR existants en début de période) × 100
-  // On exclut le new business des deux côtés
-  const endingMrrExisting = currentMrr - new12m
-  let nrr: number | null = null
-  if (startingMrr > 0) {
-    nrr = Math.round((endingMrrExisting / startingMrr) * 1000) / 10
-  } else if (currentMrr > 0) {
-    nrr = 100 // pas d'historique = neutre
-  }
+  const firstMovementDate = firstMovementRes.data?.movement_date ?? orgRes.data?.created_at ?? null
+  const hasThreeMonthsHistory = firstMovementDate !== null && (now - new Date(firstMovementDate).getTime()) >= THREE_MONTHS_MS
+
+  // NRR : déléguée à calcNrrPercentage (_shared/mrr-engine.ts) — même formule
+  // et même garde bootstrap que /portfolio-metrics, plutôt qu'un second
+  // calculateur local. Avant ce correctif, ce chemin retournait `100` en
+  // l'absence d'historique ("pas d'historique = neutre"), un faux positif
+  // (Problème 1, audit 2026-08) : calcNrrPercentage retourne `null` dans ce
+  // cas, jamais un 100 qui se lirait comme "rétention parfaite".
+  const nrr = calcNrrPercentage(currentMrr, (movements12mRes.data ?? []) as MrrMovementForNrr[], hasThreeMonthsHistory)
 
   // Churn rate revenue = MRR churné / MRR de départ × 100 (plafonné à 100%)
   const churnRate = startingMrr > 0
