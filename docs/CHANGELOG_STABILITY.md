@@ -4,6 +4,32 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Délinquence — `is_delinquent` câblé, cinq surfaces "at risk" unifiées (2026-08-06)
+
+Audit délinquence 2026-08-06 (suite de D-NEXT, 2026-08-04) : `accounts.is_delinquent` était écrit correctement par `sync-stripe`/`stripe-webhook` depuis le 2026-08-04 mais **jamais lu** — 164 comptes délinquents sur le portefeuille, tous en bande `low`, tuile Overview « Accounts at risk 0 ». Diagnostic complet (Q1/Q2/Q3) et mesure avant/après dans `IMPLEMENTATION_LOG.md`, Incident #6.
+
+Recherche préalable (demandée par Naima avant tout code) : cinq définitions indépendantes de « à risque » trouvées dans le backend — `churn_risk_band='high'` (`dashboard-api` tuile), `churn_risk_score > 70` (`get_portfolio_snapshot.at_risk_count`, seul consommateur `get-today-status`), `risk >= 70`/`>= 50` (`computePriority`, `get-today-actions`), `health_score <= 30/55` (`accounts_with_priority.priority_label`), `health_score < 40` (`onboarding-first-win`/`onboarding-status`, axe différent, non touché ici). Aucune fusion en une seule définition — les trois premières mesurent des choses réellement différentes (bande de risque, seuil numérique, health score) ; la fusion aurait été une erreur.
+
+**Décision 1 — cumul de signaux** : `is_delinquent` devient le signal churn `payment_delinquent` (35pts, CRITIQUE, `_shared/scoring.ts`), en exclusion mutuelle avec `invoice_overdue_15d` — même fait (paiement en échec) observé à deux précisions différentes ; une fois l'invoice confirmée 15j+, le proxy de statut s'efface au lieu de s'additionner. `payment_failures_90d` reste indépendant. Plafond du cluster de détresse paiement : 95→60pts (au lieu de potentiellement 35+35+25 sur un même compte).
+
+**Décision 2 — segment `impayes`** (`determineSegmentTypesV3`) : élargi de `hasOverdueInvoices` seul à `hasOverdueInvoices || isDelinquent`. `impayes` reste évalué avant `en_danger_critique`/`a_risque_leger` dans la chaîne de priorité (inchangé) — un compte délinquent qui y aurait atterri bascule désormais en `impayes`, délibérément : le libellé est plus actionnable.
+
+**Décision 3 — surfaces d'action, jamais via un seuil numérique conçu pour autre chose** (un compte uniquement délinquent, 35pts, ne franchit jamais `> 70` ou `>= 70` seul) :
+- `dashboard-api/index.ts` `handlePortfolioMetrics` : `accounts_at_risk` = `churn_risk_band='high' OR is_delinquent`. Piège anticipé et traité : la majorité des comptes délinquents ont `mrr_status='unavailable'` (`mrr_cents=0`, exclusion de devise minoritaire) — `mrr_at_risk_cents` ne somme que le sous-ensemble réellement chiffrable ; nouveau champ `accounts_at_risk_unpriced` expose le nombre exclu au lieu de laisser un total silencieux se lire comme « rien à risque en argent ».
+- Migration `20260806000001_at_risk_includes_delinquent.sql` : `get_portfolio_snapshot.at_risk_count` élargi (`churn_risk_score > 70 OR is_delinquent`) — seul consommateur : `get-today-status`, ratio 30% du statut portefeuille.
+- Migration `20260806000002_accounts_priority_delinquent.sql` : `accounts_with_priority.priority_label` gagne une branche `WHEN a.is_delinquent THEN 'critical'`, évaluée après `churned` mais avant les branches `churn_risk_band`/`health_score` existantes — sans ça un compte délinquent aurait pu lire « at risk » sur Overview et un badge plus bas sur sa propre ligne Accounts.
+- `get-today-status/index.ts` `selectTopUrgentAccount` : candidats élargis à `churn_risk_score > 70 OR is_delinquent`.
+- `_shared/today-actions-helpers.ts` `computePriority` : nouveau paramètre `isDelinquent`, force `P0` en OR direct — « actionnable le jour même » est la raison d'être de ce chantier, un impayé est P0, pas P1. `computeTriggerReasons` ajoute la raison `'Payment past due'`.
+- `_shared/playbook-engine.ts` `AccountData` + SELECT `playbook-scheduler` (playbook-execute utilisait déjà `select('*')`) : ajout de `is_delinquent` — sans ce champ, un playbook de dunning est impossible à écrire malgré le signal correctement câblé côté scoring.
+
+**Hors périmètre, explicitement acté** : `delinquent_since` (pas d'horodatage aujourd'hui, un impayé du jour et un impayé de 40 jours scorent identiquement — issue dédiée à ouvrir, migration + emplacement d'écriture à définir) ; couverture de sync des factures (issue #34, distincte, déjà ouverte) ; `p0_insights_count`/`generate-insights` (un impayé devrait à terme générer un insight dédié — issue à ouvrir) ; gabarit de l'email `churn-alert` (générique, ne nomme jamais le signal déclencheur — préexistant, pas aggravé par ce chantier, signalé sans être corrigé).
+
+**Tests** : `scoring-v3.test.ts` (mutual exclusion `payment_delinquent`/`invoice_overdue_15d`, segment `impayes` élargi — 21 nouveaux tests), `get-today-status.test.ts` (+3), `today-actions-helpers.test.ts` (+5), `playbook-engine.test.ts` (+1), `accounts-api.test.ts` (+1). `npm run verify` vert.
+
+**Non validé** : les deux migrations SQL n'ont pas été exécutées contre une instance Postgres locale/live dans cette session (aucun outil Supabase/DB disponible) — à vérifier avant merge. Mesure avant/après portefeuille (164 comptes délinquents, répartition par bande) non repassée après déploiement pour la même raison — voir `IMPLEMENTATION_LOG.md`.
+
+---
+
 ## Churn Risk — état figé "churned" pour les comptes partis (2026-08-02, D1/C2.1)
 
 Décision produit D1 (audit rétention 2026-08) : un compte à `mrr_cents = 0` ou dont l'abonnement est `canceled` recevait jusqu'ici un `churn_risk_score` calculé normalement sur ses signaux historiques (factures en retard passées, contraction MRR passée, etc.) — d'où des comptes déjà partis affichés à "92% de risque de churn critique". Un compte parti n'est pas à risque, il est perdu.
