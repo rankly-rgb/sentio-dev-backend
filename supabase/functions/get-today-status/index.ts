@@ -30,16 +30,22 @@
 //   1. critical_count > 0 (insights ai_insights actifs, priority='critical',
 //      hors comptes churn_risk_band='churned' — D1/C2.2, un compte parti
 //      n'est pas "à risque") → 'critical'
-//   2. sinon, part des comptes scorés avec churn_risk_score > 70 dépasse 30 % → 'at_risk'
+//   2. sinon, part des comptes scorés avec (churn_risk_score > 70 OU
+//      is_delinquent) dépasse 30 % → 'at_risk' (audit délinquence 2026-08-06,
+//      décision 3 — is_delinquent câblé en OR direct dans le RPC, jamais
+//      via un seuil numérique qu'un compte uniquement délinquent, poids 35,
+//      ne franchirait jamais seul)
 //   3. sinon → 'stable'
 //
-// top_urgent_account = compte avec churn_risk_score > 70 au MRR le plus élevé.
+// top_urgent_account = compte avec (churn_risk_score > 70 OU is_delinquent)
+// au MRR le plus élevé — voir selectTopUrgentAccount.
 //
 // total_mrr_cents, champions_count et le ratio at-risk/scored proviennent du
 // RPC partagé `get_portfolio_snapshot` (chantier 5.1 — couche d'agrégation
 // portefeuille, consommée aussi par accounts-api et dashboard-api pour éviter
 // que ces totaux divergent d'un écran à l'autre). Voir
-// supabase/migrations/20260712000001_portfolio_snapshot_rpc.sql.
+// supabase/migrations/20260712000001_portfolio_snapshot_rpc.sql, élargi par
+// 20260806000001_at_risk_includes_delinquent.sql.
 //
 // NB : la sélection de top_urgent_account reste basée sur un fetch `accounts`
 // plafonné à 500 lignes (limitation connue, non traitée par ce chantier —
@@ -61,6 +67,7 @@ interface AccountRow {
   display_name: string | null
   mrr_cents: number | null
   churn_risk_score: number | null
+  is_delinquent: boolean
 }
 
 interface InsightRow {
@@ -84,8 +91,12 @@ export function determineTodayStatus(
   return 'stable'
 }
 
+// Audit délinquence 2026-08-06, décision 3 : is_delinquent est câblé en OR
+// direct, jamais via le seuil numérique AT_RISK_CHURN_THRESHOLD — un compte
+// uniquement délinquent (payment_delinquent, 35/150) ne franchit jamais 70
+// seul, mais reste un candidat légitime pour top_urgent_account.
 export function selectTopUrgentAccount(accounts: AccountRow[]): AccountRow | null {
-  const atRisk = accounts.filter((a) => (a.churn_risk_score ?? 0) > AT_RISK_CHURN_THRESHOLD)
+  const atRisk = accounts.filter((a) => (a.churn_risk_score ?? 0) > AT_RISK_CHURN_THRESHOLD || a.is_delinquent)
   if (atRisk.length === 0) return null
   return atRisk.reduce((top, a) => ((a.mrr_cents ?? 0) > (top.mrr_cents ?? 0) ? a : top))
 }
@@ -162,7 +173,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .limit(20000),
     supabase
       .from('accounts')
-      .select('id, display_name, mrr_cents, churn_risk_score')
+      .select('id, display_name, mrr_cents, churn_risk_score, is_delinquent')
       .eq('organization_id', orgId)
       .limit(500),
     supabase.rpc('get_portfolio_snapshot', { p_organization_id: orgId }).maybeSingle(),

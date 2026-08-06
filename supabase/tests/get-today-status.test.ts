@@ -7,6 +7,7 @@ interface AccountRow {
   display_name: string | null
   mrr_cents: number | null
   churn_risk_score: number | null
+  is_delinquent: boolean
 }
 
 interface InsightRow {
@@ -35,7 +36,7 @@ function determineTodayStatus(
 }
 
 function selectTopUrgentAccount(accounts: AccountRow[]): AccountRow | null {
-  const atRisk = accounts.filter((a) => (a.churn_risk_score ?? 0) > AT_RISK_CHURN_THRESHOLD)
+  const atRisk = accounts.filter((a) => (a.churn_risk_score ?? 0) > AT_RISK_CHURN_THRESHOLD || a.is_delinquent)
   if (atRisk.length === 0) return null
   return atRisk.reduce((top, a) => ((a.mrr_cents ?? 0) > (top.mrr_cents ?? 0) ? a : top))
 }
@@ -58,7 +59,7 @@ function countCriticalExcludingChurned(
 // ── Helpers de test ─────────────────────────────────────────
 
 function account(overrides: Partial<AccountRow>): AccountRow {
-  return { id: 'a1', display_name: 'Acme', mrr_cents: 10000, churn_risk_score: 0, ...overrides }
+  return { id: 'a1', display_name: 'Acme', mrr_cents: 10000, churn_risk_score: 0, is_delinquent: false, ...overrides }
 }
 
 // ── Tests determineTodayStatus ──────────────────────────────
@@ -117,6 +118,26 @@ describe('get-today-status: selectTopUrgentAccount', () => {
       account({ id: 'a2', churn_risk_score: 71, mrr_cents: 100 }),
     ]
     expect(selectTopUrgentAccount(accounts)?.id).toBe('a2')
+  })
+
+  // ── is_delinquent en OR direct (audit délinquence 2026-08-06, décision 3) ──
+
+  it('inclut un compte délinquent même avec churn_risk_score <= 70 (jamais franchi seul, poids 35)', () => {
+    const accounts = [account({ id: 'a1', churn_risk_score: 35, mrr_cents: 5000, is_delinquent: true })]
+    expect(selectTopUrgentAccount(accounts)?.id).toBe('a1')
+  })
+
+  it('un compte délinquent au MRR le plus élevé gagne face à un compte >70 non délinquent', () => {
+    const accounts = [
+      account({ id: 'a1', churn_risk_score: 75, mrr_cents: 5000 }),
+      account({ id: 'a2', churn_risk_score: 35, mrr_cents: 20000, is_delinquent: true }),
+    ]
+    expect(selectTopUrgentAccount(accounts)?.id).toBe('a2')
+  })
+
+  it('un compte non délinquent et sous le seuil reste exclu', () => {
+    const accounts = [account({ id: 'a1', churn_risk_score: 35, mrr_cents: 5000, is_delinquent: false })]
+    expect(selectTopUrgentAccount(accounts)).toBeNull()
   })
 })
 
