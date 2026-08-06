@@ -164,6 +164,7 @@ Un playbook sans `eligibility_criteria` (ou avec `conditions: []`) ne matche plu
 
 ## Workflow par tâche (obligatoire)
 
+0. **BRANCHES** — Avant de démarrer un chantier substantiel : `git branch -r` sur les deux repos (backend + frontend) et vérifier qu'aucune branche existante (mergée ou non) ne couvre déjà tout ou partie du périmètre. Trois fonctionnalités complètes ont été construites deux fois en juillet 2026 (export CSV playbook, tracking d'outcome playbook, tiers de pricing) parce que personne n'a regardé les branches en cours avant de démarrer — la seconde implémentation a divergé du nom et de la forme de la première au point de rendre la duplication invisible sans ce contrôle explicite (audit branches 2026-08-06).
 1. **EXPLORE** — Lire les fichiers impactés (Plan Mode ou subagent Explore)
 2. **PLAN** — Proposer un plan en 3-7 étapes, attendre validation
 3. **CODE** — Implémenter en petits commits, écrire les tests d'abord quand possible
