@@ -519,15 +519,30 @@ describe('calcNrrPercentage', () => {
 })
 
 describe('calcChurnRate30d', () => {
-  it('null si aucun mouvement (mrrStart30d = currentMrr, mais 0 churn) → 0%, pas null', () => {
+  // Audit délinquence 2026-08-06, Priorité 1 : garde bootstrap ajoutée après
+  // coup, jumeau du Problème 1 (NRR). Avant ce correctif, cette fonction
+  // n'avait aucun garde-fou d'historique — `mrr_movements` totalement vide
+  // (zéro ligne, jamais) donnait `0.0%`, indiscernable d'un portefeuille
+  // réellement sans churn sur la fenêtre. Ce test documentait explicitement
+  // ce comportement comme voulu ("→ 0%, pas null") ; il documente maintenant
+  // le contraire.
+  it('null si moins de 3 mois d\'historique, quels que soient les mouvements', () => {
+    expect(calcChurnRate30d(100000, [], false)).toBeNull()
+    expect(calcChurnRate30d(100000, [{ movement_type: 'churn', amount_cents: -10000 }], false)).toBeNull()
+  })
+
+  it('avec 3+ mois d\'historique mais aucun mouvement sur la fenêtre : 0%, un vrai zéro', () => {
     // currentMrr=100000, aucun mouvement → mrrStart30d=100000, churn=0 → 0%
-    expect(calcChurnRate30d(100000, [])).toBe(0)
+    // Distinct du cas ci-dessus : ici l'historique existe, la fenêtre est
+    // simplement calme — "0% de churn" est une mesure légitime, pas une
+    // absence de données déguisée.
+    expect(calcChurnRate30d(100000, [], true)).toBe(0)
   })
 
   it('churn de 10% du MRR de départ sur 30 jours', () => {
     // currentMrr=90000, churn=-10000 sur la fenêtre → mrrStart30d = 90000-(-10000)=100000
     // churnRate = 10000/100000*100 = 10.0
-    const result = calcChurnRate30d(90000, [{ movement_type: 'churn', amount_cents: -10000 }])
+    const result = calcChurnRate30d(90000, [{ movement_type: 'churn', amount_cents: -10000 }], true)
     expect(result).toBe(10.0)
   })
 
@@ -535,12 +550,12 @@ describe('calcChurnRate30d', () => {
     const result = calcChurnRate30d(90000, [
       { movement_type: 'churn', amount_cents: -10000 },
       { movement_type: 'correction', amount_cents: -500000 },
-    ])
+    ], true)
     expect(result).toBe(10.0)
   })
 
   it('mrrStart30d <= 0 → null', () => {
-    const result = calcChurnRate30d(0, [{ movement_type: 'new', amount_cents: 0 }])
+    const result = calcChurnRate30d(0, [{ movement_type: 'new', amount_cents: 0 }], true)
     expect(result).toBeNull()
   })
 
@@ -551,7 +566,7 @@ describe('calcChurnRate30d', () => {
     const result = calcChurnRate30d(110000, [
       { movement_type: 'expansion', amount_cents: 20000 },
       { movement_type: 'churn', amount_cents: -10000 },
-    ])
+    ], true)
     expect(result).toBe(10.0)
   })
 })
