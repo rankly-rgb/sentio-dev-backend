@@ -293,6 +293,35 @@ column list).
 
 ---
 
+### 9. `sync-stripe` always chain-triggers `calculate-scores`
+
+**Not written down anywhere until now, and it has operational consequences.**
+`sync-stripe/index.ts` (~line 1098) ends every run — cron or manual — with a
+fire-and-forget `fetch()` to `calculate-scores` for the org(s) it just synced.
+This is unconditional: there is no dry-run flag, no "sync only" mode. **A
+manual sync triggered for diagnostic purposes is not read-only with respect
+to scoring state** — it re-scores the org and can change `churn_risk_band`,
+segment membership, and every downstream KPI that reads them, exactly as if
+a cron had fired.
+
+**Consequence observed in practice (2026-08-06 audit)**: a single-org
+diagnostic sync on `37591436…` triggered on its own re-scored the org ~25s
+later; a similar diagnostic sync during this session's currency
+investigation reclassified 182 accounts' `churn_risk_band`, moving the
+portfolio-wide baseline from a previously-recorded 2920/2477/1688
+(`churned`/`low`/never-scored) — a side effect that was not the intent of
+the diagnostic action.
+
+**Rule going forward**: before running a manual `sync-stripe` invocation for
+diagnosis (e.g. to inspect raw synced data without wanting a re-score), be
+aware it will re-score. If a scoring-free sync is genuinely needed, that
+would require an explicit dry-run parameter on `sync-stripe` — none exists
+today. Until then, treat any manual sync as "sync + re-score", and take a
+baseline snapshot of `churn_risk_band` distribution (or whatever you're
+about to compare) *before* triggering it, not after.
+
+---
+
 ## One-Time Migration Procedures
 
 ### MRR Engine v2 — Restatement (Phase 2.4, docs/openspec.md)
