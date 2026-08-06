@@ -49,6 +49,7 @@ export interface TodayAccountInput {
   // même source/convention que accounts-api (fetchPrimarySegments), 'nouveaux'
   // exclu (non-exclusif, porté séparément par created_at côté frontend).
   primary_segment: string | null
+  is_delinquent: boolean
 }
 
 export interface TodayPlaybookInput {
@@ -111,14 +112,21 @@ export function computeDaysToRenewal(
 // Priorité de base (churn/renewal), puis élevée si un insight actif est plus
 // urgent — un compte avec un insight 'critical' ne peut jamais retomber en
 // dessous de P0, quels que soient ses scores.
+//
+// Audit délinquence 2026-08-06, décision 3 : is_delinquent force P0 en
+// condition OR directe — jamais via le seuil numérique `risk >= 70`, qu'un
+// compte uniquement délinquent (payment_delinquent, 35/150) ne franchirait
+// jamais seul. « Actionnable le jour même » est la raison d'être de ce
+// chantier — un impayé est P0, pas P1.
 export function computePriority(
   churnRiskScore: number | null,
   daysToRenewal: number | null,
   insightPriorities: string[],
+  isDelinquent: boolean,
 ): PriorityCode {
   const risk = churnRiskScore ?? 0
   let priority: PriorityCode = 'P2'
-  if (risk >= 70) priority = 'P0'
+  if (risk >= 70 || isDelinquent) priority = 'P0'
   else if (risk >= 50 || (daysToRenewal !== null && daysToRenewal < 60)) priority = 'P1'
 
   for (const p of insightPriorities) {
@@ -134,6 +142,10 @@ export function computeTriggerReasons(
   insightTitles: string[],
 ): string[] {
   const reasons: string[] = [...insightTitles]
+
+  if (account.is_delinquent) {
+    reasons.push('Payment past due')
+  }
 
   const churnRisk = account.churn_risk_score ?? 0
   if (churnRisk >= 70) {
@@ -183,7 +195,7 @@ export function computeTodayActions(
       stripe_customer_id: account.stripe_customer_id,
       display_name: account.display_name,
       hubspot_company_id: account.hubspot_company_id,
-      priority: computePriority(account.churn_risk_score, dtr, insights.map((i) => i.priority)),
+      priority: computePriority(account.churn_risk_score, dtr, insights.map((i) => i.priority), account.is_delinquent),
       health_score: account.health_score,
       churn_risk_score: account.churn_risk_score,
       expansion_score: account.expansion_score,
