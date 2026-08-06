@@ -166,6 +166,33 @@ describe('calcRevenueDynamicsDimension', () => {
     const result = calcRevenueDynamicsDimension({ mrrCurrentCents: 10000, mrr3moAgoCents: 10000, movements6mo: [] })
     expect(result.score).toBeGreaterThan(0)
   })
+
+  // Regression (audit 2026-08, Problème 3) : un compte à mrrCurrentCents=0
+  // (churné via un mouvement `churn`, ou mrr_status='unavailable' par
+  // exclusion de devise minoritaire) ne doit jamais scorer 100 sur
+  // contraction_score — l'ancien code lisait "aucune contraction observée"
+  // comme un signal positif alors que le mouvement `churn` qui a vidé le
+  // MRR n'est jamais compté comme une `contraction`. mrr_trend(0.45,
+  // unavailable sans historique) + contraction(0.35, désormais unavailable)
+  // = 0.80 de poids indisponible → la dimension entière bascule unavailable
+  // (< 50% de poids interne dispo), jamais un faux ~85/100.
+  it('mrrCurrentCents=0 makes contraction_score unavailable, not a false-positive 100', () => {
+    const churnedNoMovements = calcRevenueDynamicsDimension({ mrrCurrentCents: 0, mrr3moAgoCents: null, movements6mo: [] })
+    expect(churnedNoMovements.status).toBe('unavailable')
+    expect(churnedNoMovements.score).toBeNull()
+
+    const churnedWithChurnMovement = calcRevenueDynamicsDimension({
+      mrrCurrentCents: 0,
+      mrr3moAgoCents: null,
+      movements6mo: [mov({ movement_type: 'churn', amount_cents: -10000 })],
+    })
+    expect(churnedWithChurnMovement.status).toBe('unavailable')
+    expect(churnedWithChurnMovement.score).toBeNull()
+
+    const contractionSignal = churnedWithChurnMovement.signals.find((s) => s.code === 'contraction_score')
+    expect(contractionSignal?.status).toBe('unavailable')
+    expect(contractionSignal?.value).toBeNull()
+  })
 })
 
 // ── contract_renewal dimension (S3) ───────────────────────────

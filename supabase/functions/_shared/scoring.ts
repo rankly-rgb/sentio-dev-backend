@@ -204,13 +204,24 @@ function calcMrrTrendScore(mrrCurrentCents: number, mrr3moAgoCents: number | nul
 }
 
 // contraction_score (poids interne 0.35) : contraction MRR sur 6 mois vs MRR courant.
-function calcContractionScore(mrrCurrentCents: number, movements6mo: MrrMovementRecord[]): number {
+// unavailable si mrrCurrentCents <= 0 : un compte churné (D1) ou dont le MRR
+// est réduit à 0 par exclusion de devise minoritaire (mrr_status
+// 'unavailable', voir audit 2026-08 Q3) n'a plus de revenu dont mesurer la
+// contraction — "rien observé" n'y veut pas dire "tout va bien" (100, l'ancien
+// bug : le mouvement `churn` qui a fait tomber le MRR à 0 n'est jamais compté
+// comme une `contraction`, donc `contractionTotal` reste à 0 et se lisait à
+// tort comme un signal positif), ni "en pleine contraction active" (0, un
+// compte parti n'est déjà plus scoré comme "à risque" — D1/C2.1). Doit être
+// évalué AVANT le calcul de contractionTotal, pas après (l'ordre inverse
+// masquait ce cas : contractionTotal===0 court-circuitait toujours en premier).
+function calcContractionScore(mrrCurrentCents: number, movements6mo: MrrMovementRecord[]): number | null {
+  if (mrrCurrentCents <= 0) return null
+
   const contractionTotal = movements6mo
     .filter((m) => m.movement_type === 'contraction')
     .reduce((sum, m) => sum + Math.abs(m.amount_cents), 0)
 
   if (contractionTotal === 0) return 100
-  if (mrrCurrentCents <= 0) return 0
   const contractionPct = contractionTotal / mrrCurrentCents
   if (contractionPct < 0.10) return 50
   return 0
