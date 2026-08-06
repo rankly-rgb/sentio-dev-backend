@@ -101,8 +101,9 @@
 //         trial_mrr_cents: number,
 //         nrr_percentage: number | null,
 //         churn_rate: number | null,
-//         accounts_at_risk: number,
-//         mrr_at_risk_cents: number,
+//         accounts_at_risk: number,        // churn_risk_band='high' OR is_delinquent (audit 2026-08-06, decision 3)
+//         accounts_at_risk_unpriced: number, // subset of accounts_at_risk with mrr_status='unavailable' — excluded from mrr_at_risk_cents, never silently
+//         mrr_at_risk_cents: number,       // sums only the chargeable (mrr_status != 'unavailable') subset of accounts_at_risk
 //         expansion_opportunities: number,
 //         currency: string | null,
 //         mrr_unavailable_accounts: number,
@@ -392,7 +393,7 @@ async function handlePortfolioMetrics(
     stripeFreshness,
   ] = await Promise.all([
     supabase.from('accounts')
-      .select('mrr_cents, trial_mrr_cents, mrr_status, churn_risk_band, expansion_score, expansion_score_status')
+      .select('mrr_cents, trial_mrr_cents, mrr_status, churn_risk_band, is_delinquent, expansion_score, expansion_score_status')
       .eq('organization_id', orgId)
       .limit(20000),
     // NRR : historique complet, 'correction' exclu par construction (jamais
@@ -431,8 +432,26 @@ async function handlePortfolioMetrics(
   const trialMrrCents = accounts.reduce((sum: number, a: { trial_mrr_cents: number | null }) => sum + (a.trial_mrr_cents ?? 0), 0)
   const mrrUnavailableAccounts = accounts.filter((a: { mrr_status: string | null }) => a.mrr_status === 'unavailable').length
 
-  const atRiskAccounts = accounts.filter((a: { churn_risk_band: string | null }) => a.churn_risk_band === 'high')
-  const mrrAtRiskCents = atRiskAccounts.reduce((sum: number, a: { mrr_cents: number | null }) => sum + (a.mrr_cents ?? 0), 0)
+  // Audit délinquence 2026-08-06, décision 3 : is_delinquent est un état
+  // actionnable, câblé en OR direct — jamais via un seuil numérique conçu
+  // pour autre chose. band='high' reste la voie normale ; is_delinquent
+  // ajoute les comptes délinquents qui n'auraient jamais atteint 'high' seuls
+  // (payment_delinquent pèse 35/150, watch pas high — voir _shared/scoring.ts).
+  const atRiskAccounts = accounts.filter((a: { churn_risk_band: string | null; is_delinquent: boolean }) =>
+    a.churn_risk_band === 'high' || a.is_delinquent,
+  )
+  // Piège identifié par Naima avant implémentation : la majorité des comptes
+  // délinquents ont mrr_status='unavailable' (mrr_cents=0 par exclusion de
+  // devise minoritaire — voir IMPLEMENTATION_LOG.md Incident #6). Sommer
+  // aveuglément ferait passer accounts_at_risk de 0→164 pendant que
+  // mrr_at_risk_cents resterait à 0,00 $ — une absence de donnée lue comme
+  // "rien à risque en argent", exactement l'inverse de la vérité. On ne
+  // somme que les comptes réellement chiffrables ; le nombre d'exclus est
+  // exposé séparément (accounts_at_risk_unpriced) pour que le frontend
+  // puisse le dire explicitement plutôt que de laisser un total silencieux.
+  const pricedAtRiskAccounts = atRiskAccounts.filter((a: { mrr_status: string | null }) => a.mrr_status !== 'unavailable')
+  const mrrAtRiskCents = pricedAtRiskAccounts.reduce((sum: number, a: { mrr_cents: number | null }) => sum + (a.mrr_cents ?? 0), 0)
+  const accountsAtRiskUnpriced = atRiskAccounts.length - pricedAtRiskAccounts.length
 
   const expansionOpportunities = accounts.filter((a: { expansion_score_status: string | null; expansion_score: number | null }) =>
     a.expansion_score_status === 'available' && (a.expansion_score ?? 0) > EXPANSION_OPPORTUNITY_THRESHOLD,
@@ -458,6 +477,7 @@ async function handlePortfolioMetrics(
       nrr_percentage: nrrPercentage,
       churn_rate: churnRate,
       accounts_at_risk: atRiskAccounts.length,
+      accounts_at_risk_unpriced: accountsAtRiskUnpriced,
       mrr_at_risk_cents: mrrAtRiskCents,
       expansion_opportunities: expansionOpportunities,
       currency: orgRes.data?.currency ?? null,
