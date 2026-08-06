@@ -447,6 +447,7 @@ function scoreAccountPure(input: ScoreAccountInput, now: number = Date.now()): S
       annualRenewal30dPlusWithContraction6mo: annualRenewalSoonWithContraction,
       hasDowngrade6mo: movements6mo.length > 0 ? hasDowngrade6mo : null,
       hasInvoiceOverdueUnder15: invoices90d.length > 0 ? hasOverdueUnder15 : null,
+      isDelinquent: account.is_delinquent,
     }
     churn = calcChurnRiskV2(buildChurnSignals(signalInputs))
   }
@@ -740,7 +741,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           batchCount++
           const { data: batch, error: batchError } = await supabase
             .from('accounts')
-            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, contract_start_date, billing_interval, health_score, churn_risk_score, expansion_score, churn_risk_band, health_score_status, stripe_customer_id, created_at')
+            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, contract_start_date, billing_interval, health_score, churn_risk_score, expansion_score, churn_risk_band, health_score_status, stripe_customer_id, created_at, is_delinquent')
             .eq('organization_id', organizationId)
             .range(batchOffset, batchOffset + SCORING_BATCH_SIZE - 1)
 
@@ -807,6 +808,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 hasOverdueInvoices,
                 subscriptionCanceled,
                 accountCreatedAt: account.created_at,
+                isDelinquent: account.is_delinquent,
               }
               accountSegmentInputs.set(account.id, segInput)
 
