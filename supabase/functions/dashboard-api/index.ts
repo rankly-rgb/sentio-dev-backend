@@ -105,6 +105,7 @@
 //         accounts_at_risk_unpriced: number, // subset of accounts_at_risk with mrr_status='unavailable' — excluded from mrr_at_risk_cents, never silently
 //         mrr_at_risk_cents: number,       // sums only the chargeable (mrr_status != 'unavailable') subset of accounts_at_risk
 //         expansion_opportunities: number,
+//         expansion_configured: boolean,   // false if no account has expansion_score_status='available' (audit 2026-08-06, priority 2) — org has never set up stripe_product_mappings; 0 opportunities is then "not configured", not "none found"
 //         currency: string | null,
 //         mrr_unavailable_accounts: number,
 //         billing_profile: "standard" | "needs_review" | null,
@@ -469,6 +470,17 @@ async function handlePortfolioMetrics(
     a.expansion_score_status === 'available' && (a.expansion_score ?? 0) > EXPANSION_OPPORTUNITY_THRESHOLD,
   ).length
 
+  // Audit 2026-08-06, Priorité 2 : `expansion_opportunities = 0` est ambigu —
+  // "aucun compte ne dépasse le seuil" et "aucun compte n'est même chiffrable
+  // (stripe_product_mappings non configuré pour cette org)" rendaient tous
+  // les deux un `0` muet. `seat_usage_pct` (donc `expansion_score`) exige un
+  // mapping produit → sièges par org (_shared/scoring.ts, calcExpansionScoreV2)
+  // : si AUCUN compte de l'org n'a `expansion_score_status='available'`, la
+  // cause n'est presque jamais "aucun compte n'a d'opportunité" mais "cette
+  // org n'a jamais configuré ses plans" — au même titre que le badge déjà
+  // affiché sur la fiche compte (`seat_data_not_configured`).
+  const expansionConfigured = accounts.some((a: { expansion_score_status: string | null }) => a.expansion_score_status === 'available')
+
   // Au moins 3 mois d'historique : premier mouvement MRR connu, ou à
   // défaut date de création de l'org (aucun mouvement pour une org neuve
   // n'est pas "3 mois d'historique" non plus — created_at reste le plancher).
@@ -479,7 +491,7 @@ async function handlePortfolioMetrics(
   const last30dMovements: MrrMovementForNrr[] = (last30dMovementsRes.data ?? []) as MrrMovementForNrr[]
 
   const nrrPercentage = calcNrrPercentage(mrrCents, allMovements, hasThreeMonthsHistory)
-  const churnRate = calcChurnRate30d(mrrCents, last30dMovements)
+  const churnRate = calcChurnRate30d(mrrCents, last30dMovements, hasThreeMonthsHistory)
 
   return jsonResponse({
     data: {
@@ -492,6 +504,7 @@ async function handlePortfolioMetrics(
       accounts_at_risk_unpriced: accountsAtRiskUnpriced,
       mrr_at_risk_cents: mrrAtRiskCents,
       expansion_opportunities: expansionOpportunities,
+      expansion_configured: expansionConfigured,
       currency: orgRes.data?.currency ?? null,
       mrr_unavailable_accounts: mrrUnavailableAccounts,
       billing_profile: orgRes.data?.billing_profile ?? null,
@@ -641,11 +654,12 @@ async function handleBenchmarks(
   supabase: ReturnType<typeof createServiceClient>,
   orgId: string,
 ): Promise<Response> {
-  const twelveMonthsAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000)
+  const now = Date.now()
+  const twelveMonthsAgo = new Date(now - 365 * 24 * 60 * 60 * 1000)
     .toISOString()
     .split('T')[0]
 
-  const [snapshotRes, movements12mRes, peersRes] = await Promise.all([
+  const [snapshotRes, movements12mRes, peersRes, firstMovementRes, orgRes] = await Promise.all([
     // Snapshot portefeuille partagé (chantier 5.1) — source de MRR actuel
     supabase.rpc('get_portfolio_snapshot', { p_organization_id: orgId }).maybeSingle(),
 
@@ -662,6 +676,20 @@ async function handleBenchmarks(
       .select('org_count, computed_at, nrr_p25, nrr_p50, nrr_p75, churn_rate_p25, churn_rate_p50, churn_rate_p75, mrr_growth_p25, mrr_growth_p50, mrr_growth_p75')
       .order('computed_at', { ascending: false })
       .limit(1)
+      .maybeSingle(),
+
+    // Bootstrap : même garde que portfolio-metrics (calcNrrPercentage) — un
+    // NRR n'a de sens qu'avec au moins 3 mois d'historique réel, jamais un
+    // 100 déguisé en "pas d'historique = neutre" (Problème 1, audit 2026-08).
+    supabase.from('mrr_movements')
+      .select('movement_date')
+      .eq('organization_id', orgId)
+      .order('movement_date', { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+    supabase.from('organizations')
+      .select('created_at')
+      .eq('id', orgId)
       .maybeSingle(),
   ])
 
@@ -685,25 +713,31 @@ async function handleBenchmarks(
   const netMovements12m = new12m + expansion12m + reactivation12m - contraction12m - churn12m
   const startingMrr = currentMrr - netMovements12m
 
-  // NRR = (MRR existants en fin de période) / (MRR existants en début de période) × 100
-  // On exclut le new business des deux côtés
-  const endingMrrExisting = currentMrr - new12m
-  let nrr: number | null = null
-  if (startingMrr > 0) {
-    nrr = Math.round((endingMrrExisting / startingMrr) * 1000) / 10
-  } else if (currentMrr > 0) {
-    nrr = 100 // pas d'historique = neutre
-  }
+  const firstMovementDate = firstMovementRes.data?.movement_date ?? orgRes.data?.created_at ?? null
+  const hasThreeMonthsHistory = firstMovementDate !== null && (now - new Date(firstMovementDate).getTime()) >= THREE_MONTHS_MS
 
-  // Churn rate revenue = MRR churné / MRR de départ × 100 (plafonné à 100%)
-  const churnRate = startingMrr > 0
-    ? Math.min(100, Math.round((churn12m / startingMrr) * 1000) / 10)
-    : 0
+  // NRR : déléguée à calcNrrPercentage (_shared/mrr-engine.ts) — même formule
+  // et même garde bootstrap que /portfolio-metrics, plutôt qu'un second
+  // calculateur local. Avant ce correctif, ce chemin retournait `100` en
+  // l'absence d'historique ("pas d'historique = neutre"), un faux positif
+  // (Problème 1, audit 2026-08) : calcNrrPercentage retourne `null` dans ce
+  // cas, jamais un 100 qui se lirait comme "rétention parfaite".
+  const nrr = calcNrrPercentage(currentMrr, (movements12mRes.data ?? []) as MrrMovementForNrr[], hasThreeMonthsHistory)
 
-  // Croissance MRR = mouvements nets / MRR de départ × 100
-  const mrrGrowth: number | null = startingMrr > 0
-    ? Math.round((netMovements12m / startingMrr) * 1000) / 10
-    : null
+  // Churn rate revenue = MRR churné / MRR de départ × 100 (plafonné à 100%).
+  // Même garde bootstrap que le NRR ci-dessus (Priorité 1, audit 2026-08-06,
+  // jumeau du Problème 1) : sans elle, `mrr_movements` totalement vide donne
+  // `churn12m = 0` (rien à sommer) sur un `startingMrr` resté positif
+  // (= `currentMrr`, aucun mouvement à soustraire) → `0.0%`, indiscernable
+  // d'un portefeuille réellement sans churn.
+  const churnRate: number | null = !hasThreeMonthsHistory || startingMrr <= 0
+    ? null
+    : Math.min(100, Math.round((churn12m / startingMrr) * 1000) / 10)
+
+  // Croissance MRR = mouvements nets / MRR de départ × 100 — même garde.
+  const mrrGrowth: number | null = !hasThreeMonthsHistory || startingMrr <= 0
+    ? null
+    : Math.round((netMovements12m / startingMrr) * 1000) / 10
 
   // Peers : snapshot le plus récent si disponible
   const peerRow = peersRes.data

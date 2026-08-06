@@ -540,12 +540,25 @@ export function calcNrrPercentage(
  * être filtré sur les 30 derniers jours et exclure 'correction'. Dénominateur
  * = MRR au début de la fenêtre de 30 jours (dérivé des mêmes mouvements que
  * le numérateur, cohérent avec calcNrrPercentage — pas une source séparée).
- * `null` si ce MRR de départ serait ≤ 0.
+ *
+ * `null` si moins de 3 mois d'historique (même garde bootstrap que
+ * calcNrrPercentage, `hasAtLeastThreeMonthsOfHistory` à charge de
+ * l'appelant) ou si le MRR de départ calculé serait ≤ 0. Avant ce correctif,
+ * `mrr_movements` totalement vide (zéro ligne, jamais) produisait un
+ * `0.0%` indiscernable d'un portefeuille réellement sans churn — le même
+ * défaut "absence de données lue comme mesure" que le fallback `100` corrigé
+ * sur le NRR (audit 2026-08-06, Priorité 1) : `netMovements` vaut alors 0,
+ * `mrrStart30dCents` reste positif (= `currentMrrCents`), et `churnSum` reste
+ * 0 faute de toute ligne à sommer — le calcul ne peut pas distinguer "aucun
+ * mouvement de churn observé" de "aucun mouvement n'est jamais enregistré".
  */
 export function calcChurnRate30d(
   currentMrrCents: number,
   movementsLast30d: MrrMovementForNrr[],
+  hasAtLeastThreeMonthsOfHistory: boolean,
 ): number | null {
+  if (!hasAtLeastThreeMonthsOfHistory) return null
+
   let netMovements = 0
   let churnSum = 0
   for (const m of movementsLast30d) {

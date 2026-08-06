@@ -538,6 +538,7 @@ Tous les champs sont précalculés côté serveur. **Le frontend ne doit jamais 
     "accounts_at_risk": 4,
     "mrr_at_risk_cents": 98000,
     "expansion_opportunities": 3,
+    "expansion_configured": true,
     "currency": "usd",
     "mrr_unavailable_accounts": 2,
     "billing_profile": "standard",
@@ -554,10 +555,11 @@ Tous les champs sont précalculés côté serveur. **Le frontend ne doit jamais 
 | `arr_cents` | `mrr_cents × 12`. |
 | `trial_mrr_cents` | Somme de `accounts.trial_mrr_cents` — MRR "en pipeline" des comptes en trial, jamais inclus dans `mrr_cents`. |
 | `nrr_percentage` | Net Revenue Retention sur l'historique complet des `mrr_movements` de l'org (`movement_type != 'correction'`) : `(mrr_start + expansion + reactivation + contraction + churn) / mrr_start × 100` où `mrr_start = mrr_cents_actuel − mouvements_nets`. **`null`** si l'org a moins de 3 mois d'historique (premier `mrr_movements`, ou date de création de l'org si aucun mouvement) ou si `mrr_start ≤ 0`. Distinct du NRR de `GET /benchmarks` ci-dessus (fenêtre glissante 12 mois, calculé pour la comparaison inter-orgs anonymisée) — celui-ci est "où en est mon portefeuille maintenant", pas un chiffre de peer comparison. |
-| `churn_rate` | % de MRR perdu sur les 30 derniers jours glissants : `\|churn_30j\| / mrr_début_fenêtre_30j × 100`. `null` si le MRR de début de fenêtre serait ≤ 0. |
-| `accounts_at_risk` | Nombre de comptes `churn_risk_band = 'high'` (comptes `'churned'` déjà exclus par construction — D1). |
-| `mrr_at_risk_cents` | Somme de `mrr_cents` sur ces comptes à risque. |
+| `churn_rate` | % de MRR perdu sur les 30 derniers jours glissants : `\|churn_30j\| / mrr_début_fenêtre_30j × 100`. `null` si l'org a moins de 3 mois d'historique de `mrr_movements` (même garde que `nrr_percentage` — audit 2026-08-06, priorité 1 : avant ce correctif, `mrr_movements` totalement vide produisait `0.0%`, indiscernable d'un portefeuille réellement sans churn) ou si le MRR de début de fenêtre serait ≤ 0. |
+| `accounts_at_risk` | Nombre de comptes `churn_risk_band = 'high'` OU `is_delinquent` (comptes `'churned'` déjà exclus par construction — D1 ; audit délinquence 2026-08-06, décision 3). |
+| `mrr_at_risk_cents` | Somme de `mrr_cents` sur le sous-ensemble chiffrable (`mrr_status != 'unavailable'`) de ces comptes à risque — voir `accounts_at_risk_unpriced`. |
 | `expansion_opportunities` | Nombre de comptes `expansion_score_status = 'available'` avec `expansion_score > 75`. |
+| `expansion_configured` | `false` si aucun compte de l'org n'a `expansion_score_status = 'available'` (audit 2026-08-06, priorité 2) — signifie presque toujours que `stripe_product_mappings` n'a jamais été configuré pour cette org, pas qu'aucun compte n'a d'opportunité. |
 | `currency` | Devise ISO 4217 de l'org (vote majoritaire sur les subscriptions, docs/openspec.md §9) — `null` si aucun sync n'a encore tourné. |
 | `mrr_unavailable_accounts` | Nombre de comptes `mrr_status = 'unavailable'` (non-chiffrables : metered, prix sans `unit_amount`, devise minoritaire, invoice-only). |
 | `billing_profile` | `"standard" \| "needs_review" \| null` — identique au champ du même nom sur `onboarding-status`. |
