@@ -377,6 +377,37 @@ const EXPANSION_OPPORTUNITY_THRESHOLD = 75 // cohérent avec kpi-cards.tsx histo
 const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
 
+interface AtRiskAccountRow {
+  churn_risk_band: string | null
+  is_delinquent: boolean
+  mrr_status: string | null
+  mrr_cents: number | null
+}
+
+// Audit délinquence 2026-08-06, décision 3 : "at risk" = churn_risk_band='high'
+// OR is_delinquent (jamais via un seuil numérique conçu pour autre chose — un
+// compte uniquement délinquent, payment_delinquent=35pts, ne franchit jamais
+// 'high' seul). mrr_at_risk_cents ne somme que le sous-ensemble chiffrable
+// (mrr_status != 'unavailable') — la majorité des comptes délinquents ont
+// mrr_status='unavailable' (exclusion de devise minoritaire, IMPLEMENTATION_
+// LOG.md Incident #6) ; les sommer aveuglément ferait grimper accounts_at_risk
+// sans jamais bouger mrr_at_risk_cents, lu à tort comme "rien à risque en
+// argent". unpricedCount expose le nombre exclu au lieu d'un total silencieux.
+function computeAccountsAtRisk(accounts: AtRiskAccountRow[]): {
+  atRiskCount: number
+  mrrAtRiskCents: number
+  unpricedCount: number
+} {
+  const atRisk = accounts.filter((a) => a.churn_risk_band === 'high' || a.is_delinquent)
+  const priced = atRisk.filter((a) => a.mrr_status !== 'unavailable')
+  const mrrAtRiskCents = priced.reduce((sum, a) => sum + (a.mrr_cents ?? 0), 0)
+  return {
+    atRiskCount: atRisk.length,
+    mrrAtRiskCents,
+    unpricedCount: atRisk.length - priced.length,
+  }
+}
+
 async function handlePortfolioMetrics(
   supabase: ReturnType<typeof createServiceClient>,
   orgId: string,
@@ -432,26 +463,7 @@ async function handlePortfolioMetrics(
   const trialMrrCents = accounts.reduce((sum: number, a: { trial_mrr_cents: number | null }) => sum + (a.trial_mrr_cents ?? 0), 0)
   const mrrUnavailableAccounts = accounts.filter((a: { mrr_status: string | null }) => a.mrr_status === 'unavailable').length
 
-  // Audit délinquence 2026-08-06, décision 3 : is_delinquent est un état
-  // actionnable, câblé en OR direct — jamais via un seuil numérique conçu
-  // pour autre chose. band='high' reste la voie normale ; is_delinquent
-  // ajoute les comptes délinquents qui n'auraient jamais atteint 'high' seuls
-  // (payment_delinquent pèse 35/150, watch pas high — voir _shared/scoring.ts).
-  const atRiskAccounts = accounts.filter((a: { churn_risk_band: string | null; is_delinquent: boolean }) =>
-    a.churn_risk_band === 'high' || a.is_delinquent,
-  )
-  // Piège identifié par Naima avant implémentation : la majorité des comptes
-  // délinquents ont mrr_status='unavailable' (mrr_cents=0 par exclusion de
-  // devise minoritaire — voir IMPLEMENTATION_LOG.md Incident #6). Sommer
-  // aveuglément ferait passer accounts_at_risk de 0→164 pendant que
-  // mrr_at_risk_cents resterait à 0,00 $ — une absence de donnée lue comme
-  // "rien à risque en argent", exactement l'inverse de la vérité. On ne
-  // somme que les comptes réellement chiffrables ; le nombre d'exclus est
-  // exposé séparément (accounts_at_risk_unpriced) pour que le frontend
-  // puisse le dire explicitement plutôt que de laisser un total silencieux.
-  const pricedAtRiskAccounts = atRiskAccounts.filter((a: { mrr_status: string | null }) => a.mrr_status !== 'unavailable')
-  const mrrAtRiskCents = pricedAtRiskAccounts.reduce((sum: number, a: { mrr_cents: number | null }) => sum + (a.mrr_cents ?? 0), 0)
-  const accountsAtRiskUnpriced = atRiskAccounts.length - pricedAtRiskAccounts.length
+  const { atRiskCount, mrrAtRiskCents, unpricedCount: accountsAtRiskUnpriced } = computeAccountsAtRisk(accounts as AtRiskAccountRow[])
 
   const expansionOpportunities = accounts.filter((a: { expansion_score_status: string | null; expansion_score: number | null }) =>
     a.expansion_score_status === 'available' && (a.expansion_score ?? 0) > EXPANSION_OPPORTUNITY_THRESHOLD,
@@ -476,7 +488,7 @@ async function handlePortfolioMetrics(
       trial_mrr_cents: trialMrrCents,
       nrr_percentage: nrrPercentage,
       churn_rate: churnRate,
-      accounts_at_risk: atRiskAccounts.length,
+      accounts_at_risk: atRiskCount,
       accounts_at_risk_unpriced: accountsAtRiskUnpriced,
       mrr_at_risk_cents: mrrAtRiskCents,
       expansion_opportunities: expansionOpportunities,
