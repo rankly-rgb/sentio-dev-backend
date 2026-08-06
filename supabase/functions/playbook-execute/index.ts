@@ -22,8 +22,11 @@ import { dispatchAction } from '../_shared/action-dispatcher.ts'
 import { getBatchCompanyContacts } from '../_shared/hubspot-client.ts'
 import { resolveHubSpotApiKey } from '../_shared/vault.ts'
 import { resolvePlaybookTargetAccounts } from '../_shared/playbook-targeting.ts'
+import { calculateAttributionDeadline, deriveAttributionStatus } from '../_shared/playbook-engine.ts'
 
 const MAX_ACCOUNTS_PER_RUN = 200
+const UNMARK_WINDOW_MS = 5 * 60 * 1000
+const VALID_NUDGE_RESPONSES = ['resolved', 'not_resolved', 'unsure'] as const
 
 interface ExecutePayload {
   playbook_id: string
@@ -39,6 +42,54 @@ interface ExecutePayload {
 Deno.serve(async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
+
+  // ── Sous-routes exécution (chantier C — Playbook Outcome Tracking) ──
+  // POST /playbook-execute/{execution_id}/mark-executed | unmark-executed | nudge-response
+  // GET  /playbook-execute/{execution_id}/attribution-status
+  // Distinctes du corps POST /playbook-execute (déclenchement d'actions
+  // automatisées) ci-dessous — cf. API_CONTRACTS.md § 8.1.
+  const url = new URL(req.url)
+  const segments = url.pathname.split('/').filter(Boolean)
+  const fnIndex = segments.indexOf('playbook-execute')
+  const subPath = fnIndex >= 0 ? segments.slice(fnIndex + 1) : []
+
+  if (subPath.length === 2) {
+    const [executionId, action] = subPath
+
+    let auth
+    try {
+      auth = await verifyUserAuth(req)
+    } catch (err) {
+      if (err instanceof AuthError) return errorResponse(err.message, err.status)
+      return errorResponse('Authentication failed', 401)
+    }
+
+    let supabase: SupabaseClient
+    try {
+      supabase = createServiceClient()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(JSON.stringify({ level: 'error', function_name: 'playbook-execute', message: msg }))
+      return errorResponse('Server configuration error', 500)
+    }
+
+    switch (action) {
+      case 'mark-executed':
+        if (req.method !== 'POST') return errorResponse('Method not allowed', 405)
+        return handleMarkExecuted(supabase, executionId, auth.organizationId)
+      case 'unmark-executed':
+        if (req.method !== 'POST') return errorResponse('Method not allowed', 405)
+        return handleUnmarkExecuted(supabase, executionId, auth.organizationId)
+      case 'attribution-status':
+        if (req.method !== 'GET') return errorResponse('Method not allowed', 405)
+        return handleAttributionStatus(supabase, executionId, auth.organizationId)
+      case 'nudge-response':
+        if (req.method !== 'POST') return errorResponse('Method not allowed', 405)
+        return handleNudgeResponse(supabase, executionId, req, auth.organizationId)
+      default:
+        return errorResponse('Not found', 404)
+    }
+  }
 
   if (req.method !== 'POST') return errorResponse('Method not allowed', 405)
 
@@ -484,3 +535,210 @@ Deno.serve(async (req: Request): Promise<Response> => {
     results: executionResults,
   })
 })
+
+// ============================================================
+// Playbook Outcome Tracking (chantier C) — sous-routes exécution
+// cf. API_CONTRACTS.md § 8.1 / § 8.1.1 / § 8.2 / § 8.4
+// ============================================================
+
+// ── mark-executed (§8.1) ─────────────────────────────────────
+
+export async function handleMarkExecuted(
+  supabase: SupabaseClient,
+  executionId: string,
+  authOrgId: string,
+): Promise<Response> {
+  const { data: execution, error } = await supabase
+    .from('playbook_executions')
+    .select('id, playbook_id, manual_executed_at, attribution_deadline_at')
+    .eq('id', executionId)
+    .eq('organization_id', authOrgId)
+    .maybeSingle()
+
+  if (error || !execution) return errorResponse('Execution not found', 404)
+
+  if (execution.manual_executed_at) {
+    return jsonResponse({
+      execution_id: execution.id,
+      executed_at: execution.manual_executed_at,
+      attribution_deadline_at: execution.attribution_deadline_at,
+    })
+  }
+
+  const { data: playbook } = await supabase
+    .from('playbooks')
+    .select('attribution_window_days')
+    .eq('id', execution.playbook_id)
+    .maybeSingle()
+
+  const now = new Date()
+  const deadline = calculateAttributionDeadline(now, playbook?.attribution_window_days ?? null)
+
+  const { data: updated, error: updateError } = await supabase
+    .from('playbook_executions')
+    .update({ manual_executed_at: now.toISOString(), attribution_deadline_at: deadline })
+    .eq('id', executionId)
+    .eq('organization_id', authOrgId)
+    .select('id, manual_executed_at, attribution_deadline_at')
+    .single()
+
+  if (updateError || !updated) {
+    console.error(JSON.stringify({ level: 'error', function_name: 'playbook-execute', op: 'mark-executed', message: updateError?.message }))
+    return errorResponse('Failed to mark execution as executed', 500)
+  }
+
+  return jsonResponse({
+    execution_id: updated.id,
+    executed_at: updated.manual_executed_at,
+    attribution_deadline_at: updated.attribution_deadline_at,
+  })
+}
+
+// ── unmark-executed (§8.1.1) ──────────────────────────────────
+
+export async function handleUnmarkExecuted(
+  supabase: SupabaseClient,
+  executionId: string,
+  authOrgId: string,
+): Promise<Response> {
+  const { data: execution, error } = await supabase
+    .from('playbook_executions')
+    .select('id, manual_executed_at, account_converted, resolved_via, nudge_response')
+    .eq('id', executionId)
+    .eq('organization_id', authOrgId)
+    .maybeSingle()
+
+  if (error || !execution) return errorResponse('Execution not found', 404)
+
+  if (!execution.manual_executed_at) {
+    return jsonResponse({ execution_id: execution.id, executed_at: null, attribution_deadline_at: null })
+  }
+
+  // Conflits — priment sur l'expiration de la fenêtre de 5 min (cf. API_CONTRACTS.md § 8.1.1)
+  if (execution.account_converted === true || execution.resolved_via) {
+    return errorResponse('Cannot unmark an execution with an automatically detected resolution', 409)
+  }
+  if (execution.nudge_response) {
+    return errorResponse('Cannot unmark an execution with a recorded nudge response', 409)
+  }
+
+  const markedAtMs = new Date(execution.manual_executed_at).getTime()
+  if (Date.now() - markedAtMs > UNMARK_WINDOW_MS) {
+    return errorResponse('Unmark window (5 minutes) has expired', 409)
+  }
+
+  const { data: updated, error: updateError } = await supabase
+    .from('playbook_executions')
+    .update({ manual_executed_at: null, attribution_deadline_at: null })
+    .eq('id', executionId)
+    .eq('organization_id', authOrgId)
+    .select('id')
+    .single()
+
+  if (updateError || !updated) {
+    console.error(JSON.stringify({ level: 'error', function_name: 'playbook-execute', op: 'unmark-executed', message: updateError?.message }))
+    return errorResponse('Failed to unmark execution', 500)
+  }
+
+  return jsonResponse({ execution_id: updated.id, executed_at: null, attribution_deadline_at: null })
+}
+
+// ── attribution-status (§8.2) ─────────────────────────────────
+
+export async function handleAttributionStatus(
+  supabase: SupabaseClient,
+  executionId: string,
+  authOrgId: string,
+): Promise<Response> {
+  const { data: execution, error } = await supabase
+    .from('playbook_executions')
+    .select('id, manual_executed_at, attribution_deadline_at, account_converted')
+    .eq('id', executionId)
+    .eq('organization_id', authOrgId)
+    .maybeSingle()
+
+  if (error || !execution) return errorResponse('Execution not found', 404)
+
+  const now = new Date()
+  const status = deriveAttributionStatus(
+    {
+      marked_executed_at: execution.manual_executed_at,
+      account_converted: execution.account_converted,
+      attribution_deadline_at: execution.attribution_deadline_at,
+    },
+    now,
+  )
+
+  let timeRemainingSeconds: number | null
+  if (status === 'not_executed') {
+    timeRemainingSeconds = null
+  } else if (status === 'active') {
+    timeRemainingSeconds = Math.max(
+      0,
+      Math.floor((new Date(execution.attribution_deadline_at as string).getTime() - now.getTime()) / 1000),
+    )
+  } else {
+    timeRemainingSeconds = 0
+  }
+
+  return jsonResponse({
+    execution_id: execution.id,
+    executed_at: execution.manual_executed_at,
+    attribution_deadline_at: execution.attribution_deadline_at,
+    attribution_status: status,
+    time_remaining_seconds: timeRemainingSeconds,
+  })
+}
+
+// ── nudge-response (§8.4) ──────────────────────────────────────
+
+export async function handleNudgeResponse(
+  supabase: SupabaseClient,
+  executionId: string,
+  req: Request,
+  authOrgId: string,
+): Promise<Response> {
+  let body: { response?: string }
+  try {
+    body = await req.json()
+  } catch {
+    return errorResponse('Invalid JSON body', 400)
+  }
+
+  if (!body.response || !(VALID_NUDGE_RESPONSES as readonly string[]).includes(body.response)) {
+    return errorResponse(`response must be one of: ${VALID_NUDGE_RESPONSES.join(', ')}`, 400)
+  }
+
+  const { data: execution, error } = await supabase
+    .from('playbook_executions')
+    .select('id, manual_executed_at')
+    .eq('id', executionId)
+    .eq('organization_id', authOrgId)
+    .maybeSingle()
+
+  if (error || !execution) return errorResponse('Execution not found', 404)
+
+  if (!execution.manual_executed_at) {
+    return errorResponse('Execution is not marked as executed yet', 409)
+  }
+
+  const nowIso = new Date().toISOString()
+  const { data: updated, error: updateError } = await supabase
+    .from('playbook_executions')
+    .update({ nudge_response: body.response, nudge_responded_at: nowIso })
+    .eq('id', executionId)
+    .eq('organization_id', authOrgId)
+    .select('id, nudge_response, nudge_responded_at')
+    .single()
+
+  if (updateError || !updated) {
+    console.error(JSON.stringify({ level: 'error', function_name: 'playbook-execute', op: 'nudge-response', message: updateError?.message }))
+    return errorResponse('Failed to record nudge response', 500)
+  }
+
+  return jsonResponse({
+    execution_id: updated.id,
+    nudge_response: updated.nudge_response,
+    nudge_responded_at: updated.nudge_responded_at,
+  })
+}

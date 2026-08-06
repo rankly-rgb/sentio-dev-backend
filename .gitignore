@@ -52,3 +52,7 @@ next-env.d.ts
 
 # state file for scripts/seed-segment-test-data.ts (phase 1 → phase 2 handoff, contains live Stripe test IDs)
 scripts/.seed-segment-state.json
+
+# Spec Kit local state (not shared — points to whichever feature is
+# "active" in this working copy, differs per branch/session)
+.specify/feature.json
