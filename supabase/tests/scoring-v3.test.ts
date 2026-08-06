@@ -285,6 +285,7 @@ describe('calcChurnRiskV2 / buildChurnSignals', () => {
       annualRenewal30dPlusWithContraction6mo: false,
       hasDowngrade6mo: false,
       hasInvoiceOverdueUnder15: false,
+      isDelinquent: false,
     })
     const result = calcChurnRiskV2(signals)
     expect(result.churn_risk_score).toBe(0)
@@ -301,6 +302,7 @@ describe('calcChurnRiskV2 / buildChurnSignals', () => {
       annualRenewal30dPlusWithContraction6mo: false,
       hasDowngrade6mo: false,
       hasInvoiceOverdueUnder15: false,
+      isDelinquent: false,
     })
     const result = calcChurnRiskV2(signals)
     expect(result.churn_risk_score).toBe(60)
@@ -316,6 +318,7 @@ describe('calcChurnRiskV2 / buildChurnSignals', () => {
       annualRenewal30dPlusWithContraction6mo: true,
       hasDowngrade6mo: true,
       hasInvoiceOverdueUnder15: true,
+      isDelinquent: true, // suppressed by mutual exclusion (hasInvoiceOverdue15Plus=true) — cap still holds via the other signals
     })
     const result = calcChurnRiskV2(signals)
     expect(result.churn_risk_score).toBe(100)
@@ -330,9 +333,10 @@ describe('calcChurnRiskV2 / buildChurnSignals', () => {
       annualRenewal30dPlusWithContraction6mo: false,
       hasDowngrade6mo: false,
       hasInvoiceOverdueUnder15: false,
+      isDelinquent: false,
     })
     const result = calcChurnRiskV2(withNull)
-    expect(result.risk_signals_evaluated).toBe(6) // 7 total minus the 1 null
+    expect(result.risk_signals_evaluated).toBe(7) // 8 total minus the 1 null
   })
 
   it('never includes a confidence or probability field', () => {
@@ -344,6 +348,7 @@ describe('calcChurnRiskV2 / buildChurnSignals', () => {
       annualRenewal30dPlusWithContraction6mo: null,
       hasDowngrade6mo: null,
       hasInvoiceOverdueUnder15: null,
+      isDelinquent: false,
     }))
     expect(result).not.toHaveProperty('confidence_score')
     expect(result).not.toHaveProperty('probability')
@@ -355,7 +360,7 @@ describe('calcChurnRiskV2 / buildChurnSignals', () => {
       hasInvoiceOverdue15Plus: false, contractionMrr20PctPlus3mo: false,
       paymentFailures2PlusIn90d: triggerMajeur, // 25 pts → watch
       isMonthlyAndTenureUnder6mo: false, annualRenewal30dPlusWithContraction6mo: false,
-      hasDowngrade6mo: false, hasInvoiceOverdueUnder15: false,
+      hasDowngrade6mo: false, hasInvoiceOverdueUnder15: false, isDelinquent: false,
     })
     expect(calcChurnRiskV2(build(false)).churn_risk_band).toBe('low')
     expect(calcChurnRiskV2(build(true)).churn_risk_score).toBe(25)
@@ -363,8 +368,67 @@ describe('calcChurnRiskV2 / buildChurnSignals', () => {
     expect(calcChurnRiskV2(buildChurnSignals({
       hasInvoiceOverdue15Plus: true, contractionMrr20PctPlus3mo: true, paymentFailures2PlusIn90d: false,
       isMonthlyAndTenureUnder6mo: false, annualRenewal30dPlusWithContraction6mo: false,
-      hasDowngrade6mo: false, hasInvoiceOverdueUnder15: false,
+      hasDowngrade6mo: false, hasInvoiceOverdueUnder15: false, isDelinquent: false,
     })).churn_risk_band).toBe('high') // 35 + 30 = 65 pts
+  })
+
+  it('risk_signals_evaluated counts 8 signals now that payment_delinquent is always evaluable', () => {
+    const signals = buildChurnSignals({
+      hasInvoiceOverdue15Plus: null, contractionMrr20PctPlus3mo: null, paymentFailures2PlusIn90d: null,
+      isMonthlyAndTenureUnder6mo: null, annualRenewal30dPlusWithContraction6mo: null,
+      hasDowngrade6mo: null, hasInvoiceOverdueUnder15: null, isDelinquent: false,
+    })
+    // payment_delinquent is the only evaluable signal — never null, unlike the other 7 invoice/movement-derived ones.
+    const result = calcChurnRiskV2(signals)
+    expect(result.risk_signals_evaluated).toBe(1)
+  })
+
+  // ── payment_delinquent (audit 2026-08-06) — mutual exclusion with invoice_overdue_15d ──
+
+  it('payment_delinquent triggers on isDelinquent alone, independent of invoice data (invoice signal null)', () => {
+    const signals = buildChurnSignals({
+      hasInvoiceOverdue15Plus: null, contractionMrr20PctPlus3mo: null, paymentFailures2PlusIn90d: null,
+      isMonthlyAndTenureUnder6mo: null, annualRenewal30dPlusWithContraction6mo: null,
+      hasDowngrade6mo: null, hasInvoiceOverdueUnder15: null, isDelinquent: true,
+    })
+    const result = calcChurnRiskV2(signals)
+    expect(result.churn_risk_score).toBe(35)
+    expect(result.churn_risk_band).toBe('watch')
+    expect(result.risk_signals_triggered.map((s) => s.code)).toEqual(['payment_delinquent'])
+  })
+
+  it('payment_delinquent stands down once invoice_overdue_15d is confirmed true — no double count', () => {
+    const signals = buildChurnSignals({
+      hasInvoiceOverdue15Plus: true, contractionMrr20PctPlus3mo: false, paymentFailures2PlusIn90d: false,
+      isMonthlyAndTenureUnder6mo: false, annualRenewal30dPlusWithContraction6mo: false,
+      hasDowngrade6mo: false, hasInvoiceOverdueUnder15: false, isDelinquent: true,
+    })
+    const result = calcChurnRiskV2(signals)
+    // 35 (invoice_overdue_15d) only — payment_delinquent suppressed, not +35 more.
+    expect(result.churn_risk_score).toBe(35)
+    expect(result.risk_signals_triggered.map((s) => s.code)).toEqual(['invoice_overdue_15d'])
+  })
+
+  it('payment_failures_90d stays fully independent and compounds with payment_delinquent (ceiling 60, not 95)', () => {
+    const signals = buildChurnSignals({
+      hasInvoiceOverdue15Plus: null, contractionMrr20PctPlus3mo: null, paymentFailures2PlusIn90d: true,
+      isMonthlyAndTenureUnder6mo: null, annualRenewal30dPlusWithContraction6mo: null,
+      hasDowngrade6mo: null, hasInvoiceOverdueUnder15: null, isDelinquent: true,
+    })
+    const result = calcChurnRiskV2(signals)
+    expect(result.churn_risk_score).toBe(60) // 35 (payment_delinquent) + 25 (payment_failures_90d)
+    expect(result.churn_risk_band).toBe('high')
+  })
+
+  it('payment_delinquent does not fire when isDelinquent is false and no invoice data exists', () => {
+    const signals = buildChurnSignals({
+      hasInvoiceOverdue15Plus: null, contractionMrr20PctPlus3mo: null, paymentFailures2PlusIn90d: null,
+      isMonthlyAndTenureUnder6mo: null, annualRenewal30dPlusWithContraction6mo: null,
+      hasDowngrade6mo: null, hasInvoiceOverdueUnder15: null, isDelinquent: false,
+    })
+    const result = calcChurnRiskV2(signals)
+    expect(result.churn_risk_score).toBe(0)
+    expect(result.churn_risk_band).toBe('low')
   })
 })
 
@@ -443,6 +507,7 @@ describe('determineSegmentTypesV3 — exactly-one-health-segment invariant', () 
     hasOverdueInvoices: false,
     subscriptionCanceled: false,
     accountCreatedAt: '2020-01-01T00:00:00Z', // old enough to not be 'nouveaux'
+    isDelinquent: false,
   }
 
   const healthSegments = ['champions', 'stables', 'a_risque_leger', 'en_danger_critique', 'impayes', 'en_churn', 'donnees_insuffisantes']
@@ -463,6 +528,10 @@ describe('determineSegmentTypesV3 — exactly-one-health-segment invariant', () 
     ['insufficient health data + overdue invoice', { healthScoreStatus: 'insufficient', healthScoreBand: null, hasOverdueInvoices: true }],
     ['overdue invoice + high churn (impayes wins)', { hasOverdueInvoices: true, churnRiskBand: 'high' }],
     ['overdue invoice + churned band (en_churn wins)', { churnRiskBand: 'churned', hasOverdueInvoices: true }],
+    // Décision 2026-08-06 (audit délinquence, décision 2) : is_delinquent seul suffit pour impayes.
+    ['delinquent, no overdue invoice', { isDelinquent: true }],
+    ['delinquent + high churn (impayes wins, same as overdue invoice)', { isDelinquent: true, churnRiskBand: 'high' }],
+    ['delinquent + churned band (en_churn wins)', { churnRiskBand: 'churned', isDelinquent: true }],
     ['partial health, watch churn', { healthScoreStatus: 'partial', churnRiskBand: 'watch' }],
     ['at_risk health band, low churn (no expansion signal → stables)', { healthScoreBand: 'at_risk' }],
   ]
@@ -512,6 +581,39 @@ describe('determineSegmentTypesV3 — exactly-one-health-segment invariant', () 
   it('REGRESSION: subscriptionCanceled=true alone (churnRiskBand not churned) no longer assigns en_churn', () => {
     const segments = determineSegmentTypesV3({ ...baseInput, subscriptionCanceled: true, churnRiskBand: 'low' })
     expect(segments).not.toContain('en_churn')
+  })
+
+  // ── impayes widened to is_delinquent (audit 2026-08-06, decision 2) ────
+  // A delinquent account IS an unpaid account — invoice-confirmed or
+  // subscription-status-reported is an implementation detail, not something
+  // the user should see reflected as two different segments. impayes
+  // outranks en_danger_critique/a_risque_leger in priority (already true for
+  // hasOverdueInvoices, unchanged) — a delinquent account that would
+  // otherwise land in en_danger_critique/a_risque_leger now resolves to
+  // impayes instead, deliberately (more actionable label).
+  it('is_delinquent alone (no overdue invoice) resolves to impayes', () => {
+    const segments = determineSegmentTypesV3({ ...baseInput, isDelinquent: true })
+    expect(segments).toContain('impayes')
+    expect(segments).not.toContain('en_danger_critique')
+    expect(segments).not.toContain('a_risque_leger')
+  })
+
+  it('is_delinquent outranks en_danger_critique (high churn band) — impayes wins, same as an overdue invoice', () => {
+    const segments = determineSegmentTypesV3({ ...baseInput, isDelinquent: true, churnRiskBand: 'high' })
+    expect(segments).toContain('impayes')
+    expect(segments).not.toContain('en_danger_critique')
+  })
+
+  it('is_delinquent outranks a_risque_leger (watch churn band) — impayes wins', () => {
+    const segments = determineSegmentTypesV3({ ...baseInput, isDelinquent: true, churnRiskBand: 'watch' })
+    expect(segments).toContain('impayes')
+    expect(segments).not.toContain('a_risque_leger')
+  })
+
+  it('churnRiskBand=churned still outranks is_delinquent (en_churn wins, D1 intact)', () => {
+    const segments = determineSegmentTypesV3({ ...baseInput, isDelinquent: true, churnRiskBand: 'churned' })
+    expect(segments).toContain('en_churn')
+    expect(segments).not.toContain('impayes')
   })
 
   it('churnRiskBand=churned assigns en_churn regardless of mrrCents/subscriptionCanceled', () => {
