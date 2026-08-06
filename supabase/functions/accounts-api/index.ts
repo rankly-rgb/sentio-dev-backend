@@ -135,7 +135,7 @@ async function handleList(
   let query = supabase
     .from('accounts_with_priority')
     .select(
-      'id, stripe_customer_id, display_name, plan_tier, billing_interval, mrr_cents, mrr_status, ' +
+      'id, stripe_customer_id, display_name, plan_tier, billing_interval, mrr_cents, mrr_status, is_delinquent, ' +
       'seat_count, seat_limit, ' +
       'health_score, health_score_status, health_score_band, trend_30d, ' +
       'churn_risk_score, churn_risk_band, ' +
@@ -345,6 +345,7 @@ export async function handleGetOne(
       billing_interval: account.billing_interval,
       mrr_cents: account.mrr_cents,
       mrr_status: account.mrr_status,
+      is_delinquent: account.is_delinquent,
       arr_cents: account.arr_cents,
       seat_count: account.seat_count,
       seat_limit: account.seat_limit,
