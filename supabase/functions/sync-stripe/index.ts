@@ -23,6 +23,7 @@ import {
   type SubscriptionMrrResult,
   type StripeSubscriptionLike,
 } from '../_shared/mrr-engine.ts'
+import { dedupeMovementRows, writeMrrMovementsSync, type MrrMovementSyncRow } from '../_shared/mrr-movements-writer.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
@@ -662,7 +663,7 @@ async function syncSubscriptions(
   // toujours créé après une annulation).
   // Idempotent grâce à l'index unique (org_id, account_id, movement_date, movement_type) WHERE stripe_event_id IS NULL
   const today = new Date().toISOString().split('T')[0]
-  const movementRows: Record<string, unknown>[] = []
+  const movementRows: MrrMovementSyncRow[] = []
 
   const { data: priorChurnRows } = await supabase
     .from('mrr_movements')
@@ -696,27 +697,23 @@ async function syncSubscriptions(
         movement_type: movement.movement_type,
         amount_cents: movement.amount_cents,
         movement_date: movementDate,
-        stripe_event_id: null,
       })
     }
   }
 
-  if (movementRows.length > 0) {
-    const { error: mvtErr } = await supabase
-      .from('mrr_movements')
-      .upsert(movementRows, {
-        onConflict: 'organization_id,account_id,movement_date,movement_type',
-        ignoreDuplicates: true,
-      })
-    if (mvtErr) {
-      console.error(JSON.stringify({
-        level: 'warn',
-        function_name: 'sync-stripe',
-        message: `mrr_movements upsert failed: ${mvtErr.message}`,
-      }))
-    } else {
-      logger.increment('movements_processed', movementRows.length)
-    }
+  const dedupedMovementRows = dedupeMovementRows(movementRows)
+  const { processed: movementsProcessed, failed: movementsFailed, writeError: mvtWriteError } =
+    await writeMrrMovementsSync(supabase, dedupedMovementRows)
+  logger.increment('movements_processed', movementsProcessed)
+  logger.increment('records_failed', movementsFailed)
+  if (mvtWriteError) {
+    console.error(JSON.stringify({
+      level: 'error',
+      function_name: 'sync-stripe',
+      organization_id: organizationId,
+      message: `mrr_movements write failed: ${mvtWriteError.message}`,
+    }))
+    writeErrors.push(mvtWriteError)
   }
 
   return { anomalyDetected: false, billingProfile: billingProfileCounts }
