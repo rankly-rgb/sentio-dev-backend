@@ -17,6 +17,13 @@
  * (divergence documentée séparément, hors scope ici). Un dataset churn-only
  * évite de dépendre de cette divergence non résolue.
  *
+ * Catalogue idempotent : le produit/les prix `sentio_churn_seed` (voir
+ * `ensureProductAndPrices`) sont recherchés via `metadata.source` avant
+ * toute création et réutilisés s'ils existent — relancer --seed plusieurs
+ * fois ne duplique donc jamais le catalogue. Les test clocks, eux, sont
+ * TOUJOURS créés à neuf à chaque run : ils sont volontairement éphémères
+ * (voir --cleanup), la réutilisation n'aurait aucun sens pour eux.
+ *
  * Usage :
  *   STRIPE_SEED_KEY=sk_test_... SEED_EXPECTED_ACCOUNT_ID=acct_... \
  *     npx tsx scripts/seed-churn-validation.ts --seed
@@ -55,8 +62,9 @@
  *      jours, 1 ligne `churn` hors fenêtre) puis la tuile Churn Rate
  *      (`dashboard-api` /portfolio-metrics)
  *   5. npx tsx scripts/seed-churn-validation.ts --cleanup (supprime
- *      uniquement les test clocks créés ici — voir note dans --cleanup
- *      pour ce qui n'est PAS nettoyé)
+ *      uniquement les test clocks créés ici — le produit/les prix
+ *      sentio_churn_seed sont volontairement conservés, réutilisés par le
+ *      prochain --seed grâce à l'idempotence ci-dessus)
  *
  * Faits Stripe respectés (voir aussi le commentaire dans runSeed()) :
  *   - Stripe n'antidate aucun objet : `created` = maintenant à la création.
@@ -184,27 +192,92 @@ interface SeedPrices {
   scale: string
 }
 
-async function ensureProductAndPrices(stripe: Stripe): Promise<SeedPrices> {
-  const product = await stripe.products.create({
-    name: 'Sentio Churn Seed Plan',
-    metadata: { source: METADATA_SOURCE },
-  })
-  log(`  produit créé : ${product.id}`)
+const PRICE_TIER_KEYS: Array<keyof SeedPrices> = ['starter', 'growth', 'scale']
 
-  const tiers: Array<{ key: keyof SeedPrices; amountCents: number }> = [
-    { key: 'starter', amountCents: PRICE_AMOUNTS_CENTS.starter },
-    { key: 'growth', amountCents: PRICE_AMOUNTS_CENTS.growth },
-    { key: 'scale', amountCents: PRICE_AMOUNTS_CENTS.scale },
-  ]
+function isPriceTierKey(value: string | undefined): value is keyof SeedPrices {
+  return value === 'starter' || value === 'growth' || value === 'scale'
+}
+
+/**
+ * Recherche le produit sentio_churn_seed déjà créé par un run précédent.
+ * `products.list()` (pas `products.search()`) délibérément : le SDK expose
+ * bien `products.search()`/`prices.search()`, mais Stripe documente
+ * explicitement leur index comme éventuellement cohérent ("Don't use search
+ * in read-after-write flows where strict consistency is necessary... data
+ * is searchable in less than a minute [normalement], up to an hour behind
+ * during outages") — exactement le read-after-write qu'est cette
+ * vérification d'idempotence à chaque lancement de --seed. `list()` lit la
+ * source primaire, donc cohérence immédiate garantie, au prix d'une
+ * pagination + filtre côté client plutôt qu'un filtre serveur — acceptable
+ * ici : le compte cible est dédié à ce seed (garde-fou
+ * SEED_EXPECTED_ACCOUNT_ID), son catalogue reste petit.
+ */
+async function findExistingProduct(stripe: Stripe): Promise<Stripe.Product | null> {
+  for await (const product of stripe.products.list({ limit: 100 })) {
+    if (product.metadata.source === METADATA_SOURCE) return product
+  }
+  return null
+}
+
+/**
+ * Ré-associe les prix existants d'un produit réutilisé à leur niveau
+ * (starter/growth/scale) via metadata.tier — posé à la création ci-dessous.
+ * S'il existe plusieurs prix pour un même niveau (ex. reliquat d'un run
+ * interrompu avant ce correctif d'idempotence), garde le premier rencontré
+ * (ordre `list()` = created décroissant, donc le plus récent) plutôt que
+ * d'en créer un de plus.
+ */
+async function findExistingPrices(stripe: Stripe, productId: string): Promise<Partial<SeedPrices>> {
+  const found: Partial<SeedPrices> = {}
+  for await (const price of stripe.prices.list({ product: productId, limit: 100 })) {
+    const tier = price.metadata.tier
+    if (isPriceTierKey(tier) && !found[tier]) {
+      found[tier] = price.id
+    }
+  }
+  return found
+}
+
+/**
+ * Idempotent : réutilise le produit/les prix sentio_churn_seed s'ils
+ * existent déjà (metadata.source), n'en crée que ce qui manque. Une
+ * relance de --seed ne duplique donc jamais le catalogue — contrairement
+ * aux test clocks (créés à neuf à chaque run, éphémères par construction,
+ * nettoyés par --cleanup).
+ */
+async function ensureProductAndPrices(stripe: Stripe): Promise<SeedPrices> {
+  let product = await findExistingProduct(stripe)
+  if (product) {
+    log(`  produit réutilisé : ${product.id} (metadata.source=${METADATA_SOURCE} déjà présent)`)
+  } else {
+    product = await stripe.products.create({
+      name: 'Sentio Churn Seed Plan',
+      metadata: { source: METADATA_SOURCE },
+    })
+    log(`  produit créé : ${product.id}`)
+  }
+
+  const existingPrices = await findExistingPrices(stripe, product.id)
+
+  const tiers: Array<{ key: keyof SeedPrices; amountCents: number }> = PRICE_TIER_KEYS.map((key) => ({
+    key,
+    amountCents: PRICE_AMOUNTS_CENTS[key],
+  }))
 
   const prices: Partial<SeedPrices> = {}
   for (const tier of tiers) {
+    const existingId = existingPrices[tier.key]
+    if (existingId) {
+      prices[tier.key] = existingId
+      log(`  prix réutilisé : ${tier.key} -> ${existingId}`)
+      continue
+    }
     const price = await stripe.prices.create({
       product: product.id,
       unit_amount: tier.amountCents,
       currency: 'usd',
       recurring: { interval: 'month' },
-      metadata: { source: METADATA_SOURCE },
+      metadata: { source: METADATA_SOURCE, tier: tier.key },
     })
     prices[tier.key] = price.id
     log(`  prix créé : ${tier.key} -> ${price.id} ($${(tier.amountCents / 100).toFixed(2)}/mo)`)
@@ -462,10 +535,10 @@ async function runCleanup(): Promise<void> {
 
   log(
     '\nNote : ceci ne supprime que les objets attachés à ces test clocks. Le produit/les prix ' +
-      `partagés (metadata.source=${METADATA_SOURCE}) créés par --seed ne sont PAS supprimés — ` +
-      "relancer --seed plusieurs fois accumule des produits/prix dupliqués côté Stripe, à nettoyer " +
-      "manuellement depuis le dashboard Stripe si besoin. Ce script n'écrit jamais dans Supabase, " +
-      "donc --cleanup ne touche non plus aucune donnée d'org/compte Sentio.",
+      `partagés (metadata.source=${METADATA_SOURCE}) créés par --seed sont volontairement ` +
+      "conservés — ensureProductAndPrices() les réutilise au prochain --seed au lieu d'en créer " +
+      "de nouveaux (idempotence). Ce script n'écrit jamais dans Supabase, donc --cleanup ne touche " +
+      "non plus aucune donnée d'org/compte Sentio.",
   )
 }
 
@@ -480,8 +553,12 @@ function printDryRunPlan(seed: boolean, cleanup: boolean): void {
 
   if (seed) {
     console.log('=== plan --seed ===')
-    console.log(`1. Créer le produit partagé "Sentio Churn Seed Plan" (metadata.source=${METADATA_SOURCE})`)
-    console.log('2. Créer 3 prix mensuels usd dessus : starter $49.00, growth $199.00, scale $599.00')
+    console.log(`1. Chercher un produit existant (metadata.source=${METADATA_SOURCE}) via products.list —`)
+    console.log('   le réutiliser si trouvé, sinon créer "Sentio Churn Seed Plan"')
+    console.log('2. Pour chaque prix (starter $49.00, growth $199.00, scale $599.00) : chercher un prix')
+    console.log('   existant sur ce produit (metadata.tier=<niveau>) via prices.list — le réutiliser si')
+    console.log('   trouvé, sinon le créer (mensuel usd). Idempotent : une relance ne duplique jamais')
+    console.log('   le catalogue — seuls les test clocks ci-dessous sont créés à neuf à chaque run.')
     console.log('')
     console.log(`3. Groupe dénominateur 1 — horloge "${CLOCK_PREFIX}denom_1", frozen_time=T-${FROZEN_START_DAYS_AGO}j`)
     console.log('   - créer 3 customers+subscriptions (starter, starter, growth)')
