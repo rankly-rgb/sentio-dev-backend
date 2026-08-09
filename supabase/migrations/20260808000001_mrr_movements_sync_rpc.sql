@@ -32,7 +32,19 @@
 --
 -- Convention suivie (cf. get_portfolio_snapshot, 20260712000001) :
 -- LANGUAGE SQL, pas de SECURITY DEFINER — appelé exclusivement via
--- service_role (sync-stripe), qui bypass déjà RLS.
+-- service_role (sync-stripe), qui bypass déjà RLS. Les fonctions
+-- SECURITY DEFINER de ce repo (ex. mark_playbook_executed, 20260802000005 ;
+-- handle_new_user, 20260503000004) posent systématiquement SET search_path
+-- pour empêcher un search_path de session hostile de détourner une
+-- fonction qui s'exécute avec les privilèges de son PROPRIÉTAIRE — un
+-- risque qui ne s'applique pas ici (INVOKER : la fonction s'exécute avec
+-- les privilèges de service_role, l'appelant réel, pas ceux d'un
+-- propriétaire élevé). SET search_path = public reste posé ci-dessous en
+-- défense en profondeur (recommandation Supabase générale, cf. advisor
+-- "Function Search Path Mutable") même si le risque pratique est faible
+-- ici : le seul objet non qualifié du corps de la fonction est
+-- jsonb_array_elements, résolu depuis pg_catalog (toujours implicitement
+-- en tête de search_path), et mrr_movements est déjà qualifié public.*.
 --
 -- Idempotente : CREATE OR REPLACE FUNCTION + GRANT sont tous deux sûrs à
 -- rejouer.
@@ -41,6 +53,7 @@
 CREATE OR REPLACE FUNCTION public.upsert_mrr_movements_sync(rows JSONB)
 RETURNS VOID
 LANGUAGE SQL
+SET search_path = public
 AS $$
   INSERT INTO public.mrr_movements (
     organization_id, account_id, movement_type, amount_cents, movement_date, stripe_event_id

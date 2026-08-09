@@ -92,6 +92,31 @@ describe('writeMrrMovementsSync', () => {
     const result = await writeMrrMovementsSync(supabase, [row])
     expect(result.writeError?.code).toBeNull()
   })
+
+  // Vérification pré-merge PR #45, point 3 : un doublon (org, account_id,
+  // movement_date, movement_type) volontairement ignoré par `ON CONFLICT
+  // ... DO NOTHING` à l'intérieur du RPC N'EST PAS une erreur Postgres —
+  // la clause supprime l'exception à la source, avant même que
+  // supabase.rpc() ne reçoive une réponse. Vérifié empiriquement contre
+  // une vraie instance Postgres 17 (schéma jetable, reproduisant
+  // exactement le corps du RPC + l'index partiel réel) : deux appels
+  // consécutifs avec la même ligne renvoient tous deux { error: null }, le
+  // compte de lignes ne bouge qu'une fois. Un VRAI échec d'écriture (ex.
+  // CHECK constraint sur movement_type, reproduit avec succès dans la même
+  // vérification : ERROR 23514) est fondamentalement différent : il fait
+  // échouer TOUT le statement INSERT (all-or-nothing, une seule
+  // instruction SQL pour tout le batch), donc supabase.rpc() reçoit un
+  // { error } non-null — c'est uniquement CE cas que writeMrrMovementsSync
+  // traduit en failed/writeError. Il n'y a donc aucun chemin par lequel un
+  // doublon légitime pourrait faire remonter records_failed > 0 : le mock
+  // ci-dessous représente fidèlement ce que fait réellement le RPC pour un
+  // doublon (jamais d'erreur, quel que soit le nombre de lignes
+  // effectivement no-op côté SQL).
+  it('a legitimate duplicate (already-written tuple) is a silent no-op at the SQL level, never surfaces as failed/writeError', async () => {
+    const supabase = mockRpcSupabase({ error: null }) // DO NOTHING → pas d'exception → { error: null }, exactement comme un insert neuf
+    const result = await writeMrrMovementsSync(supabase, [row])
+    expect(result).toEqual({ processed: 1, failed: 0, writeError: null })
+  })
 })
 
 // finding #2 : la même DataSyncLogger.complete() déjà testée en isolation
