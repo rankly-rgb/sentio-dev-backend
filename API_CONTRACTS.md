@@ -253,11 +253,12 @@ Retourne tous les champs bruts (`title_en`, `description_en`) plus les champs r�
   "title": "string (legacy — copié dans title_en si absent)",
   "title_en": "string?",
   "description": "string? (legacy)",
-  "description_en": "string?"
+  "description_en": "string?",
+  "link_redirect_url": "string? (https:// obligatoire si fourni — cf. §8.6)"
 }
 ```
 
-**Règle de validation :** au moins un parmi `title`, `title_en` doit être non-vide.
+**Règle de validation :** au moins un parmi `title`, `title_en` doit être non-vide. `link_redirect_url`, si fourni, doit être une URL `https://` valide (`400` sinon).
 
 **Comportement legacy :** si seul `title` est fourni, il est copié dans `title_en`.
 
@@ -272,9 +273,12 @@ Accepte les mêmes champs que le POST. Seuls les champs fournis sont mis à jour
 ```json
 {
   "title_en": "string?",
-  "description_en": "string?"
+  "description_en": "string?",
+  "link_redirect_url": "string? | null (https:// obligatoire si non-null — cf. §8.6)"
 }
 ```
+
+`link_redirect_url: null` retire la configuration existante (repli sur `NEXT_PUBLIC_APP_URL` pour le lien traçable de ce playbook, cf. §8.5).
 
 ---
 
@@ -841,6 +845,126 @@ Statut système global (DB, cron locks, syncs bloqués, DLQ). Appelable **sans a
 `*_stale` : `true` si le dernier sync `completed` de cette source a plus de 48h, ou si aucun sync `completed` n'existe encore pour cette org. `last_*_sync_hours_ago` : `null` si jamais synced, sinon un nombre (peut dépasser largement 48 si le sync est en panne depuis longtemps — jamais plafonné). `stripe_stale` reprend exactement le même contrat que `hubspot_stale` (déjà déclaré côté frontend, `src/types/ops.ts`, avant ce chantier — mais jamais réellement peuplé par le backend jusqu'ici).
 
 **Codes d'erreur** : `500` (config serveur manquante), `503` (statut `unhealthy`)
+
+## Playbook Outcome Tracking (chantier C)
+
+> Rebasé depuis `feat/playbook-outcome-tracking` (spec du 2026-07-27,
+> intégrée le 2026-08-06 — cf. `specs/002-playbook-outcome-tracking/`).
+> **Restent en attente avant déploiement** : application des deux migrations
+> (`20260727000002`/`20260727000003`) + vérification RLS en environnement
+> Supabase réel (T003, T033 de `tasks.md`) — non exécutables depuis cet
+> environnement de développement (pas de stack Supabase locale).
+
+### 8.1 Marquer une exécution comme exécutée — `POST /playbook-execute/{execution_id}/mark-executed`
+
+**Décision d'architecture** : sous-route dédiée sur la fonction `playbook-execute` existante (routage par path sur `execution_id`), indépendante du corps `POST /playbook-execute` documenté en section Playbooks (déclenchement d'actions automatisées — email, HubSpot...). Réutiliser cet endpoint de déclenchement avec `execution_source: "manual"` aurait conflaté deux sémantiques distinctes : `execution_source` qualifie l'origine d'une exécution qui *dispatch réellement des actions*, alors que `mark-executed` enregistre a posteriori qu'un CSM a agi **manuellement hors-Sentio** (ex : after l'export CSV du chantier playbooks) — aucune action ne doit être redéclenchée par cet appel.
+
+**Auth** : `Authorization: Bearer <jwt_utilisateur>`, scoping `organization_id` obligatoire.
+
+**Effet** :
+- Si l'exécution n'est pas déjà marquée exécutée : renseigne `executed_at = now()` et calcule `attribution_deadline_at = executed_at + attribution_window_days` du playbook (défaut **14 jours** si non configuré).
+- Si déjà marquée exécutée : réponse idempotente (`200`, aucun nouvel horodatage — cf. spec.md § Assumptions).
+
+**Response 200**
+```json
+{ "execution_id": "uuid", "executed_at": "2026-07-20T10:00:00Z", "attribution_deadline_at": "2026-08-03T10:00:00Z" }
+```
+
+**Codes d'erreur** : `401`, `404` (exécution inexistante ou hors organisation de l'appelant)
+
+### 8.1.1 Annuler le marquage — `POST /playbook-execute/{execution_id}/unmark-executed`
+
+*(décision produit actée le 2026-07-27 — symétrique de §8.1, pour rattraper un clic accidentel sur mark-executed)*
+
+**Auth** : `Authorization: Bearer <jwt_utilisateur>`, scoping `organization_id` obligatoire.
+
+**Décision d'architecture** : sous-route dédiée sur `playbook-execute`, même principe que §8.1.
+
+**Fenêtre d'autorisation** : uniquement dans les **5 minutes suivant `executed_at`** — pas pendant toute la fenêtre d'attribution (jusqu'à 14 jours). Choix délibérément restrictif : autoriser l'annulation sur toute la durée de la fenêtre d'attribution permettrait de retirer sélectivement, après coup, les exécutions qui n'ont pas résolu la situation — ce qui fausserait le taux de résolution "exécuté" de §8.3 (SC-006). Ce court délai ne couvre que la correction d'un clic accidentel, pas une réécriture rétroactive de l'historique.
+
+**Effet** :
+- Si l'exécution est marquée exécutée depuis moins de 5 minutes, et sans conflit (voir ci-dessous) : remet `executed_at = null` et `attribution_deadline_at = null`.
+- Si l'exécution n'est pas marquée exécutée (`executed_at IS NULL`) : réponse idempotente (`200`, aucun changement — symétrique de l'idempotence de §8.1).
+
+**Response 200**
+```json
+{ "execution_id": "uuid", "executed_at": null, "attribution_deadline_at": null }
+```
+
+**Codes d'erreur** :
+
+| Code | Cas |
+|------|-----|
+| `401` | JWT invalide |
+| `404` | Exécution inexistante ou hors organisation de l'appelant |
+| `409` | Fenêtre de 5 minutes expirée (`now() > executed_at + 5 min`) |
+| `409` | Résolution déjà détectée automatiquement (`account_converted = true` / `resolved_via = 'invoice_paid_auto'`) — une preuve transactionnelle réelle via Stripe ne doit jamais être effacée par une action manuelle |
+| `409` | Réponse au nudge de confirmation déjà enregistrée (`nudge_response IS NOT NULL`, §8.4) — évite un état incohérent (`nudge_response`/`nudge_responded_at` orphelins sur une exécution redevenue non-exécutée) |
+
+> Les deux cas `409` de conflit priment sur l'expiration de la fenêtre de 5 minutes dans l'ordre de vérification : un statut déjà résolu (auto ou nudge) est bloquant même si techniquement encore dans les 5 minutes.
+
+### 8.2 Statut d'exécution et fenêtre d'attribution — `GET /playbook-execute/{execution_id}/attribution-status`
+
+| Champ | Type | Nullable | Signification |
+|---|---|---|---|
+| `execution_id` | uuid | non | |
+| `executed_at` | timestamptz | **oui** | `null` si l'exécution n'a jamais été marquée exécutée |
+| `attribution_deadline_at` | timestamptz | **oui** | `null` tant que `executed_at` est `null` ; figée au moment du marquage, ne suit jamais une modification ultérieure de `playbooks.attribution_window_days` |
+| `attribution_status` | `'not_executed'\|'active'\|'expired'\|'resolved'` | non | Champ **dérivé**, jamais stocké — recalculé à chaque lecture à partir de `executed_at`/`account_converted`/`attribution_deadline_at` |
+| `time_remaining_seconds` | number | **oui** | `0` si `expired`/`resolved`, `null` si `not_executed` |
+
+### 8.3 Taux de résolution exécuté vs non-exécuté — `GET /playbook-outcome-stats?playbook_id={uuid}`
+
+| Champ | Type | Nullable | Signification |
+|---|---|---|---|
+| `playbook_id` | uuid | non | |
+| `executed.sample_size` | number | non | Nombre d'exécutions marquées exécutées pour ce playbook |
+| `executed.resolved_count` | number | non | Sous-ensemble `account_converted = true` |
+| `executed.resolution_rate` | number (0-1) | **oui** | `null` si `sample_size = 0` — **jamais `0` par défaut** (règle S1 du présent document, appliquée par cohérence à ce nouveau contrat) |
+| `executed.sample_size_warning` | boolean | non | `true` si `sample_size < 20` — seuil identique à la règle "benchmarks 20 comptes minimum" du chantier A (scoring V2, `docs/CHANGELOG_STABILITY.md`). Le frontend DOIT afficher l'avertissement plutôt qu'un pourcentage nu quand `true` |
+| `not_executed.*` | — | — | Même structure que `executed.*`, pour les exécutions jamais marquées exécutées (`executed_at IS NULL`) |
+
+### 8.4 Nudge de confirmation — `POST /playbook-execute/{execution_id}/nudge-response`
+
+| Champ | Type | Nullable | Signification |
+|---|---|---|---|
+| `response` (body) | `'resolved'\|'not_resolved'\|'unsure'` | non | Réponse déclarative du CSM |
+| `nudge_response` (réponse) | idem | **oui** | Persisté sur `playbook_executions.nudge_response` |
+| `nudge_responded_at` (réponse) | timestamptz | **oui** | Persisté sur `playbook_executions.nudge_responded_at` |
+
+**Règle de non-écrasement** : une réponse `nudge_response = 'resolved'` ne modifie **jamais** `account_converted`/`resolved_via` — ce sont deux signaux distincts (déclaratif CSM vs détection automatique factuelle via `invoice.paid`). Le frontend doit les afficher côte à côte, jamais fusionnés en un seul indicateur de résolution.
+
+### 8.5 Lien traçable — `GET /playbook-link/{execution_id}`
+
+**Auth** : aucune — endpoint public, destiné à être cliqué par un destinataire externe sans session. `verify_jwt = false` (`supabase/config.toml`).
+
+**Effet** :
+1. Vérifie l'existence de `execution_id` dans `playbook_executions` — `404` sans fuite d'information sur l'organisation si absent.
+2. Insère une ligne dans `playbook_execution_clicks` (`organization_id`, `playbook_execution_id`, `stripe_customer_id`, `clicked_at` — Zero-PII, jamais dédupliqué : chaque visite crée une nouvelle ligne, cf. §3 Nouvelle entité `playbook_execution_clicks`).
+3. Répond `302` avec un header `Location` pointant vers la destination résolue.
+
+**Résolution de la destination — exclusivement côté serveur** :
+```
+destination =
+  playbooks.link_redirect_url   (si configurée sur le playbook de cette exécution)
+  SINON NEXT_PUBLIC_APP_URL     (env var produit, défaut https://app.sentioapp.io)
+```
+**Garantie anti-open-redirect** : la requête `GET /playbook-link/{execution_id}` ne porte **aucun paramètre de destination** (ni query string, ni header) — `execution_id` sert uniquement à un `SELECT`, jamais à construire l'URL de redirection. La destination est entièrement déterminée par ce qui est déjà en base (`playbooks.link_redirect_url`, configuré séparément via `playbook-crud` — cf. §8.6 ci-dessous), jamais par la requête de clic elle-même.
+
+**Réponse succès (302)** : header `Location` uniquement, pas de corps.
+
+**Erreurs** :
+- `404` — `execution_id` inexistant, sans distinction avec un `execution_id` d'une autre organisation (pas de fuite d'information).
+
+### 8.6 Configuration de la destination — `playbooks.link_redirect_url` (via `playbook-crud`)
+
+Champ optionnel sur `playbooks`, en écriture uniquement via `POST`/`PUT /playbook-crud` (cf. section Playbooks ci-dessus) — **jamais** modifiable ni lisible depuis `playbook-link`.
+
+| Champ | Type | Validation |
+|---|---|---|
+| `link_redirect_url` | `string \| null` | Optionnel. Si fourni, DOIT être une URL absolue de schéma `https:` (`new URL(value).protocol === 'https:'`) — sinon `400`. `null` accepté (retire la configuration, repli sur `NEXT_PUBLIC_APP_URL`). |
+
+**Scope UI (V1)** : **aucune UI de configuration n'est prévue côté frontend pour ce champ dans cette V1.** Contrairement à `attribution-status`, `playbook-outcome-stats` et `nudge-response` (alignement frontend du 2026-07-26, cf. plan.md), `link_redirect_url` n'a été identifié dans aucune dépendance frontend listée pour ce chantier — la spec (`spec.md`, Assumptions) couvre explicitement le backend uniquement. Ce champ est donc, pour l'instant, configurable **uniquement via un appel API direct à `playbook-crud`** (pas de champ de formulaire prévu dans l'UI playbooks). Une UI de configuration reste à spécifier séparément si un besoin produit émerge.
 
 ---
 
