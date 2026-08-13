@@ -34,6 +34,35 @@ export interface MrrMovementSyncRow {
   movement_type: string
   amount_cents: number
   movement_date: string
+  // Lot 4 (2026-08-13) : 'live' = date Stripe réelle (canceled_at/
+  // stripe_created_at), 'estimated' = date de traitement faute de date
+  // réelle disponible pour ce type de mouvement dans ce chemin batch
+  // (expansion/contraction). Jamais de date fabriquée sans ce marqueur (S1).
+  provenance: 'live' | 'estimated'
+}
+
+// Lot 4 (2026-08-13) : extrait de sync-stripe/index.ts pour être testable
+// directement (le fichier appelant a des imports jsr: runtime non
+// résolvables sous Vitest). `churn` daté via canceledAtUnix
+// (subscriptions.canceled_at), `new` via earliestActiveCreatedAtUnix (le
+// plus ancien subscriptions.stripe_created_at parmi les subscriptions
+// actives du compte) — les deux sont des dates Stripe réelles. Aucun
+// équivalent pour expansion/contraction dans ce chemin batch diff (aucun
+// événement Stripe unique n'y correspond) : date de traitement +
+// provenance='estimated', jamais une date fabriquée sans ce marqueur (S1).
+export function resolveMovementDateAndProvenance(
+  movementType: string,
+  canceledAtUnixSeconds: number | undefined,
+  earliestActiveCreatedAtUnixSeconds: number | undefined,
+  todayIsoDate: string,
+): { movementDate: string; provenance: 'live' | 'estimated' } {
+  if (movementType === 'churn' && canceledAtUnixSeconds) {
+    return { movementDate: new Date(canceledAtUnixSeconds * 1000).toISOString().split('T')[0], provenance: 'live' }
+  }
+  if (movementType === 'new' && earliestActiveCreatedAtUnixSeconds) {
+    return { movementDate: new Date(earliestActiveCreatedAtUnixSeconds * 1000).toISOString().split('T')[0], provenance: 'live' }
+  }
+  return { movementDate: todayIsoDate, provenance: 'estimated' }
 }
 
 export function dedupeMovementRows(rows: MrrMovementSyncRow[]): MrrMovementSyncRow[] {

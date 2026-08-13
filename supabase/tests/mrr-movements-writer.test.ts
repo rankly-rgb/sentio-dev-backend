@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { dedupeMovementRows, writeMrrMovementsSync, type MrrMovementSyncRow } from '../functions/_shared/mrr-movements-writer'
+import { dedupeMovementRows, writeMrrMovementsSync, resolveMovementDateAndProvenance, type MrrMovementSyncRow } from '../functions/_shared/mrr-movements-writer'
 import { DataSyncLogger, type WriteError } from '../functions/_shared/data-sync-logger'
 
 // Root cause (docs/CHANGELOG_STABILITY.md, 2026-08-08) : sync-stripe's
@@ -17,6 +17,7 @@ const row: MrrMovementSyncRow = {
   movement_type: 'churn',
   amount_cents: -4900,
   movement_date: '2026-08-08',
+  provenance: 'live',
 }
 
 describe('dedupeMovementRows', () => {
@@ -183,5 +184,56 @@ describe('mrr_movements write failure drives DataSyncLogger away from a silent "
     const update = captured[captured.length - 1]
     expect(update.sync_status).toBe('completed_with_errors')
     expect(update.error_message).toContain('mrr_movements')
+  })
+})
+
+// ── resolveMovementDateAndProvenance (Lot 4, 2026-08-13) ────────────────
+
+describe('resolveMovementDateAndProvenance', () => {
+  const TODAY = '2026-08-13'
+  // 2026-06-01T00:00:00Z and 2026-07-01T00:00:00Z as Unix seconds
+  const JUNE_1_UNIX = Math.floor(Date.UTC(2026, 5, 1) / 1000)
+  const JULY_1_UNIX = Math.floor(Date.UTC(2026, 6, 1) / 1000)
+
+  it('dates a churn using canceledAtUnixSeconds and marks it live', () => {
+    const result = resolveMovementDateAndProvenance('churn', JULY_1_UNIX, undefined, TODAY)
+    expect(result.movementDate).toBe('2026-07-01')
+    expect(result.provenance).toBe('live')
+  })
+
+  it('dates a new movement using earliestActiveCreatedAtUnixSeconds and marks it live', () => {
+    const result = resolveMovementDateAndProvenance('new', undefined, JUNE_1_UNIX, TODAY)
+    expect(result.movementDate).toBe('2026-06-01')
+    expect(result.provenance).toBe('live')
+  })
+
+  it('falls back to today + estimated for churn when no canceled_at is known', () => {
+    const result = resolveMovementDateAndProvenance('churn', undefined, undefined, TODAY)
+    expect(result.movementDate).toBe(TODAY)
+    expect(result.provenance).toBe('estimated')
+  })
+
+  it('falls back to today + estimated for new when no stripe_created_at is known', () => {
+    const result = resolveMovementDateAndProvenance('new', undefined, undefined, TODAY)
+    expect(result.movementDate).toBe(TODAY)
+    expect(result.provenance).toBe('estimated')
+  })
+
+  it('expansion is always today + estimated, even when both real dates happen to be known', () => {
+    const result = resolveMovementDateAndProvenance('expansion', JULY_1_UNIX, JUNE_1_UNIX, TODAY)
+    expect(result.movementDate).toBe(TODAY)
+    expect(result.provenance).toBe('estimated')
+  })
+
+  it('contraction is always today + estimated', () => {
+    const result = resolveMovementDateAndProvenance('contraction', JULY_1_UNIX, JUNE_1_UNIX, TODAY)
+    expect(result.movementDate).toBe(TODAY)
+    expect(result.provenance).toBe('estimated')
+  })
+
+  it('reactivation (no dedicated real date source) is today + estimated', () => {
+    const result = resolveMovementDateAndProvenance('reactivation', undefined, undefined, TODAY)
+    expect(result.movementDate).toBe(TODAY)
+    expect(result.provenance).toBe('estimated')
   })
 })

@@ -4,6 +4,26 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Lot 4 — `movement_date`/`provenance`, fermeture du gap `new` (2026-08-13)
+
+Suite de l'audit Phase 0 : le chemin batch (`sync-stripe`) ne datait correctement que `churn` (`canceled_at`). `sub.created` — une date Stripe réelle — était déjà lue en mémoire (`accountSubMeta`) sans jamais être persistée ni utilisée pour dater un mouvement `new`. Voir `docs/openspec.md` §10.1 pour l'analyse complète (y compris l'analyse de collision `ON CONFLICT`, concluant qu'aucun changement de contrainte n'était nécessaire).
+
+**Changements :**
+- Migration `20260813000005_movement_date_provenance.sql` : `subscriptions.stripe_created_at` (nouvelle colonne) ; `mrr_movements.provenance` (`'live'|'backfill'|'estimated'`, défaut `'live'`) ; `upsert_mrr_movements_sync` (RPC, `20260808000001`) mis à jour pour accepter/persister `provenance` (même signature, `CREATE OR REPLACE`).
+- `sync-stripe/index.ts` : `stripe_created_at` désormais persisté sur chaque upsert de subscription. Nouveau tracker `accountEarliestActiveCreatedAt` (symétrique à `accountLatestCanceledAt`) — le plus ancien `sub.created` parmi les subscriptions non-annulées d'un compte, utilisé pour dater un mouvement `new`. Logique de décision extraite dans `_shared/mrr-movements-writer.ts::resolveMovementDateAndProvenance` (fonction pure, testable directement — `sync-stripe/index.ts` a des imports Deno-natifs non résolvables sous Vitest).
+- `expansion`/`contraction` (chemin batch diff, réellement indatables — confirmé, aucune colonne persistée ne capture un changement de MRR partiel à un instant donné) : `provenance='estimated'`, date de traitement — jamais une date fabriquée sans ce marqueur (S1).
+- `stripe-webhook/index.ts` : `stripe_created_at` propagé sur l'upsert subscription (depuis `sub.created`, event-driven donc toujours disponible) ; `provenance='live'` explicite sur son insert `mrr_movements` (déjà correctement daté via `event.created` pour tous les types, inchangé).
+- **Pas de script de backfill séparé pour les subscriptions existantes** : `syncSubscriptions` réupserte déjà TOUTES les subscriptions de l'org à chaque run (pas seulement les nouvelles), donc `stripe_created_at` se remplit automatiquement pour l'historique existant au prochain `sync-stripe-all-orgs` (cron quotidien) — sans action manuelle, sans appel API Stripe dédié.
+- `supabase-deploy.yml` : assertion CI `a4` passée de `soft` (pending) à `hard` — vérifiée en direct (0 lignes) avant le changement de mode, et réécrite pour utiliser `stripe_created_at`/`provenance` plutôt que l'ancienne référence incorrecte à `subscriptions.created_at` (colonne qui n'a jamais existé).
+
+**Vérifié en direct sur le projet dev** : cycle complet du RPC mis à jour — insertion d'une ligne test avec `provenance='estimated'`, rejeu exact de la même requête (No-op confirmé, toujours 1 ligne — le comportement idempotent de l'index partiel se comporte correctement avec une date réelle/historique, pas seulement avec "aujourd'hui"), ligne de test nettoyée après vérification.
+
+**Tests** : `supabase/tests/mrr-movements-writer.test.ts` — 7 nouveaux tests sur `resolveMovementDateAndProvenance` (churn/new avec date réelle, fallback estimated des deux côtés si donnée absente, expansion/contraction/reactivation toujours estimated même si des dates réelles existent par ailleurs). `npm run verify` : 1011 tests, typecheck et lint verts.
+
+**Non traité dans ce lot, explicitement reporté au Lot 6** : `hasThreeMonthsHistory` (`dashboard-api`) continue de lire `MIN(movement_date)` brut — une fois des mouvements `new` rétrodatés à leur vraie date de création, ce calcul peut basculer à `true` d'un coup pour un compte ancien nouvellement backfillé. Le Lot 6 doit le faire consommer la borne de fiabilité `organizations.mrr_history_complete_since` à la place. `// TODO(Lot 6)` non ajouté dans le code — noté ici pour que ce ne soit pas perdu, le Lot 6 le traite directement plutôt que de poser un TODO qui traînerait.
+
+---
+
 ## Lot 3 — Diagnostic et instrumentation webhook Stripe (2026-08-13)
 
 **Diagnostic** : `stripe-webhook` n'a jamais inséré une seule ligne (0 ligne `webhook_dead_letter` de tous temps, 0 ligne `data_syncs.webhook_event_id` non nul de tous temps, 0 invocation de la fonction sur les dernières 24h de logs — confirmé via `mcp__Supabase__query_logs` en filtrant sur l'`id` réel de la fonction, pas seulement son nom). Hypothèse (a) confirmée (endpoint jamais atteint) plutôt que (b) (reçoit mais échoue silencieusement) : rien dans `webhook_dead_letter` ni dans les logs ne suggère un rejet en cours, et le code lui-même ne persistait de toute façon aucune trace en cas de rejet de signature (`console.warn` seul, ligne ~595 avant ce lot) — (a) et (b) étaient donc structurellement indiscernables par requête SQL avant ce chantier, indépendamment de la cause réelle.
