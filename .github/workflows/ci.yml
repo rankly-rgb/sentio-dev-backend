@@ -76,6 +76,37 @@ jobs:
           cache: 'npm'
       - name: Install dependencies
         run: npm ci
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v1.x
+      - name: Deno check on all Edge Functions (a14)
+        # Incident 2026-08-13 (Lot P1) : ts.transpileModule (utilisé jusqu'ici
+        # faute de Deno dans cet environnement) fait une passe grammaticale
+        # seule — un `continue` visant une boucle déplacée dans une IIFE
+        # (frontière de fonction, cible de saut invalide) l'a traversée sans
+        # broncher et a cassé calculate-scores en production (worker boot
+        # error, détecté seulement après déploiement). `deno check` est le
+        # runtime cible réel de ces fonctions — c'est lui qui doit faire
+        # échouer le build, pas un pis-aller Node.
+        run: |
+          set -euo pipefail
+          FAILED=0
+          for dir in supabase/functions/*/; do
+            fn=$(basename "$dir")
+            [ "$fn" = "_shared" ] && continue
+            [ -f "${dir}index.ts" ] || continue
+            if ! deno check "${dir}index.ts" > /tmp/deno-check-output.txt 2>&1; then
+              echo "::error::a14_deno_check_failed — $fn"
+              cat /tmp/deno-check-output.txt
+              FAILED=1
+            fi
+          done
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::One or more Edge Functions failed deno check — see above."
+            exit 1
+          fi
+          echo "a14: deno check passed on every Edge Function."
       - name: Security audit
         run: npm audit --audit-level=critical --omit=dev
       - name: TypeScript check
