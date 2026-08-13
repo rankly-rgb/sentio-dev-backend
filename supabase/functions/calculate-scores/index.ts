@@ -185,6 +185,11 @@ async function ensureSystemSegments(
 // ── Batch size for paginated scoring ────────────────────────────
 const SCORING_BATCH_SIZE = 500
 const MAX_BATCHES = 200 // Safety guard: 200 * 500 = 100k accounts max per org
+// P1 (2026-08-13) : plafond par org — "généreux mais fini". Le plus gros
+// org observé à ce jour (2688 comptes) complète en très largement moins ;
+// au-delà, l'org est marquée `timed_out` et la boucle passe au suivant
+// plutôt que de bloquer tout le portefeuille derrière un org accroché.
+const ORG_SCORING_TIMEOUT_MS = 90_000
 
 // v3.1 (Lot 5, 2026-08-13, #35) : plancher de bande churn_risk_band par
 // durée de délinquence (applyDelinquencyBandFloor, _shared/scoring.ts) —
@@ -708,7 +713,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Scoring already in progress', 409)
   }
 
-  const results: Array<{ organization_id: string; accounts_scored: number; segments_assigned: number; errors: number }> = []
+  const results: Array<{ organization_id: string; accounts_scored: number; segments_assigned: number; errors: number; status: 'succeeded' | 'failed' | 'timed_out'; duration_ms: number }> = []
 
   try {
     for (const org of orgs) {
@@ -716,6 +721,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       let accountsScored = 0
       let segmentsAssigned = 0
       let errors = 0
+      const orgStartedAt = Date.now()
+      let orgStatus: 'succeeded' | 'failed' | 'timed_out' = 'succeeded'
 
       const logger = new DataSyncLogger({
         supabase,
@@ -726,6 +733,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
       })
       await logger.start()
 
+      // P1 (2026-08-13) : isolation par org. Sans ce timeout, un org bloqué
+      // bloque tous les orgs suivants — c'est exactement ce qui s'est
+      // produit le 2026-08-13 (org f2bf45aa jamais démarré faute que
+      // l'org précédent n'ait jamais fini). ORG_SCORING_TIMEOUT_MS est
+      // généreux (le plus gros org observé à ce jour, 2688 comptes,
+      // complète en largement moins) mais fini : au-delà, l'org est
+      // marqué en échec et la boucle continue plutôt que de rester
+      // suspendue jusqu'à la limite de plateforme de la fonction entière.
+      // `Promise.race` n'annule pas le travail abandonné (Deno ne permet
+      // pas de tuer une promesse en vol) — mais `logger.fail()` ci-dessous
+      // écrit immédiatement un statut terminal, contrairement à l'état
+      // `running` indéfini qui a rendu le hang invisible avant ce lot.
+      let timeoutHandle: number | undefined
+      const timeoutPromise = new Promise<'timed_out'>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve('timed_out'), ORG_SCORING_TIMEOUT_MS)
+      })
+
+      const workPromise = (async (): Promise<'done'> => {
       try {
         // Poids de scoring de l'org (S11) — fallback défaut produit si absent/non validé.
         // (Le modèle v3 n'a plus besoin du MRR max de l'org : aucune des 3
@@ -1100,15 +1125,41 @@ Deno.serve(async (req: Request): Promise<Response> => {
         const msg = err instanceof Error ? err.message : String(err)
         await logger.fail(msg)
         errors++
+        orgStatus = 'failed'
+      }
+      return 'done'
+      })()
+
+      const raceOutcome = await Promise.race([workPromise, timeoutPromise])
+      clearTimeout(timeoutHandle)
+      if (raceOutcome === 'timed_out') {
+        orgStatus = 'timed_out'
+        errors++
+        await logger.fail(`Timed out after ${ORG_SCORING_TIMEOUT_MS}ms (P1 per-org isolation, 2026-08-13) — abandoned work may still complete in the background and its own logger.complete()/fail() call is a harmless late no-op against this already-terminal row.`)
+        console.error(JSON.stringify({
+          level: 'error',
+          function_name: 'calculate-scores',
+          organization_id: organizationId,
+          message: `org timed out after ${ORG_SCORING_TIMEOUT_MS}ms — marked timed_out, loop continues`,
+        }))
       }
 
-      results.push({ organization_id: organizationId, accounts_scored: accountsScored, segments_assigned: segmentsAssigned, errors })
+      results.push({
+        organization_id: organizationId,
+        accounts_scored: accountsScored,
+        segments_assigned: segmentsAssigned,
+        errors,
+        status: orgStatus,
+        duration_ms: Date.now() - orgStartedAt,
+      })
     }
 
+    const timedOutCount = results.filter((r) => r.status === 'timed_out').length
     return jsonResponse({
       success: true,
       snapshot_date: snapshotDate,
       organizations_processed: orgs.length,
+      organizations_timed_out: timedOutCount, // P1 (2026-08-13) : jamais silencieux — un hang isolé doit rester visible dans la réponse, pas seulement dans data_syncs.
       results,
     })
   } catch (err) {

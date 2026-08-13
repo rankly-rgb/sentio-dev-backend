@@ -275,6 +275,35 @@ jobs:
               and delinquent_since is not null
               and delinquent_since <= current_date - interval '45 days';"
 
+          # a12 — Lot P1 (2026-08-13) : calculate-scores traite les orgs
+          # séquentiellement — un org bloqué (hang, pas une exception : voir
+          # d3dc9223, deux fois le même jour, auto-échoué par self-monitor
+          # seulement après 15 min) empêchait silencieusement tous les orgs
+          # suivants d'être scorés du tout. Un org jamais démarré et un org
+          # réussi étaient indiscernables sans cette assertion. "Connecté" =
+          # a au moins un sync Stripe complété une fois ; le plancher de 48h
+          # laisse une marge large au-delà du cron quotidien + retries.
+          #
+          # mode=soft pour ce premier atterrissage : vérifié en direct à 5
+          # (le hang de d3dc9223 CE MÊME JOUR, avant que le correctif
+          # d'isolation ci-dessus ne soit live — passer hard immédiatement
+          # aurait cassé ce déploiement lui-même, l'ironie exacte de ce que
+          # ce lot corrige). À repasser hard dans un suivi rapide dès qu'un
+          # run calculate-scores propre, avec le correctif d'isolation
+          # déployé, confirme 0 — pas ici, tant que ce correctif n'est pas
+          # encore live pour le produire.
+          run_query "a12_org_missing_recent_scoring_run" "soft" "
+            select count(*) as n from (
+              select o.id from organizations o
+              where o.is_active = true
+                and exists (select 1 from data_syncs d where d.organization_id = o.id and d.sync_source = 'stripe' and d.sync_status = 'completed')
+                and not exists (
+                  select 1 from data_syncs d2
+                  where d2.organization_id = o.id and d2.sync_source = 'scoring' and d2.sync_status = 'completed'
+                    and d2.completed_at > now() - interval '48 hours'
+                )
+            ) x;"
+
           if [ "${FAIL_HARD:-0}" = "1" ]; then
             echo "::error::One or more hard data-truth assertions failed — see above."
             exit 1

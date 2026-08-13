@@ -1101,10 +1101,37 @@ Deno.serve(async (req: Request): Promise<Response> => {
   // 'completed' silencieusement quand records_failed > 0.
   const writeErrors: WriteError[] = []
 
-  try {
+  // P1 (2026-08-13) : l'org d3dc9223 a hang deux fois le même jour
+  // (`data_syncs`, auto-échoué par self-monitor seulement après 15 minutes
+  // à chaque fois) — le dispatcher parent (mode `all_orgs` ci-dessus) a bien
+  // un AbortSignal.timeout(280000) par org, mais celui-ci ne protège que
+  // *l'appelant* : côté serveur, cette invocation continue de tourner en
+  // arrière-plan, `data_syncs` restant à `running` jusqu'au balayage de
+  // self-monitor. Ce timeout interne rend le blocage visible en quelques
+  // minutes plutôt qu'en quinze, sans attendre un balayage externe.
+  // Généreux (sous le TTL du lock, 300s, et sous les 280s laissés par le
+  // dispatcher) mais fini.
+  const SYNC_STEPS_TIMEOUT_MS = 240_000
+  let syncTimeoutHandle: number | undefined
+  const syncTimeoutPromise = new Promise<'timed_out'>((resolve) => {
+    syncTimeoutHandle = setTimeout(() => resolve('timed_out'), SYNC_STEPS_TIMEOUT_MS)
+  })
+  const syncWorkPromise = (async () => {
     const { newAccountsSkippedByQuota } = await syncCustomers(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
     const { anomalyDetected, billingProfile, restatementAccountsCount } = await syncSubscriptions(supabase, organizationId, apiKey, logger, writeErrors, restatementMode)
     const { invoiceOnlyAccountsCount, invoicesOrphaned } = await syncInvoices(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
+    return { newAccountsSkippedByQuota, anomalyDetected, billingProfile, restatementAccountsCount, invoiceOnlyAccountsCount, invoicesOrphaned, outcome: 'done' as const }
+  })()
+
+  try {
+    const syncRaceResult = await Promise.race([syncWorkPromise, syncTimeoutPromise])
+    clearTimeout(syncTimeoutHandle)
+    if (syncRaceResult === 'timed_out') {
+      await logger.fail(`Timed out after ${SYNC_STEPS_TIMEOUT_MS}ms (P1 per-org isolation, 2026-08-13) — abandoned Stripe sync work may still complete in the background; this row's terminal status makes the stall visible immediately instead of via self-monitor's 15-minute sweep.`, 'timeout')
+      console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', organization_id: organizationId, message: `org timed out after ${SYNC_STEPS_TIMEOUT_MS}ms — marked failed/timeout, releasing lock` }))
+      return errorResponse(`Sync timed out after ${SYNC_STEPS_TIMEOUT_MS}ms for this organization`, 504)
+    }
+    const { newAccountsSkippedByQuota, anomalyDetected, billingProfile, restatementAccountsCount, invoiceOnlyAccountsCount, invoicesOrphaned } = syncRaceResult
 
     if (anomalyDetected) {
       // 'validation_error' — CHECK data_syncs_error_type_check n'inclut pas de valeur
