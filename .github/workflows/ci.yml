@@ -121,12 +121,19 @@ jobs:
         run: |
           set -uo pipefail
           HARD_FAIL=0
-          # Every outcome is echoed twice: once as a plain, unprefixed line
-          # (guaranteed to survive in the raw log — GitHub Actions batches/
-          # strips ::error::/::warning:: workflow-command lines into
-          # annotations only, sometimes dropping them from the downloadable
-          # log entirely when many land in a tight loop) and once as the
-          # ::error::/::warning:: annotation (for PR/Checks UI surfacing).
+          RESULTS=/tmp/a14-results.txt
+          : > "$RESULTS"
+          # Two prior CI runs on this exact step (31746115934, 31746496952)
+          # both failed with exit 1, but every log-retrieval path available
+          # (plain fetch, failed_only fetch, waiting 3+ minutes for archival
+          # lag) returned a raw log with a hard gap between this step's own
+          # ##[endgroup] and "Process completed with exit code 1" — the
+          # entire per-function loop output missing, prefixed or not. Cause
+          # unconfirmed (suspected: GitHub batching many ::error::/::warning::
+          # commands in a tight loop drops the surrounding buffer from the
+          # downloadable log, not just the annotation lines themselves).
+          # RESULTS is the reliable channel: written to a real file, uploaded
+          # as a build artifact by the next step regardless of outcome.
           for dir in supabase/functions/*/; do
             fn=$(basename "$dir")
             [ "$fn" = "_shared" ] && continue
@@ -139,10 +146,10 @@ jobs:
 
             if [ "$CHECK_EXIT" = "0" ]; then
               if [ -n "$BASELINE_MAX" ]; then
-                echo "[a14] BASELINE_STALE $fn — now passes deno check but is still listed in .github/a14-baseline.json. Remove its entry in this PR."
+                echo "[a14] BASELINE_STALE $fn — now passes deno check but is still listed in .github/a14-baseline.json. Remove its entry in this PR." | tee -a "$RESULTS"
                 echo "::warning::a14_baseline_stale — $fn now passes deno check but is still listed in .github/a14-baseline.json. Remove its entry in this PR."
               else
-                echo "[a14] ok $fn"
+                echo "[a14] ok $fn" | tee -a "$RESULTS"
               fi
               continue
             fi
@@ -153,26 +160,34 @@ jobs:
             [ "$ERR_COUNT" = "0" ] && ERR_COUNT=1
 
             if [ -z "$BASELINE_MAX" ]; then
-              echo "[a14] REGRESSION $fn — fails deno check and is NOT in the a14 baseline. New regression, never tolerated."
-              cat /tmp/deno-check-output.txt
+              echo "[a14] REGRESSION $fn — fails deno check and is NOT in the a14 baseline. New regression, never tolerated." | tee -a "$RESULTS"
+              cat /tmp/deno-check-output.txt | tee -a "$RESULTS"
               echo "::error::a14_deno_check_regression — $fn fails deno check and is NOT in the a14 baseline. New regression, never tolerated."
               HARD_FAIL=1
             elif [ "$ERR_COUNT" -gt "$BASELINE_MAX" ]; then
-              echo "[a14] WORSENED $fn — has $ERR_COUNT errors, baseline allows at most $BASELINE_MAX."
-              cat /tmp/deno-check-output.txt
+              echo "[a14] WORSENED $fn — has $ERR_COUNT errors, baseline allows at most $BASELINE_MAX." | tee -a "$RESULTS"
+              cat /tmp/deno-check-output.txt | tee -a "$RESULTS"
               echo "::error::a14_deno_check_worsened — $fn has $ERR_COUNT errors, baseline allows at most $BASELINE_MAX. Ratchet violated — a new or additional error was introduced."
               HARD_FAIL=1
             else
-              echo "[a14] known_debt $fn ($ERR_COUNT/$BASELINE_MAX errors, tracked in .github/a14-baseline.json, see issue #67)"
+              echo "[a14] known_debt $fn ($ERR_COUNT/$BASELINE_MAX errors, tracked in .github/a14-baseline.json, see issue #67)" | tee -a "$RESULTS"
               echo "::warning::a14_deno_check_known_debt — $fn ($ERR_COUNT/$BASELINE_MAX errors, tracked in .github/a14-baseline.json, see issue #67)"
             fi
           done
           if [ "$HARD_FAIL" = "1" ]; then
-            echo "[a14] RATCHET VIOLATED — see per-function output above."
-            echo "::error::a14 ratchet violated — see above. Either fix the regression, or if this error was already tracked, update .github/a14-baseline.json in the same PR with justification."
+            echo "[a14] RATCHET VIOLATED — see per-function output above and the a14-results build artifact." | tee -a "$RESULTS"
+            echo "::error::a14 ratchet violated — see above, or download the a14-results artifact from this run. Either fix the regression, or if this error was already tracked, update .github/a14-baseline.json in the same PR with justification."
             exit 1
           fi
-          echo "[a14] ratchet held — no function outside the baseline failed, no baseline function worsened."
+          echo "[a14] ratchet held — no function outside the baseline failed, no baseline function worsened." | tee -a "$RESULTS"
+      - name: Upload a14 results (always, even on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a14-results
+          path: /tmp/a14-results.txt
+          retention-days: 7
+          if-no-files-found: warn
       - name: Security audit
         run: npm audit --audit-level=critical --omit=dev
       - name: TypeScript check
