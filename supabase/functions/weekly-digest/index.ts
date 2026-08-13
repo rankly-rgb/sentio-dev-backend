@@ -269,10 +269,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
       const accounts = statsRes.data ?? []
       const prevAccounts = prevStatsRes.data ?? []
 
+      // Lot 5 (2026-08-13, #35) : 'critical' est un tier strictement au-dessus
+      // de 'high' (plancher par durée de délinquence) — compté ici au même
+      // titre, jamais exclu du décompte "comptes critiques".
+      const isCriticalBand = (band: string | null) => band === 'high' || band === 'critical'
       const totalMrrCents = accounts.reduce((sum, a) => sum + (a.mrr_cents ?? 0), 0)
-      const criticalCount = accounts.filter(a => a.churn_risk_band === 'high').length
+      const criticalCount = accounts.filter(a => isCriticalBand(a.churn_risk_band)).length
       const prevWeekMrrCents = prevAccounts.reduce((sum, a) => sum + (a.mrr_cents ?? 0), 0)
-      const prevWeekCriticalCount = prevAccounts.filter(a => a.churn_risk_band === 'high').length
+      const prevWeekCriticalCount = prevAccounts.filter(a => isCriticalBand(a.churn_risk_band)).length
 
       const stats: WeeklyStats = {
         totalMrrCents,

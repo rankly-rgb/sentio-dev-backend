@@ -7,6 +7,7 @@ import {
   calcHealthScoreV3,
   validateScoringWeights,
   calcChurnRiskV2,
+  applyDelinquencyBandFloor,
   buildChurnSignals,
   countPaymentFailures90d,
   calcExpansionScoreV2,
@@ -456,6 +457,71 @@ describe('calcChurnRiskV2 / buildChurnSignals', () => {
     const result = calcChurnRiskV2(signals)
     expect(result.churn_risk_score).toBe(0)
     expect(result.churn_risk_band).toBe('low')
+  })
+})
+
+// ── applyDelinquencyBandFloor (Lot 5, 2026-08-13, #35) ─────────
+// Grille : NULL/0-14j → floor 'watch', 15-44j → floor 'high', >=45j →
+// floor 'critical'. Le floor ne redescend jamais la bande brute et ne
+// s'applique jamais à un compte non délinquent.
+
+describe('applyDelinquencyBandFloor', () => {
+  it('does nothing when the account is not delinquent, regardless of duration', () => {
+    const result = applyDelinquencyBandFloor('low', false, 90)
+    expect(result.band).toBe('low')
+    expect(result.floor_applied).toBe(false)
+    expect(result.floor_reason).toBeNull()
+    expect(result.delinquent_duration_days).toBeNull()
+  })
+
+  it('floors a delinquent account with unknown duration (null) to watch', () => {
+    const result = applyDelinquencyBandFloor('low', true, null)
+    expect(result.band).toBe('watch')
+    expect(result.floor_applied).toBe(true)
+    expect(result.floor_reason).toContain('unknown duration')
+  })
+
+  it('floors 0-14 days to watch', () => {
+    expect(applyDelinquencyBandFloor('low', true, 0).band).toBe('watch')
+    expect(applyDelinquencyBandFloor('low', true, 14).band).toBe('watch')
+  })
+
+  it('floors 15-44 days to high', () => {
+    expect(applyDelinquencyBandFloor('low', true, 15).band).toBe('high')
+    expect(applyDelinquencyBandFloor('watch', true, 44).band).toBe('high')
+  })
+
+  it('floors >= 45 days to critical — negative test: a 60-day-delinquent account must resolve to critical', () => {
+    const result = applyDelinquencyBandFloor('low', true, 60)
+    expect(result.band).toBe('critical')
+    expect(result.floor_applied).toBe(true)
+    expect(result.floor_reason).toContain('60 day(s)')
+  })
+
+  it('floors exactly at the 45-day boundary to critical', () => {
+    expect(applyDelinquencyBandFloor('low', true, 45).band).toBe('critical')
+    expect(applyDelinquencyBandFloor('low', true, 44).band).toBe('high')
+  })
+
+  it('never lowers a raw band already above the floor tier', () => {
+    // raw band 'high' (own signals) with only a 3-day-old delinquency (floor would be 'watch') — stays 'high'.
+    const result = applyDelinquencyBandFloor('high', true, 3)
+    expect(result.band).toBe('high')
+    expect(result.floor_applied).toBe(false)
+  })
+
+  it('raises a raw band below the floor tier', () => {
+    // raw band 'watch' (own signals) with a 50-day-old delinquency (floor 'critical') — raised to 'critical'.
+    const result = applyDelinquencyBandFloor('watch', true, 50)
+    expect(result.band).toBe('critical')
+    expect(result.floor_applied).toBe(true)
+  })
+
+  it('applies no floor when the raw band already equals the floor tier exactly', () => {
+    const result = applyDelinquencyBandFloor('high', true, 20)
+    expect(result.band).toBe('high')
+    expect(result.floor_applied).toBe(false)
+    expect(result.floor_reason).toBeNull()
   })
 })
 

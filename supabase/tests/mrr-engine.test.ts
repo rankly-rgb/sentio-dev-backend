@@ -21,6 +21,8 @@ import {
   detectBillingModel,
   detectOrgMajorityCurrency,
   isAccountChurned,
+  computeDelinquentSinceCandidate,
+  resolveDelinquentSince,
   calcNrrPercentage,
   calcChurnRate30d,
   calcMrrGrowthMetrics,
@@ -396,6 +398,60 @@ describe('isAccountChurned (docs/openspec.md §5 — remplace mrr_cents===0 || s
 
   it('aucune subscription → false (invoice-only ou compte neuf, jamais churned par défaut)', () => {
     expect(isAccountChurned([])).toBe(false)
+  })
+})
+
+describe('computeDelinquentSinceCandidate (Lot 5, 2026-08-13, #35)', () => {
+  it('retourne null quand aucune subscription n\'est délinquente', () => {
+    expect(computeDelinquentSinceCandidate([{ status: 'active', contractStart: '2026-01-01' }])).toBeNull()
+  })
+
+  it('retourne null quand une subscription délinquente n\'a pas de contractStart connu (S1)', () => {
+    expect(computeDelinquentSinceCandidate([{ status: 'past_due', contractStart: null }])).toBeNull()
+  })
+
+  it('retourne le contractStart d\'une unique subscription délinquente', () => {
+    expect(computeDelinquentSinceCandidate([{ status: 'past_due', contractStart: '2026-06-01' }])).toBe('2026-06-01')
+  })
+
+  it('retient le plus ancien contractStart parmi plusieurs subscriptions délinquentes', () => {
+    expect(computeDelinquentSinceCandidate([
+      { status: 'past_due', contractStart: '2026-06-01' },
+      { status: 'unpaid', contractStart: '2026-03-01' },
+    ])).toBe('2026-03-01')
+  })
+
+  it('ignore les subscriptions non délinquentes même si leur contractStart est plus ancien', () => {
+    expect(computeDelinquentSinceCandidate([
+      { status: 'active', contractStart: '2026-01-01' },
+      { status: 'past_due', contractStart: '2026-06-01' },
+    ])).toBe('2026-06-01')
+  })
+})
+
+describe('resolveDelinquentSince (Lot 5, 2026-08-13, #35 — sticky resolution)', () => {
+  it('reste null quand le compte n\'est pas délinquent', () => {
+    expect(resolveDelinquentSince(false, null, '2026-06-01')).toBeNull()
+  })
+
+  it('repasse à null quand le compte redevient non délinquent, même avec une date précédente connue', () => {
+    expect(resolveDelinquentSince(false, '2026-06-01', null)).toBeNull()
+  })
+
+  it('prend le candidat au premier passage en délinquence (aucune date précédente)', () => {
+    expect(resolveDelinquentSince(true, null, '2026-06-01')).toBe('2026-06-01')
+  })
+
+  it('accepte null comme candidat au premier passage si aucune date n\'est connue (S1, jamais now())', () => {
+    expect(resolveDelinquentSince(true, null, null)).toBeNull()
+  })
+
+  it('préserve la date déjà persistée en délinquence continue — ne rajeunit jamais', () => {
+    expect(resolveDelinquentSince(true, '2026-01-01', '2026-06-01')).toBe('2026-01-01')
+  })
+
+  it('comble le trou si une date était inconnue mais un candidat apparaît sur un run ultérieur', () => {
+    expect(resolveDelinquentSince(true, null, '2026-06-01')).toBe('2026-06-01')
   })
 })
 

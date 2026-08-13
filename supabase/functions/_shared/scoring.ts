@@ -9,6 +9,8 @@ export interface Account {
   health_score: number | null
   churn_risk_score: number | null
   is_delinquent: boolean
+  // Lot 5 (2026-08-13, #35) — voir applyDelinquencyBandFloor.
+  delinquent_since: string | null
 }
 
 // ── Segmentation ─────────────────────────────────────────────
@@ -454,6 +456,74 @@ export function calcChurnRiskV2(signals: ChurnSignalDefinition[]): ChurnRiskV2Re
   }
 }
 
+// ── Lot 5 (2026-08-13, #35) — plancher de bande par durée de délinquence ──
+// Grille figée pour cette itération. Configurable per-org en V2 (aujourd'hui :
+// constantes globales, pas de colonne organizations.*).
+const DELINQUENCY_FLOOR_HIGH_MIN_DAYS = 15
+const DELINQUENCY_FLOOR_CRITICAL_MIN_DAYS = 45
+
+export type ChurnRiskBandFinal = 'low' | 'watch' | 'high' | 'critical' | 'churned'
+
+const BAND_SEVERITY: Record<'low' | 'watch' | 'high' | 'critical', number> = { low: 0, watch: 1, high: 2, critical: 3 }
+
+export interface ChurnBandFloorResult {
+  band: 'low' | 'watch' | 'high' | 'critical'
+  floor_applied: boolean
+  floor_reason: string | null
+  delinquent_duration_days: number | null
+}
+
+/**
+ * Escalade la bande de risque churn en fonction de la durée de délinquence
+ * connue (`accounts.delinquent_since`), indépendamment des signaux additifs
+ * bruts — un impayé de 60 jours ne doit jamais rester en bande basse
+ * simplement parce qu'aucun autre signal de `calcChurnRiskV2` n'est
+ * déclenché : la durée EST le signal.
+ *
+ * - Jamais appliqué à un compte non délinquent (`isDelinquent=false`) : band
+ *   brute retournée telle quelle, rien à plancher. Les comptes `churned`
+ *   sont exemptés par construction — ce sont toujours des comptes
+ *   `isChurned` côté appelant, qui ne passe jamais par cette fonction (voir
+ *   calculate-scores/index.ts::scoreAccountPure, court-circuit `isChurned`).
+ * - "Floor", jamais un recalcul complet : ne redescend JAMAIS la bande brute
+ *   — un compte déjà 'high' sur ses propres signaux reste 'high' même si sa
+ *   délinquence ne dure que 3 jours.
+ * - `delinquentDurationDays === null` (delinquent_since inconnu — S1, jamais
+ *   de date fabriquée en amont) suit la grille telle qu'écrite : NULL/0-14j
+ *   → plancher 'watch', jamais 'low' — un compte délinquent sans date connue
+ *   n'est structurellement jamais "sans risque".
+ */
+export function applyDelinquencyBandFloor(
+  rawBand: 'low' | 'watch' | 'high',
+  isDelinquent: boolean,
+  delinquentDurationDays: number | null,
+): ChurnBandFloorResult {
+  if (!isDelinquent) {
+    return { band: rawBand, floor_applied: false, floor_reason: null, delinquent_duration_days: null }
+  }
+
+  let floorBand: 'watch' | 'high' | 'critical'
+  if (delinquentDurationDays !== null && delinquentDurationDays >= DELINQUENCY_FLOOR_CRITICAL_MIN_DAYS) {
+    floorBand = 'critical'
+  } else if (delinquentDurationDays !== null && delinquentDurationDays >= DELINQUENCY_FLOOR_HIGH_MIN_DAYS) {
+    floorBand = 'high'
+  } else {
+    floorBand = 'watch'
+  }
+
+  const finalBand = BAND_SEVERITY[floorBand] > BAND_SEVERITY[rawBand] ? floorBand : rawBand
+  const floorApplied = finalBand !== rawBand
+
+  return {
+    band: finalBand,
+    floor_applied: floorApplied,
+    floor_reason: floorApplied
+      ? `Payment delinquent for ${delinquentDurationDays === null ? 'an unknown duration' : `${delinquentDurationDays} day(s)`} — band floored to ${finalBand}.`
+      : null,
+    delinquent_duration_days: delinquentDurationDays,
+  }
+}
+
 // Construit les 7 signaux de risque de la spec à partir de données pré-agrégées
 // (skippe silencieusement — value: null — tout signal dont la donnée source
 // est absente, plutôt que de le compter comme "non déclenché").
@@ -566,7 +636,12 @@ export type SegmentTypeV3 = Exclude<SegmentType, 'en_expansion'> | 'donnees_insu
 export interface SegmentInputV3 {
   healthScoreStatus: 'complete' | 'partial' | 'insufficient'
   healthScoreBand: 'healthy' | 'watch' | 'at_risk' | null
-  churnRiskBand: 'low' | 'watch' | 'high' | 'churned'
+  // Lot 5 (2026-08-13, #35) : 'critical' — plancher par durée de délinquence
+  // (applyDelinquencyBandFloor) — ne peut survenir que si isDelinquent=true,
+  // donc toujours intercepté par la branche `impayes` ci-dessous avant
+  // d'atteindre la comparaison churnRiskBand === 'high'/'critical'. OR
+  // ajouté par défensivité (S1) plutôt que par nécessité démontrée.
+  churnRiskBand: 'low' | 'watch' | 'high' | 'critical' | 'churned'
   hasExpansionSignal: boolean
   mrrCents: number
   hasOverdueInvoices: boolean
@@ -608,7 +683,7 @@ export function determineSegmentTypesV3(input: SegmentInputV3): SegmentTypeV3[] 
     segments.push('impayes')
   } else if (input.healthScoreStatus === 'insufficient') {
     segments.push('donnees_insuffisantes')
-  } else if (input.churnRiskBand === 'high') {
+  } else if (input.churnRiskBand === 'high' || input.churnRiskBand === 'critical') {
     segments.push('en_danger_critique')
   } else if (input.churnRiskBand === 'watch') {
     segments.push('a_risque_leger')

@@ -41,6 +41,7 @@ const baseAccountFields = {
   mrr_cents: 149900,
   mrr_status: 'ok' as const,
   is_delinquent: false,
+  delinquent_since: null,
   arr_cents: 1798800,
   seat_count: 12,
   seat_limit: 20,
@@ -255,5 +256,16 @@ describe('accounts-api handleGetOne — payload shape by health_score_status', (
     const delinquentAccount = { ...completeAccount, is_delinquent: true }
     const json = await runHandleGetOne(delinquentAccount, 'impayes')
     expect(json.data.is_delinquent).toBe(true)
+  })
+
+  it('delinquent_since passes through unchanged (Lot 5, 2026-08-13, #35 — feeds the frontend duration display)', async () => {
+    const delinquentAccount = { ...completeAccount, is_delinquent: true, delinquent_since: '2026-06-01' }
+    const json = await runHandleGetOne(delinquentAccount, 'impayes')
+    expect(json.data.delinquent_since).toBe('2026-06-01')
+  })
+
+  it('delinquent_since stays null when unknown, never a fabricated date (S1)', async () => {
+    const json = await runHandleGetOne(completeAccount, 'champions')
+    expect(json.data.delinquent_since).toBeNull()
   })
 })

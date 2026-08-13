@@ -211,6 +211,18 @@ jobs:
               having max(received_at) < now() - interval '7 days'
             ) x;"
 
+          # a9 — Lot 5 guard (2026-08-13, #35, applyDelinquencyBandFloor):
+          # an account delinquent for >= 45 known days must be floored to
+          # 'critical', regardless of its raw signal-based band. soft: this
+          # dev project's accounts.delinquent_since is brand new (Lot 5 just
+          # landed) — 0 rows have a known date yet, nothing to compute a
+          # duration from until the next sync-stripe run populates it.
+          run_query "a9_delinquent_45d_not_critical" "soft" "
+            select count(*) as n from accounts
+            where is_delinquent = true and churn_risk_band != 'critical' and churn_risk_band != 'churned'
+              and delinquent_since is not null
+              and delinquent_since <= current_date - interval '45 days';"
+
           if [ "${FAIL_HARD:-0}" = "1" ]; then
             echo "::error::One or more hard data-truth assertions failed — see above."
             exit 1
