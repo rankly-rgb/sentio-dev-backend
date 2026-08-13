@@ -14,6 +14,7 @@ export type InsightType =
   | 'expansion_opportunity'
   | 'renewal_alert'
   | 'payment_risk'
+  | 'payment_delinquent'
   | 'usage_drop'
   | 'account_health_summary'
 
@@ -36,6 +37,9 @@ export interface InsightInput {
   contract_end_date: string | null
   has_overdue_invoices: boolean
   overdue_days: number
+  // accounts.is_delinquent — statut d'abonnement Stripe past_due/unpaid,
+  // indépendant des factures (audit délinquence 2026-08-06, issue #36).
+  is_delinquent: boolean
   usage_score_current: number
   usage_score_previous: number | null
   created_at: string
@@ -198,6 +202,38 @@ export function evaluatePaymentRisk(input: InsightInput): InsightCandidate | nul
   }
 }
 
+// ── Règle 4bis : Payment Delinquent ─────────────────────────
+//
+// Issue #36 (2026-08-13) : pendant de `payment_risk` pour le signal
+// `accounts.is_delinquent` (statut d'abonnement Stripe past_due/unpaid),
+// jamais surfacé par un insight dédié avant ce chantier — un compte
+// délinquent ne remontait que si ses *autres* signaux franchissaient un
+// seuil existant. Même exclusion mutuelle avec payment_risk que le signal
+// de churn équivalent (_shared/scoring.ts, audit délinquence 2026-08-06,
+// décision 1) : une fois la facture confirmée en retard de 15j+
+// (payment_risk se déclenche), le proxy de statut s'efface au lieu de
+// s'additionner — même fait observé à deux précisions différentes.
+
+export function evaluatePaymentDelinquent(input: InsightInput): InsightCandidate | null {
+  if (!input.is_delinquent) return null
+  if (input.has_overdue_invoices && input.overdue_days > 15) return null
+
+  return {
+    insight_type: 'payment_delinquent',
+    title: 'Payment past due',
+    description: `This account's subscription payment has failed and is past due. MRR at risk: ${mrrUsd(input.mrr_cents)}.`,
+    recommended_action: 'Reach out to the customer to resolve the failed payment before the account is suspended.',
+    priority: 'critical',
+    severity: 'CRITIQUE',
+    signals: ['is_delinquent = true'],
+    confidence_score: null,
+    mrr_impact_cents: input.mrr_cents,
+    source_scores: {
+      churn_risk_score: input.churn_risk_score,
+    },
+  }
+}
+
 // ── Règle 5 : Usage Drop — GELÉE (retirée du jeu de règles actif, 2026-08-04) ─
 //
 // AUDIT_LOGIQUE_METIER_STRIPE.md point 19 : `product_usage_score` est gelé
@@ -319,6 +355,7 @@ export function evaluateInsightRules(input: InsightInput): InsightCandidate[] {
     evaluateExpansionOpportunity,
     evaluateRenewalAlert,
     evaluatePaymentRisk,
+    evaluatePaymentDelinquent,
     // evaluateUsageDrop retirée (product_usage_score gelé depuis le v3 —
     // voir commentaire sur la fonction ci-dessus).
   ]

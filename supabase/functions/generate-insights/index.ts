@@ -38,6 +38,7 @@ interface AccountRow {
   mrr_cents: number | null
   contract_end_date: string | null
   created_at: string
+  is_delinquent: boolean
 }
 
 // ── Pre-fetch data needed for insight evaluation ─────────────
@@ -128,6 +129,7 @@ function buildInsightInput(
     contract_end_date: account.contract_end_date,
     has_overdue_invoices: invoiceData?.has_overdue ?? false,
     overdue_days: invoiceData?.overdue_days ?? 0,
+    is_delinquent: account.is_delinquent,
     usage_score_current: account.product_usage_score ?? 50,
     usage_score_previous: usagePrevious ?? null,
     created_at: account.created_at,
@@ -334,7 +336,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
           const { data: batch, error: batchError } = await supabase
             .from('accounts')
-            .select('id, organization_id, health_score, churn_risk_score, churn_risk_band, expansion_score, product_usage_score, mrr_cents, contract_end_date, created_at')
+            .select('id, organization_id, health_score, churn_risk_score, churn_risk_band, expansion_score, product_usage_score, mrr_cents, contract_end_date, created_at, is_delinquent')
             .eq('organization_id', organizationId)
             .not('scores_calculated_at', 'is', null)
             .range(batchOffset, batchOffset + BATCH_SIZE - 1)

@@ -5,6 +5,7 @@ import {
   evaluateExpansionOpportunity,
   evaluateRenewalAlert,
   evaluatePaymentRisk,
+  evaluatePaymentDelinquent,
   evaluateUsageDrop,
   evaluateAccountHealthSummary,
   type InsightInput,
@@ -22,6 +23,7 @@ const baseInput: InsightInput = {
   contract_end_date: null,
   has_overdue_invoices: false,
   overdue_days: 0,
+  is_delinquent: false,
   usage_score_current: 60,
   usage_score_previous: 60,
   created_at: '2025-06-01T00:00:00Z',
@@ -181,6 +183,48 @@ describe('evaluatePaymentRisk', () => {
   })
 })
 
+// ── Payment Delinquent (issue #36) ──────────────────────────
+
+describe('evaluatePaymentDelinquent', () => {
+  it('returns null when not delinquent', () => {
+    expect(evaluatePaymentDelinquent({ ...baseInput, is_delinquent: false })).toBeNull()
+  })
+
+  it('returns a critical insight when delinquent with no overdue invoice yet', () => {
+    const result = evaluatePaymentDelinquent({ ...baseInput, is_delinquent: true })
+    expect(result).not.toBeNull()
+    expect(result!.insight_type).toBe('payment_delinquent')
+    expect(result!.priority).toBe('critical')
+    expect(result!.severity).toBe('CRITIQUE')
+    expect(result!.confidence_score).toBeNull()
+  })
+
+  it('still fires when an overdue invoice exists but is <= 15 days (payment_risk not yet triggered)', () => {
+    const result = evaluatePaymentDelinquent({
+      ...baseInput,
+      is_delinquent: true,
+      has_overdue_invoices: true,
+      overdue_days: 10,
+    })
+    expect(result).not.toBeNull()
+  })
+
+  it('is suppressed once payment_risk fires (overdue_days > 15) — same fact, more precise proxy already surfaced', () => {
+    const result = evaluatePaymentDelinquent({
+      ...baseInput,
+      is_delinquent: true,
+      has_overdue_invoices: true,
+      overdue_days: 20,
+    })
+    expect(result).toBeNull()
+  })
+
+  it('mrr_impact_cents equals account MRR', () => {
+    const result = evaluatePaymentDelinquent({ ...baseInput, is_delinquent: true, mrr_cents: 75000 })
+    expect(result!.mrr_impact_cents).toBe(75000)
+  })
+})
+
 // ── Usage Drop ───────────────────────────────────────────────
 
 describe('evaluateUsageDrop', () => {
@@ -333,6 +377,24 @@ describe('evaluateInsightRules', () => {
     const result = evaluateInsightRules(input)
     const types = result.map((r) => r.insight_type)
     expect(types).not.toContain('usage_drop')
+  })
+
+  it('returns payment_delinquent for a delinquent account with no other issue', () => {
+    const result = evaluateInsightRules({ ...baseInput, is_delinquent: true })
+    expect(result).toHaveLength(1)
+    expect(result[0].insight_type).toBe('payment_delinquent')
+  })
+
+  it('does not double-count delinquency once payment_risk has already fired on the same overdue invoice', () => {
+    const result = evaluateInsightRules({
+      ...baseInput,
+      is_delinquent: true,
+      has_overdue_invoices: true,
+      overdue_days: 25,
+    })
+    const types = result.map((r) => r.insight_type)
+    expect(types).toContain('payment_risk')
+    expect(types).not.toContain('payment_delinquent')
   })
 
   it('returns renewal_alert for contract ending soon', () => {

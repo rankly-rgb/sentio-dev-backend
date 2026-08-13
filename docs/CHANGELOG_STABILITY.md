@@ -4,6 +4,31 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Issue #36 — insight dédié `payment_delinquent` (2026-08-13)
+
+Follow-up du chantier délinquence du 2026-08-06 : `is_delinquent` était câblé au churn scoring, à la segmentation et à toutes les surfaces "at risk" trouvées, mais explicitement pas à `generate-insights` ("hors périmètre, ouvre une issue"). Un compte délinquent ne remontait un insight que si ses *autres* signaux (facture en retard, churn score...) franchissaient un seuil existant — pas de carte dédiée dans le feed Insights pour un CSM parcourant le portefeuille indépendamment de l'automatisation playbook.
+
+**Changements :**
+- `_shared/insight-rules.ts` : nouveau type `payment_delinquent`, nouvelle règle `evaluatePaymentDelinquent` — même exclusion mutuelle que le signal de churn équivalent (`_shared/scoring.ts`, audit délinquence 2026-08-06, décision 1) : suppression dès que `payment_risk` s'est déjà déclenché sur la même facture confirmée en retard de 15j+ (même fait, proxy plus précis déjà surfacé). `InsightInput` gagne `is_delinquent: boolean`.
+- `generate-insights/index.ts` : `AccountRow`/SELECT/`buildInsightInput` propagent `is_delinquent`. Aucun changement au mécanisme d'auto-résolution existant — dès que `is_delinquent` repasse à `false`, la règle ne produit plus de candidat au run suivant, `syncInsights` résout l'insight actif comme pour tout autre type.
+- Migration `20260813000002_ai_insights_payment_delinquent_type.sql` : CHECK constraint `ai_insights_insight_type_check` élargie. Appliquée et vérifiée en direct sur le projet dev.
+
+**Tests** : `supabase/tests/insight-rules.test.ts` — 8 nouveaux tests (règle isolée + orchestrateur, dont l'exclusion mutuelle avec `payment_risk`). `npm run verify` vert (1004 tests).
+
+---
+
+## Issue #30 — mention de devise sur Accounts.tsx/AccountDetail.tsx (2026-08-13)
+
+Cosmétique, backlog depuis Phase 5.4 de l'audit logique métier Stripe/MRR — la mention de devise (code ISO à côté des montants) n'avait été ajoutée qu'au Dashboard et `/mrr`, jamais à ces deux écrans.
+
+**Changements** (frontend, `sentio-dev-frontend`) :
+- `Accounts.tsx` : suffixe devise sur la tuile KPI "MRR" du résumé de page (même pattern que `kpi-cards.tsx` du Dashboard) — pas de répétition par ligne du tableau, qui aurait été redondante avec un mention unique déjà visible en haut de page.
+- `AccountDetail.tsx` : même suffixe sur la carte MRR principale, masqué quand `mrr_status='unavailable'` ("Not billable" n'a pas besoin d'un code devise à côté).
+
+**Non touché, délibérément** : les colonnes MRR par ligne des tableaux (`Accounts.tsx`) et les lignes de subscription individuelles (`AccountDetail.tsx`) — une mention par page suffit à lever l'ambiguïté, répéter le code devise sur chaque ligne aurait été du bruit visuel sans gain d'information.
+
+---
+
 ## Issue #29 — `mrr_status` étendu à get-today-actions et aux 3 dernières surfaces frontend non couvertes (2026-08-13)
 
 Issue #29 listait 3 surfaces où un compte `mrr_status='unavailable'` pouvait encore s'afficher comme un `$0` trompeur au lieu de "Not billable" (pattern déjà établi ailleurs via `fr.format.mrrOrUnavailable`, `AccountDetail.tsx`/`Accounts.tsx`/`AccountFinancials.tsx`) : la page Today (`get-today-actions`, backend, ne sélectionnait pas le champ), la vue détail de segment (`SegmentDetailView.tsx`) et les cartes "top accounts" du Dashboard. L'issue notait elle-même son risque comme "jugé faible en pratique, pas vérifié empiriquement".
