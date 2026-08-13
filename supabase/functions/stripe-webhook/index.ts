@@ -587,12 +587,30 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Server misconfigured', 500)
   }
 
+  // Client créé avant la vérification de signature (Lot 3, 2026-08-13) :
+  // un webhook mal signé doit laisser une trace, pas seulement un
+  // console.warn éphémère — voir webhook_receipts, migration
+  // 20260813000004. Best-effort : une erreur d'écriture ici ne doit jamais
+  // faire échouer la réponse au webhook.
+  let supabase
+  try {
+    supabase = createServiceClient()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(JSON.stringify({ level: 'error', function_name: 'stripe-webhook', message: msg }))
+    return jsonResponse({ received: true, error: 'server_configuration_error' })
+  }
+
   const rawBody = new Uint8Array(await req.arrayBuffer())
   const signatureHeader = req.headers.get('stripe-signature')
 
   const isValid = await verifyStripeSignature(rawBody, signatureHeader, webhookSecret)
   if (!isValid) {
     console.warn('[stripe-webhook] Invalid signature')
+    supabase.from('webhook_receipts').insert({ provider: 'stripe', signature_valid: false }).then(
+      () => {},
+      (err: unknown) => console.error('[stripe-webhook] webhook_receipts insert (invalid signature) failed:', err),
+    )
     return errorResponse('Invalid signature', 401)
   }
 
@@ -603,18 +621,30 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Invalid JSON body', 400)
   }
 
+  // organization_id renseigné plus bas une fois résolu (ligne ~690) — un
+  // event valide reçu avant résolution d'org doit déjà apparaître dans le
+  // diagnostic global (webhook_receipts.organization_id IS NULL = "reçu
+  // mais org non résolue", distinct de "jamais reçu").
+  let webhookReceiptId: string | null = null
+  try {
+    const { data: receiptRow } = await supabase
+      .from('webhook_receipts')
+      .insert({
+        provider: 'stripe',
+        signature_valid: true,
+        event_type: event.type,
+        stripe_event_id: event.id,
+      })
+      .select('id')
+      .single()
+    webhookReceiptId = receiptRow?.id ?? null
+  } catch (err) {
+    console.error('[stripe-webhook] webhook_receipts insert failed:', err instanceof Error ? err.message : String(err))
+  }
+
   // Ignorer les events non routés (répondre 200 immédiatement)
   if (!ROUTED_EVENTS.has(event.type)) {
     return jsonResponse({ received: true, handled: false, type: event.type })
-  }
-
-  let supabase
-  try {
-    supabase = createServiceClient()
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    console.error(JSON.stringify({ level: 'error', function_name: 'stripe-webhook', message: msg }))
-    return jsonResponse({ received: true, error: 'server_configuration_error' })
   }
 
   // Résoudre l'organisation via le compte Stripe connecté
@@ -657,6 +687,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
     console.error('[stripe-webhook] Cannot resolve organization for event', event.id)
     // Retourner 200 pour éviter que Stripe ne retry indéfiniment
     return jsonResponse({ received: true, error: 'organization_not_found' })
+  }
+
+  // Complète le receipt (Lot 3) avec l'org maintenant résolue — fire and
+  // forget, ne doit jamais bloquer/faire échouer le traitement de l'event.
+  if (webhookReceiptId) {
+    supabase.from('webhook_receipts').update({ organization_id: organizationId }).eq('id', webhookReceiptId).then(
+      () => {},
+      (err: unknown) => console.error('[stripe-webhook] webhook_receipts org backfill failed:', err),
+    )
   }
 
   // Idempotency check: skip if this event was already processed
