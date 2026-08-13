@@ -697,9 +697,38 @@ Deno.serve(async (req: Request): Promise<Response> => {
         await handleSubscriptionEvent(supabase, organizationId, event, logger)
         break
       case 'invoice.created':
-      case 'invoice.paid':
       case 'invoice.voided':
         await handleInvoiceEvent(supabase, organizationId, event, logger)
+        break
+      case 'invoice.paid':
+        await handleInvoiceEvent(supabase, organizationId, event, logger)
+        // Fire-and-forget playbook-outcome-detector — ne jamais bloquer le webhook
+        // (chantier C — cf. specs/002-playbook-outcome-tracking/contracts/)
+        {
+          const paidInvoice = event.data.object as { customer?: string }
+          if (paidInvoice.customer) {
+            const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+            const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+            fetch(`${supabaseUrl}/functions/v1/playbook-outcome-detector`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${supabaseKey}`,
+              },
+              body: JSON.stringify({
+                organization_id: organizationId,
+                stripe_customer_id: paidInvoice.customer,
+              }),
+            }).catch((err) => {
+              console.warn(JSON.stringify({
+                level: 'warn',
+                function_name: 'stripe-webhook',
+                organization_id: organizationId,
+                message: `playbook-outcome-detector fire-and-forget failed: ${err instanceof Error ? err.message : String(err)}`,
+              }))
+            })
+          }
+        }
         break
       case 'invoice.payment_failed':
         await handleInvoiceEvent(supabase, organizationId, event, logger)

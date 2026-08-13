@@ -646,3 +646,53 @@ export const PLAYBOOK_TEMPLATES_V1: PlaybookTemplate[] = [
     }],
   },
 ]
+
+// ── Playbook Outcome Tracking (chantier C) ───────────────────
+// cf. specs/002-playbook-outcome-tracking/data-model.md
+//
+// NB : ces helpers opèrent sur `manual_executed_at`, une colonne DÉDIÉE
+// au marquage manuel (distincte de `playbook_executions.executed_at`,
+// qui existe déjà et est peuplée par défaut à `now()` à la création de
+// CHAQUE ligne par playbook-execute/playbook-scheduler — la réutiliser
+// aurait rendu l'état "not_executed" inatteignable et l'idempotence de
+// mark-executed sans effet. Voir rapport d'implémentation pour le détail.
+
+export const DEFAULT_ATTRIBUTION_WINDOW_DAYS = 14
+const MS_PER_DAY = 86400000
+
+/**
+ * Calcule `attribution_deadline_at = executedAt + attributionWindowDays`.
+ * Valeur par défaut de 14 jours si `attributionWindowDays` est absent.
+ */
+export function calculateAttributionDeadline(
+  executedAt: string | Date,
+  attributionWindowDays: number | null | undefined,
+): string {
+  const days = attributionWindowDays ?? DEFAULT_ATTRIBUTION_WINDOW_DAYS
+  const base = typeof executedAt === 'string' ? new Date(executedAt) : executedAt
+  return new Date(base.getTime() + days * MS_PER_DAY).toISOString()
+}
+
+export type AttributionStatus = 'not_executed' | 'active' | 'expired' | 'resolved'
+
+export interface AttributionExecutionState {
+  marked_executed_at: string | null
+  account_converted: boolean | null
+  attribution_deadline_at: string | null
+}
+
+/**
+ * Dérive le statut d'attribution — jamais stocké, toujours recalculé
+ * à la lecture (cf. contracts/playbook-outcome-api.md § 8.2).
+ */
+export function deriveAttributionStatus(
+  execution: AttributionExecutionState,
+  now: Date = new Date(),
+): AttributionStatus {
+  if (!execution.marked_executed_at) return 'not_executed'
+  if (execution.account_converted === true) return 'resolved'
+  if (execution.attribution_deadline_at && new Date(execution.attribution_deadline_at) > now) {
+    return 'active'
+  }
+  return 'expired'
+}

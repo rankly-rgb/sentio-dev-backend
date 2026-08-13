@@ -23,6 +23,17 @@ import {
   type ExecutionFrequency,
 } from '../_shared/playbook-engine.ts'
 
+// ── Validation link_redirect_url (chantier C, T022) ──────────
+// Anti-open-redirect : validée à l'écriture (schéma https: obligatoire),
+// jamais interprétée depuis une requête de lien traçable (playbook-link).
+export function isValidHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 // ── Entrypoint ──────────────────────────────────────────────
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -194,6 +205,9 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
   if (body.priority && !(VALID_PRIORITIES as readonly string[]).includes(body.priority as string)) {
     return errorResponse(`priority must be one of: ${VALID_PRIORITIES.join(', ')}`, 400)
   }
+  if (body.link_redirect_url && !isValidHttpsUrl(body.link_redirect_url as string)) {
+    return errorResponse('link_redirect_url must be a valid https:// URL', 400)
+  }
 
   const rawDesc   = (body.description    as string | null) ?? null
   const rawDescEn = (body.description_en as string | null) ?? null
@@ -210,6 +224,7 @@ async function handleCreate(supabase: SupabaseClient, req: Request, authOrgId: s
     playbook_type: (body.playbook_type as string) ?? 'manual',
     template_category: (body.template_category as string) ?? null,
     priority: (body.priority as string) ?? 'medium',
+    link_redirect_url: (body.link_redirect_url as string) ?? null,
     source: (body.source as string) ?? 'manual',
     segment_id: (body.segment_id as string) ?? null,
     created_by: (body.created_by as string) ?? null,
@@ -409,6 +424,13 @@ async function handleUpdate(supabase: SupabaseClient, id: string, req: Request, 
       return errorResponse(`priority must be one of: ${VALID_PRIORITIES.join(', ')}`, 400)
     }
     updates.priority = body.priority
+  }
+
+  if (body.link_redirect_url !== undefined) {
+    if (body.link_redirect_url !== null && !isValidHttpsUrl(body.link_redirect_url as string)) {
+      return errorResponse('link_redirect_url must be a valid https:// URL', 400)
+    }
+    updates.link_redirect_url = body.link_redirect_url
   }
 
   if (body.is_automated !== undefined) updates.is_automated = body.is_automated
