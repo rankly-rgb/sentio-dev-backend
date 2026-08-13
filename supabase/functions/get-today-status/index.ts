@@ -57,7 +57,7 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
-import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { verifyUserAuth, AuthError, assertTrialActive } from '../_shared/auth.ts'
 
 const AT_RISK_CHURN_THRESHOLD = 70
 const AT_RISK_RATIO_THRESHOLD = 0.3
@@ -150,6 +150,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const msg = err instanceof Error ? err.message : String(err)
     console.error(JSON.stringify({ level: 'error', function_name: 'get-today-status', message: msg }))
     return errorResponse('Server configuration error', 500)
+  }
+
+  try {
+    await assertTrialActive(supabase, auth.organizationId)
+  } catch (err) {
+    if (err instanceof AuthError) return errorResponse(err.message, err.status)
+    throw err
   }
 
   const orgId = auth.organizationId

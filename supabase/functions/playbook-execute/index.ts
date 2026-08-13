@@ -7,7 +7,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
-import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { verifyUserAuth, AuthError, assertTrialActive } from '../_shared/auth.ts'
 import { createLogger } from '../_shared/structured-logger.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import {
@@ -80,6 +80,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return errorResponse('Authentication failed', 401)
     }
     body.organization_id = auth.organizationId
+
+    // Trial gate — utilisateur réel uniquement. Le chemin isInternalTrigger
+    // (cron/DB trigger) n'est jamais gaté : c'est une automatisation déjà
+    // déclenchée, pas un utilisateur qui se heurte au mur en direct — la
+    // bloquer produirait un échec silencieux plutôt qu'un signal clair.
+    try {
+      await assertTrialActive(supabase, auth.organizationId)
+    } catch (err) {
+      if (err instanceof AuthError) return errorResponse(err.message, err.status)
+      throw err
+    }
   }
 
   const correlationId = crypto.randomUUID()
