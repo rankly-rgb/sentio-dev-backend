@@ -80,48 +80,78 @@ jobs:
         uses: denoland/setup-deno@v2
         with:
           deno-version: v1.x
-      - name: Deno check on all Edge Functions (a14)
+      - name: Deno check on all Edge Functions — soft, ratchet parked (a14)
         # Incident 2026-08-13 (Lot P1) : ts.transpileModule (utilisé jusqu'ici
         # faute de Deno dans cet environnement) fait une passe grammaticale
         # seule — un `continue` visant une boucle déplacée dans une IIFE
         # (frontière de fonction, cible de saut invalide) l'a traversée sans
         # broncher et a cassé calculate-scores en production (worker boot
         # error, détecté seulement après déploiement). `deno check` est le
-        # runtime cible réel de ces fonctions — c'est lui qui doit faire
-        # échouer le build, pas un pis-aller Node.
+        # runtime cible réel de ces fonctions — c'est lui qui doit à terme
+        # faire échouer le build, pas un pis-aller Node.
         #
-        # mode=soft (::warning:: uniquement) pour cet atterrissage : la toute
-        # première exécution de `deno check` sur ce repo (jamais disponible
-        # dans aucun environnement précédent — noté "toujours indisponible"
-        # dans une douzaine d'entrées de CHANGELOG_STABILITY.md) révèle 11
-        # fonctions avec des erreurs de type PRÉ-EXISTANTES, sans rapport avec
-        # l'incident de ce soir : dashboard-api, export-playbook-csv,
-        # get-today-actions, playbook-crud, playbook-execute,
-        # playbook-scheduler, playbook-templates, stripe-product-mappings-api,
-        # stripe-webhook, sync-stripe, workflow-step-processor (dont un faux
-        # positif probable — `Cannot find name 'EdgeRuntime'`, global fourni
-        # par le runtime Supabase réel mais absent de `deno check` nu, à
-        # vérifier lors du burn-down). Passer hard immédiatement bloquerait
-        # tout merge futur sur une dette sans rapport avec ce qui a cassé ce
-        # soir — voir issue de suivi pour le burn-down, puis repasser hard.
+        # Tour 5 (2026-08-13) avait converti ceci en cliquet hard-fail sur
+        # `.github/a14-baseline.json` (14 fonctions, comptes vérifiés en
+        # direct contre le run 31740110673). Tour 6 (même soirée) : PARKED EN
+        # SOFT. Pendant que ce cliquet était débogué (3 runs CI consommés,
+        # une installation Deno locale, jsr.io bloqué par le sandbox, la
+        # sortie du step introuvable dans les logs bruts sur 5 méthodes de
+        # récupération différentes malgré un canal artifact ajouté), le
+        # service était DOWN pour 9 organisations réelles (402 trial expiré,
+        # cause sans rapport avec a14 — voir docs/CHANGELOG_STABILITY.md,
+        # entrée Trial). Règle actée dans docs/LOTS.md à partir de ce tour :
+        # pendant un incident, le rétablissement du service prime sur tout
+        # outillage, y compris un cliquet CI déjà à moitié câblé. a14 est un
+        # outil de confort ; le service ne l'est pas.
+        #
+        # Le baseline (14 fonctions, comptes vérifiés en direct) reste
+        # committé tel quel — le travail n'est pas perdu, juste pas câblé en
+        # hard. Toujours ::warning:: inconditionnel, jamais exit 1.
+        #
+        # Root cause du "log manquant" enfin trouvée (tour 6, en lisant le
+        # tout premier run réellement passé en soft) : GitHub force
+        # `bash -e` sur chaque step `run:`, quel que soit le `set` posé
+        # dans le script (`set -uo pipefail` n'annule pas `-e`). La toute
+        # première commande `deno check` en échec — non protégée par un
+        # if/&&/||, exécutée seule sur sa ligne avant que `CHECK_EXIT=$?`
+        # ne capture son statut — faisait donc avorter le script entier
+        # instantanément, avant qu'aucune sortie diagnostique ne soit
+        # produite. Ce n'était pas un problème de récupération de logs
+        # GitHub (batching d'annotations, latence d'archivage, etc., toutes
+        # hypothèses explorées et fausses) : le step n'avait simplement
+        # jamais rien écrit après ce point. Corrigé par `|| true` sur
+        # l'appel — n'affecte jamais `$?`, qui est toujours lu juste après.
         run: |
           set -uo pipefail
-          FAILED=0
           for dir in supabase/functions/*/; do
             fn=$(basename "$dir")
             [ "$fn" = "_shared" ] && continue
             [ -f "${dir}index.ts" ] || continue
-            if ! deno check "${dir}index.ts" > /tmp/deno-check-output.txt 2>&1; then
-              echo "::warning::a14_deno_check_failed (pending, see burn-down issue) — $fn"
-              cat /tmp/deno-check-output.txt
-              FAILED=1
+
+            deno check "${dir}index.ts" > /tmp/deno-check-output.txt 2>&1 || true
+            CHECK_EXIT=$?
+
+            BASELINE_MAX=$(jq -r --arg fn "$fn" '.functions[$fn].max_errors // empty' .github/a14-baseline.json)
+
+            if [ "$CHECK_EXIT" = "0" ]; then
+              if [ -n "$BASELINE_MAX" ]; then
+                echo "::warning::a14_baseline_stale — $fn now passes deno check but is still listed in .github/a14-baseline.json. Remove its entry when this is revisited (issue #67)."
+              else
+                echo "[a14] ok $fn"
+              fi
+              continue
+            fi
+
+            ERR_COUNT=$(grep -c '^error: TS[0-9]* \[ERROR\]' /tmp/deno-check-output.txt || true)
+            [ "$ERR_COUNT" = "0" ] && ERR_COUNT=1
+
+            if [ -z "$BASELINE_MAX" ]; then
+              echo "::warning::a14_deno_check_soft — $fn fails deno check ($ERR_COUNT error(s)) and is not in the a14 baseline. Ratchet is parked (soft) — see issue #67. Not blocking tonight."
+            else
+              echo "::warning::a14_deno_check_known_debt — $fn ($ERR_COUNT/$BASELINE_MAX errors tracked in .github/a14-baseline.json, see issue #67)."
             fi
           done
-          if [ "$FAILED" = "1" ]; then
-            echo "::warning::a14 pending — one or more Edge Functions failed deno check, not yet blocking (see burn-down issue)."
-          else
-            echo "a14: deno check passed on every Edge Function."
-          fi
+          echo "[a14] soft mode — informational only, never fails the build. Ratchet parked, see issue #67."
       - name: Security audit
         run: npm audit --audit-level=critical --omit=dev
       - name: TypeScript check

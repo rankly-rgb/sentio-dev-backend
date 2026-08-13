@@ -23,6 +23,43 @@ Toute migration passe par un fichier versionné + `db push`, sans exception.
 Gardes CI mécaniques : `a10_migration_version_drift`,
 `a11_deploy_edge_functions_did_not_run` (`supabase-deploy.yml`).
 
+## Règle permanente — pendant un incident, le rétablissement du service prime sur tout
+
+Posée le 2026-08-13 (tour 6), après l'avoir apprise à retardement plutôt
+qu'avant : pendant qu'un incident réel était en cours (9 organisations
+recevant un 402 sur les 5 écrans principaux, application inutilisable),
+plusieurs runs CI et une bonne partie d'un tour ont été consommés à
+déboguer la récupération de logs GitHub Actions pour un cliquet de
+vérification de types (`a14`) — un outil de confort, pas le service
+lui-même. La règle n'existait pas à ce moment, donc ce n'était pas un
+manquement ; elle existe à partir de maintenant, et s'applique
+rétroactivement à toute session future qui se retrouve dans la même
+situation :
+
+- **Le rétablissement du service passe avant la correction de la cause,
+  qui passe elle-même avant tout outillage.** Un correctif qui ne fait que
+  rendre l'erreur plus lisible (un meilleur message, un écran dédié) sans
+  changer l'état bloquant ne compte pas comme un rétablissement — voir
+  tour 5 : le correctif frontend `TrialExpiredState` était juste mais ne
+  rétablissait rien tant que les 9 organisations restaient effectivement
+  gatées côté données.
+- **Aucune amélioration d'outillage, de CI ou d'observabilité ne passe
+  avant le retour du service**, même si elle est déjà à moitié câblée et
+  semble proche d'aboutir. "Presque fini" n'est pas une raison de
+  continuer pendant que le service est down.
+- **Si un obstacle d'outillage résiste à deux tentatives de diagnostic
+  distinctes pendant une fenêtre d'incident, il est mis de côté** (état le
+  plus sûr disponible — ex. repasser un cliquet en mode soft plutôt que de
+  le laisser bloquer un déploiement) et documenté dans une issue dédiée,
+  jamais poursuivi davantage dans cette même fenêtre. Reprendre à froid,
+  hors incident.
+- Un service rétabli par un contournement de données assumé (ex. prolonger
+  une date d'expiration plutôt que d'attendre un correctif de code complet)
+  est un résultat acceptable et préférable à un service qui reste down
+  pendant que la cause racine "propre" est développée — à condition que
+  l'état AVANT soit consigné (réversibilité) et que le choix soit documenté
+  (pourquoi ce champ, pourquoi cette valeur, pas une autre).
+
 ---
 
 ## Suite Lot V — P0/P1/P2/P3 (2026-08-13, tour 3)
