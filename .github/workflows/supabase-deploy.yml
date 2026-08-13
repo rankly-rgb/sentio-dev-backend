@@ -48,7 +48,48 @@ jobs:
           fi
 
       - name: Push database migrations
+        id: push_migrations
         run: supabase db push --include-all
+
+      - name: Assert no migration version drift (a10)
+        # Lot P0 (2026-08-13) — la leçon des quatre jours d'invisibilité :
+        # mcp__Supabase__apply_migration génère sa propre version horodatée à
+        # l'appel, décorrélée du nom de fichier git. Une migration appliquée
+        # ainsi laisse une entrée fantôme dans schema_migrations qu'aucun
+        # fichier local ne référence — "Repair remote-only migration
+        # versions" ci-dessus est une auto-guérison best-effort (parse
+        # `supabase migration list`), pas une garantie. Cette assertion est
+        # la garantie : une divergence devient une erreur de build explicite,
+        # jamais une découverte fortuite des jours plus tard. Voir CLAUDE.md
+        # ("Migrations — jamais apply_migration") pour l'interdiction que
+        # cette assertion fait respecter.
+        run: |
+          set -euo pipefail
+          LOCAL_VERSIONS=$(ls supabase/migrations/*.sql | xargs -n1 basename | grep -oE '^[0-9]{14}' | sort -u)
+          QUERY="SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"
+          SQL_BODY=$(jq -Rcs '{"query":.}' <<< "$QUERY")
+          RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/database/query" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$SQL_BODY")
+          CODE=$(printf '%s' "$RESULT" | tail -1)
+          BODY=$(printf '%s' "$RESULT" | head -1)
+          if [ "$CODE" != "200" ] && [ "$CODE" != "201" ]; then
+            echo "::error::a10_migration_version_drift — Management API returned HTTP $CODE, cannot verify migration drift. Body: $BODY"
+            exit 1
+          fi
+          REMOTE_VERSIONS=$(printf '%s' "$BODY" | jq -r '.[].version' | sort -u)
+          MISSING_LOCAL=$(comm -23 <(echo "$REMOTE_VERSIONS") <(echo "$LOCAL_VERSIONS"))
+          MISSING_REMOTE=$(comm -13 <(echo "$REMOTE_VERSIONS") <(echo "$LOCAL_VERSIONS"))
+          if [ -n "$MISSING_LOCAL" ] || [ -n "$MISSING_REMOTE" ]; then
+            echo "::error::a10_migration_version_drift — supabase_migrations.schema_migrations and supabase/migrations/ have diverged."
+            [ -n "$MISSING_LOCAL" ] && echo "Versions tracked remotely with no matching file in supabase/migrations/: $MISSING_LOCAL"
+            [ -n "$MISSING_REMOTE" ] && echo "Migration files with no matching tracked version: $MISSING_REMOTE"
+            echo "This is the exact failure class that broke 'supabase db push' silently from 2026-08-09 to 2026-08-13 — see CLAUDE.md."
+            exit 1
+          fi
+          echo "a10: no migration version drift ($(echo "$LOCAL_VERSIONS" | wc -l | tr -d ' ') versions, local and remote match exactly)."
 
       - name: Verify accounts_with_priority has no column drift
         # Incident 2026-08-05 (docs/RUNBOOK.md "Deploying backend ahead of
@@ -249,6 +290,11 @@ jobs:
           [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]       && ARGS="$ARGS ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"
           [ -n "${{ secrets.STRIPE_SECRET_KEY }}" ]        && ARGS="$ARGS STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }}"
           [ -n "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ]    && ARGS="$ARGS STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}"
+          # Lot V/P0 (2026-08-13) : STRIPE_BILLING_WEBHOOK_SECRET manquait de
+          # cette liste — même en créant le GitHub Secret, il n'aurait jamais
+          # été poussé vers Supabase. stripe-billing-webhook 500 sans lui
+          # ("Server misconfigured") avant même d'écrire webhook_receipts.
+          [ -n "${{ secrets.STRIPE_BILLING_WEBHOOK_SECRET }}" ] && ARGS="$ARGS STRIPE_BILLING_WEBHOOK_SECRET=${{ secrets.STRIPE_BILLING_WEBHOOK_SECRET }}"
           if [ -n "$ARGS" ]; then
             supabase secrets set $ARGS
           else
@@ -256,6 +302,7 @@ jobs:
           fi
 
       - name: Deploy Edge Functions
+        id: deploy_edge_functions
         run: supabase functions deploy
 
       - name: Schedule compute-peer-benchmarks (daily 02:00 UTC)
@@ -322,3 +369,45 @@ jobs:
           );"
 
           echo "✓ Cron schedule créé : compute-peer-benchmarks-daily @ 0 2 * * *"
+
+      - name: Assert Deploy Edge Functions actually ran and redeployed (a11)
+        # Lot P0 (2026-08-13) : ce déploiement a échoué silencieusement à
+        # l'étape "Push database migrations" pendant 4 jours (2026-08-09 à
+        # 2026-08-13, drift documenté en a10) — "Deploy Edge Functions"
+        # affichait `skipped`, le job entier `failure`, mais rien ne
+        # traduisait ce skip en un signal impossible à rater : le run rouge
+        # existait bien dans l'onglet Actions, mais aucun garde-fou ne
+        # transformait son silence en incident. `if: always()` : cette
+        # étape doit s'exécuter MÊME si tout ce qui précède a échoué ou a
+        # été sauté, sinon elle hérite du même silence qu'elle existe pour
+        # casser.
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.deploy_edge_functions.outcome }}" != "success" ]; then
+            echo "::error::a11_deploy_edge_functions_did_not_run — 'Deploy Edge Functions' step outcome: '${{ steps.deploy_edge_functions.outcome }}' (empty means it never ran — an earlier step failed first). Code merged to main is NOT live on the Supabase project. See CLAUDE.md, section Migrations, for the incident this exact failure class caused."
+            exit 1
+          fi
+          # Un `supabase functions deploy` qui exit 0 sans rien déployer
+          # réellement (token silencieusement vide, flag mal formé...)
+          # passerait le check ci-dessus sans être détecté — deuxième
+          # garde, indépendante : au moins une fonction doit montrer un
+          # `updated_at` réellement récent (dans les 15 dernières minutes).
+          RESULT=$(curl -s -w "\n%{http_code}" \
+            "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/functions" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN")
+          CODE=$(printf '%s' "$RESULT" | tail -1)
+          BODY=$(printf '%s' "$RESULT" | head -1)
+          if [ "$CODE" != "200" ]; then
+            echo "::error::a11_deploy_edge_functions_unverifiable — could not list Edge Functions via Management API (HTTP $CODE) to confirm a real redeploy happened. Body: $BODY"
+            exit 1
+          fi
+          NOW_S=$(date +%s)
+          MOST_RECENT_MS=$(printf '%s' "$BODY" | jq -r '[.[].updated_at] | max')
+          MOST_RECENT_S=$((MOST_RECENT_MS / 1000))
+          AGE_S=$((NOW_S - MOST_RECENT_S))
+          if [ "$AGE_S" -gt 900 ]; then
+            echo "::error::a11_deploy_edge_functions_stale — the step reported success but no Edge Function shows an updated_at within the last 15 minutes (most recent is ${AGE_S}s old). The deploy likely no-op'd silently."
+            exit 1
+          fi
+          echo "a11: Deploy Edge Functions ran and redeployed at least one function ${AGE_S}s ago."
