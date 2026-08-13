@@ -1009,11 +1009,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
           batchOffset += batch.length
         }
 
-        if (batchFailed) continue
+        // P1 (2026-08-13) : ces deux `continue` visaient à l'origine la
+        // boucle `for (const org of orgs)` — devenus illégaux (frontière de
+        // fonction) une fois ce corps déplacé dans l'IIFE `workPromise`
+        // ci-dessus. `return 'done'` a le même effet net : sortir de ce
+        // traitement d'org immédiatement, sans toucher au org suivant (géré
+        // par la boucle externe après résolution de la race).
+        if (batchFailed) return 'done'
 
         if (allAccounts.length === 0) {
           await logger.complete({ accounts_scored: 0, segments_assigned: 0 })
-          continue
+          return 'done'
         }
 
         // ── Outbound webhook dispatch + Playbook executor (fire-and-forget) ──
