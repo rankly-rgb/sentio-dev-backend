@@ -198,6 +198,16 @@ Un playbook sans `eligibility_criteria` (ou avec `conditions: []`) ne matche plu
 - Pas de package sans justification
 - Code explicite > patterns cleveres
 
+## Migrations — jamais `apply_migration`
+
+**IMPORTANT — règle permanente (2026-08-13, Lot P0)** : `mcp__Supabase__apply_migration` (ou tout outil équivalent qui applique une migration directement contre le projet sans passer par un fichier versionné) **ne doit plus jamais être utilisé sur ce projet.**
+
+**Le piège, précisément** : `apply_migration` génère sa propre version interne — un horodatage pris au moment de l'appel — pour tracer la migration dans `supabase_migrations.schema_migrations`. Cette version est **décorrélée du nom du fichier git** que le même travail finit par produire (ex. appelé à 17:23:55 → tracé sous `20260813172355`, alors que le fichier committé s'appelle `20260813000003_xxx.sql`). Résultat : une entrée fantôme dans `schema_migrations`, sans fichier local correspondant, irréconciliable par `supabase db push` autrement que par une réparation manuelle de la table de tracking. Une seule occurrence suffit à bloquer `db push` indéfiniment — pas seulement pour la migration en cause, mais pour **toute migration future**, puisque `db push` refuse d'avancer tant que l'historique distant contient une version que l'historique local ne peut pas expliquer.
+
+**Ce que ça a coûté, une fois** : ce piège, répété au fil de plusieurs migrations appliquées ainsi "pour aller vite" pendant une session d'audit, a cassé `supabase db push` en CI de façon silencieuse à partir du 2026-08-09. Chaque run de `supabase-deploy.yml` échouait sur "Push database migrations", donc **"Deploy Edge Functions" ne s'est plus exécuté pendant 4 jours** — tout ce qui a été mergé sur `main` pendant cette fenêtre (Lots 1 à 5 inclus) était vert en CI de test (`ci.yml`, séparée), donc "mergé", sans jamais être live sur le projet. Trouvé uniquement par une vérification rétroactive explicite, pas par un signal du pipeline lui-même. Voir `docs/CHANGELOG_STABILITY.md` / `docs/LOTS.md` (Lot V) pour le détail complet.
+
+**La règle** : toute migration passe par un fichier versionné dans `supabase/migrations/{YYYYMMDDHHMMSS}_description.sql`, committé, et appliquée exclusivement via `supabase db push` (localement ou en CI). `mcp__Supabase__execute_sql` reste approprié pour la vérification en lecture (et, en dernier recours documenté, pour appliquer manuellement le contenu exact d'un fichier déjà écrit — jamais pour improviser un DDL qui n'existe pas encore en fichier). Deux garde-fous CI font désormais respecter ceci mécaniquement, pas seulement par consigne : `a10_migration_version_drift` (assertion `hard`, `supabase-deploy.yml` — toute divergence entre `schema_migrations` et `supabase/migrations/` fait échouer le build) et `a11_deploy_edge_functions_did_not_run` (assertion `hard` — un skip silencieux de "Deploy Edge Functions" devient une erreur explicite, pas une découverte quatre jours plus tard).
+
 ## Git
 
 - Branche par tâche : `feat/`, `fix/`, `refactor/`, `docs/`

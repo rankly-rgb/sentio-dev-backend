@@ -11,6 +11,18 @@ Mettre à jour ce fichier au fur et à mesure (nouveau lot, changement de
 spec, lot terminé → déplacer un résumé dans `CHANGELOG_STABILITY.md` et
 retirer l'entrée d'ici).
 
+## Règle permanente — jamais `mcp__Supabase__apply_migration`
+
+Voir `CLAUDE.md`, section "Migrations — jamais `apply_migration`", pour le
+détail complet du piège et de son coût (4 jours de "Deploy Edge Functions"
+silencieusement jamais exécuté, 2026-08-09 → 2026-08-13). Résumé : cet
+outil génère une version de tracking décorrélée du nom de fichier git,
+créant une entrée fantôme irréconciliable dans
+`supabase_migrations.schema_migrations` qui bloque `db push` indéfiniment.
+Toute migration passe par un fichier versionné + `db push`, sans exception.
+Gardes CI mécaniques : `a10_migration_version_drift`,
+`a11_deploy_edge_functions_did_not_run` (`supabase-deploy.yml`).
+
 ---
 
 ## Lot V — Vérification rétroactive (2026-08-13, priorité absolue)
