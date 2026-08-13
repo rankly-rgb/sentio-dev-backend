@@ -136,6 +136,14 @@ Hors périmètre de calcul MRR direct dans cette itération (la phase courante d
 
 **Différence attendue vs Stripe natif** : sans objet directement, mais côté support — si un client demande "pourquoi mon churn de mars n'a pas bougé après mon remboursement d'avril ?", la réponse est : c'est un choix assumé (pas de réécriture silencieuse de l'historique), un vrai restatement rétroactif est future work.
 
+### 10.1 Lot 4 (2026-08-13) — fermeture du gap `new`, `expansion`/`contraction` marqués `estimated`
+
+Audit Phase 0 (2026-08-13) : la règle ci-dessus ("jamais `new Date()`") n'était en pratique respectée que pour `churn` dans le chemin batch (`sync-stripe`, via `subscriptions.canceled_at`) — `new`/`expansion`/`contraction` étaient écrasés à la date du run. `sub.created` (une date Stripe réelle) était déjà lu en mémoire sans jamais être ni persisté ni utilisé. Fermé pour `new` : nouvelle colonne `subscriptions.stripe_created_at`, utilisée pour dater un mouvement `new` à la date de première souscription active connue du compte (le plus ancien `stripe_created_at` parmi ses subscriptions non-annulées) — même principe que `canceled_at` pour `churn`.
+
+`expansion`/`contraction` restent structurellement indatables dans ce chemin (diff avant/après entre deux snapshots, sans événement Stripe unique rattachable à un changement de MRR partiel — confirmé, aucune colonne persistée ne le permettrait). Nouvelle colonne `mrr_movements.provenance` (`'live' | 'backfill' | 'estimated'`, défaut `'live'`) : ces deux types sont désormais explicitement marqués `'estimated'` plutôt que de laisser une date de traitement se faire passer pour une date réelle sans distinction possible (S1, "no data ≠ neutral data" appliqué au temps). Le chemin `stripe-webhook` (event-driven, `event.created` toujours disponible et précis) reste `'live'` pour tous les types, inchangé.
+
+**Analyse de collision `ON CONFLICT`** (index partiel `mrr_movements_sync_idempotency`, clé `(organization_id, account_id, movement_date, movement_type) WHERE stripe_event_id IS NULL`) : dater `new`/`churn` avec une date réelle plutôt que "aujourd'hui" n'augmente pas le risque de collision — `classifyMovement` opère sur un snapshot MRR au niveau compte (pas par subscription), donc une transition `0 → positif` (`new`) ou `positif → 0` (`churn`) ne peut structurellement se produire qu'une fois par compte tant qu'elle n'est pas suivie d'une transition inverse (auquel cas le type de mouvement change aussi, donc la clé de conflit change avec). Un rejeu du même calcul sur une même transition historique (ex. run de sync répété) collisionne désormais correctement sur la **même** date réelle au lieu de produire une ligne différente à chaque jour de rattrapage — la contrainte existante n'a pas eu besoin d'être modifiée, elle se comporte mieux qu'avant avec des dates réelles.
+
 ---
 
 ## 10bis. Concurrence `sync-stripe` × `stripe-webhook` pendant un restatement

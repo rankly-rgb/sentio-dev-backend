@@ -163,6 +163,7 @@ async function handleSubscriptionEvent(
         trial_end_date: trialEnd,
         cancel_at: cancelAt,
         canceled_at: canceledAt,
+        stripe_created_at: sub.created ? new Date(sub.created * 1000).toISOString() : null,
         ...(event.created && { last_event_created_at: new Date(event.created * 1000).toISOString() }),
       },
       { onConflict: 'stripe_sub_id', ignoreDuplicates: false },
@@ -282,6 +283,10 @@ async function handleSubscriptionEvent(
         amount_cents: movement.amount_cents,
         movement_date: movementDate,
         stripe_event_id: event.id,
+        // Event-driven : event.created est toujours une date Stripe réelle
+        // pour ce chemin (jamais 'estimated', contrairement au diff batch
+        // de sync-stripe pour expansion/contraction — voir Lot 4).
+        provenance: 'live',
       })
 
     if (!mvtError) {
@@ -510,6 +515,7 @@ interface StripeSubscription extends StripeSubscriptionLike {
   canceled_at?: number | null
   current_period_start?: number | null
   current_period_end?: number | null
+  created?: number
 }
 
 interface StripeInvoice {

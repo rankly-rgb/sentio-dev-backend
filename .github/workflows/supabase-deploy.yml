@@ -156,12 +156,18 @@ jobs:
           run_query "a3_delinquent_in_low_band" "hard" "
             select count(*) as n from accounts where is_delinquent = true and churn_risk_band = 'low';"
 
-          # a4 — Lot 4 guard (movement_date provenance), pending until subscriptions.stripe_created_at exists.
-          run_query "a4_new_movement_misdated" "soft" "
+          # a4 — Lot 4 guard: a 'new' movement dated today for an account
+          # whose subscription has a known stripe_created_at more than 7
+          # days old must be marked provenance != 'live' (falls back to
+          # 'estimated' only if the real date was genuinely unavailable at
+          # write time) — never a silent regression to today's date despite
+          # good data existing.
+          run_query "a4_new_movement_misdated" "hard" "
             select count(*) as n from mrr_movements m
             join subscriptions s on s.account_id = m.account_id
-            where m.movement_type = 'new' and m.movement_date = current_date
-              and s.created_at < now() - interval '7 days';"
+            where m.movement_type = 'new' and m.provenance = 'live'
+              and m.movement_date = current_date
+              and s.stripe_created_at < now() - interval '7 days';"
 
           # a5 — Lot 6 guard (mrr_movements generation), pending until backfill lands.
           run_query "a5_synced_org_with_zero_movements" "soft" "

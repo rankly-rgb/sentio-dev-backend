@@ -23,7 +23,7 @@ import {
   type SubscriptionMrrResult,
   type StripeSubscriptionLike,
 } from '../_shared/mrr-engine.ts'
-import { dedupeMovementRows, writeMrrMovementsSync, type MrrMovementSyncRow } from '../_shared/mrr-movements-writer.ts'
+import { dedupeMovementRows, writeMrrMovementsSync, resolveMovementDateAndProvenance, type MrrMovementSyncRow } from '../_shared/mrr-movements-writer.ts'
 import { getTier } from '../_shared/subscription-tiers.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
@@ -377,12 +377,17 @@ async function syncSubscriptions(
   const orgSubscriptionCurrencies: Array<{ currency: string | null }> = []
   // canceled_at le plus récent par compte — permet de dater un mouvement
   // `churn` à la date effective d'annulation Stripe plutôt qu'à la date du
-  // run de sync (docs/openspec.md §10). Pas d'équivalent pour new/expansion/
-  // contraction dans ce chemin batch : sync-stripe compare deux snapshots
-  // sans qu'un événement Stripe unique ne soit rattachable à ces
-  // transitions (contrairement à stripe-webhook, event-driven — voir
-  // handleSubscriptionEvent). Limitation documentée, pas un oubli.
+  // run de sync (docs/openspec.md §10).
   const accountLatestCanceledAt = new Map<string, number>()
+  // Lot 4 (2026-08-13) : sub.created le plus ancien parmi les subscriptions
+  // non-annulées d'un compte — permet de dater un mouvement `new` à la date
+  // Stripe réelle de première souscription active plutôt qu'à la date du
+  // run, même principe que accountLatestCanceledAt pour `churn`. Pas
+  // d'équivalent pour expansion/contraction dans ce chemin batch : aucune
+  // colonne persistée ne capture un changement de MRR partiel à un instant
+  // donné (audit Phase 0, confirmé) — ces deux types restent datés à la
+  // date de traitement, marqués provenance='estimated'.
+  const accountEarliestActiveCreatedAt = new Map<string, number>()
 
   // Collect all subscription rows — batch upsert at the end
   const subRows: Record<string, unknown>[] = []
@@ -397,6 +402,13 @@ async function syncSubscriptions(
     if (sub.status === 'canceled' && sub.canceled_at) {
       const existing = accountLatestCanceledAt.get(accountId) ?? 0
       if (sub.canceled_at > existing) accountLatestCanceledAt.set(accountId, sub.canceled_at)
+    }
+
+    if (sub.status !== 'canceled' && sub.created) {
+      const existingEarliest = accountEarliestActiveCreatedAt.get(accountId)
+      if (existingEarliest === undefined || sub.created < existingEarliest) {
+        accountEarliestActiveCreatedAt.set(accountId, sub.created)
+      }
     }
 
     // Compteurs de profil de facturation (Phase 3) — indépendants du statut,
@@ -426,6 +438,7 @@ async function syncSubscriptions(
       trial_end_date: sub.trial_end ? new Date(sub.trial_end * 1000).toISOString().split('T')[0] : null,
       cancel_at: sub.cancel_at ? new Date(sub.cancel_at * 1000).toISOString().split('T')[0] : null,
       canceled_at: sub.canceled_at ? new Date(sub.canceled_at * 1000).toISOString() : null,
+      stripe_created_at: sub.created ? new Date(sub.created * 1000).toISOString() : null,
     })
 
     // Collect metadata from billable subs for account MRR propagation.
@@ -724,13 +737,15 @@ async function syncSubscriptions(
     })
 
     if (movement) {
-      // Pour un churn, dater à la date effective d'annulation Stripe
-      // (canceled_at) quand connue — plus précis que "aujourd'hui" pour un
-      // compte annulé depuis plusieurs jours mais seulement rattrapé par ce
-      // run (docs/openspec.md §10). Pas d'équivalent pour les autres types
-      // de mouvement dans ce chemin batch (voir commentaire plus haut).
-      const canceledAtMs = movement.movement_type === 'churn' ? accountLatestCanceledAt.get(acctId) : undefined
-      const movementDate = canceledAtMs ? new Date(canceledAtMs * 1000).toISOString().split('T')[0] : today
+      // Lot 4 (2026-08-13, docs/openspec.md §10.1) : dating extrait dans
+      // _shared/mrr-movements-writer.ts::resolveMovementDateAndProvenance
+      // pour être testable directement.
+      const { movementDate, provenance } = resolveMovementDateAndProvenance(
+        movement.movement_type,
+        accountLatestCanceledAt.get(acctId),
+        accountEarliestActiveCreatedAt.get(acctId),
+        today,
+      )
 
       movementRows.push({
         organization_id: organizationId,
@@ -738,6 +753,7 @@ async function syncSubscriptions(
         movement_type: movement.movement_type,
         amount_cents: movement.amount_cents,
         movement_date: movementDate,
+        provenance,
       })
     }
   }
