@@ -4,6 +4,26 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Billing — quota de comptes affiché mais jamais appliqué (2026-08-13)
+
+Audit readiness client 2026-08 : `is_over_limit`/`max_accounts` (`subscription-status`, `_shared/subscription-tiers.ts::isOverAccountLimit`) n'étaient utilisés que pour l'affichage — un avertissement dans `BillingSection.tsx` (`overLimitWarning`), jamais pour limiter quoi que ce soit côté backend. Un org Free (plafond 30 comptes) pouvait en tracker sans limite. Confirmé en base sur le projet dev : un org `growth` (plafond 200) à 2688 comptes, trois orgs `free` (plafond 30) entre 422 et 432 comptes chacun.
+
+**Décision de scope** : `is_over_limit` est aujourd'hui un avertissement, pas un blocage (`BillingSection.tsx` affiche un message, ne désactive rien) — le correctif suit cette même logique plutôt que d'en inventer une plus dure sans validation produit. Plafonne uniquement la **croissance** (nouveaux `stripe_customer_id` jamais vus par l'org), jamais les comptes déjà trackés : geler un client existant serait une régression bien pire que plafonner l'ajout de nouveaux — et le cas réel ci-dessus (comptes déjà 10x-90x au-delà du plafond) confirme que ce choix est le seul qui n'aurait aucun effet destructeur au déploiement.
+
+**Changements :**
+- `sync-stripe/index.ts::syncCustomers` : avant de construire les lignes à upserter, résout le tier de l'org (`getTier`) et l'ensemble des `stripe_customer_id` déjà trackés. Pour chaque client Stripe rencontré pendant la pagination : déjà tracké → toujours synchronisé (mise à jour) ; nouveau → synchronisé seulement si le plafond du tier n'est pas encore atteint (compte les nouveaux comptes ajoutés au fil de ce même run, pas seulement l'état de départ). Même convention de comptage que `subscription-status.accounts_count` (toutes les lignes `accounts` de l'org, sans filtre de statut).
+- **Jamais silencieux** (principe déjà établi pour `accounts_at_risk_unpriced`/`get-today-status` etc.) : `new_accounts_skipped_by_quota` compté, loggé (`console.warn`), inclus dans `data_syncs.sync_summary` et dans la réponse JSON de `sync-stripe` quand > 0 — même mécanisme que `accounts_restated`/`restatement_mode` déjà exposés par ce endpoint.
+
+**Tests** : `supabase/tests/sync-stripe-quota.test.ts` (nouveau, 6 tests) — mirror de la boucle de décision (`syncCustomers` a des imports Deno-natifs non résolvables sous Vitest ; pas d'extraction en fonction pure partagée cette fois, contrairement à `computeTrialStatus`/`calcMrrGrowthMetrics` — matérialiser la liste complète des clients Stripe à l'avance pour une fonction séparée doublerait les appels à l'API `/customers`, un coût réel pour un gain de testabilité). Couvre : sous le plafond, au-dessus, déjà au plafond, comptes existants jamais gelés même à capacité pleine, tier Enterprise (`max_accounts: null`) jamais plafonné, mélange existants/nouveaux avec plafond serré.
+
+**Vérifié en direct contre la base dev** (lecture seule) : requête confirmant l'ampleur réelle du dépassement (ci-dessus) et validant que le design (comptes existants jamais gelés) est le seul sûr à déployer sans effet de bord destructeur immédiat.
+
+**Non vérifié dans ce chantier** : `deno check` toujours indisponible dans cet environnement ; le chemin complet `syncCustomers` → `paginateStripe` → `batchUpsert` n'a pas été exercé en direct (aurait nécessité un vrai run `sync-stripe` sur un org réel, hors scope d'une vérification en lecture seule).
+
+**Hors périmètre, explicitement** : aucune notification/alerte proactive à l'org quand elle atteint son plafond (le signal existe dans `sync_summary`/logs, pas encore poussé activement vers l'utilisateur) ; pas de UI dédiée à `new_accounts_skipped_by_quota` (suit le même sort que `accounts_restated`, déjà exposé sans widget dédié).
+
+---
+
 ## Billing — stripe-billing-webhook sans protection anti-désordre (2026-08-13)
 
 Audit readiness client 2026-08 : `stripe-billing-webhook` (webhook de l'abonnement Sentio elle-même, distinct de `stripe-webhook`) faisait un `UPDATE organizations SET plan_type = X` inconditionnel sur chaque event traité, `event.id` n'étant ni loggé (hors chemin d'erreur) ni utilisé pour quoi que ce soit — contrairement à `stripe-webhook`, qui protège déjà ses champs sensibles avec une garde `last_event_created_at` par subscription (event trop ancien → ignoré). Un event Stripe redélivré en retard ou hors ordre (retry réseau, resend manuel depuis le Dashboard Stripe) pouvait donc écraser `plan_type` avec un état plus ancien que celui déjà appliqué — silencieusement, sans erreur.
