@@ -304,6 +304,35 @@ jobs:
                 )
             ) x;"
 
+          # a15 — incident 2026-08-13, piste A investiguée (grants perdus sur
+          # accounts_with_priority après PR #58) : écartée dans les faits pour
+          # cet incident précis (GRANTs intacts, vérifiés en direct), mais le
+          # risque structurel reste réel — la posture Lot 1 "révoquer par
+          # défaut" rend toute vue/table RLS recréée par DROP+CREATE (au lieu
+          # de CREATE OR REPLACE) silencieusement inaccessible à authenticated
+          # tant que personne ne pense à ré-accorder le GRANT. Couvre les
+          # tables avec RLS activée (relrowsecurity) ET les vues (une vue ne
+          # porte jamais relrowsecurity elle-même, security_invoker délègue à
+          # la table sous-jacente — ratée par le premier filtre seul).
+          run_query "a15_rls_object_missing_authenticated_grant" "hard" "
+            select count(*) as n from (
+              select c.relname from pg_class c
+              join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity = true
+                and not exists (
+                  select 1 from information_schema.role_table_grants g
+                  where g.table_schema = 'public' and g.table_name = c.relname and g.grantee = 'authenticated'
+                )
+              union
+              select c.relname from pg_class c
+              join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = 'public' and c.relkind = 'v'
+                and not exists (
+                  select 1 from information_schema.role_table_grants g
+                  where g.table_schema = 'public' and g.table_name = c.relname and g.grantee = 'authenticated' and g.privilege_type = 'SELECT'
+                )
+            ) x;"
+
           if [ "${FAIL_HARD:-0}" = "1" ]; then
             echo "::error::One or more hard data-truth assertions failed — see above."
             exit 1
@@ -440,3 +469,79 @@ jobs:
             exit 1
           fi
           echo "a11: Deploy Edge Functions ran and redeployed at least one function ${AGE_S}s ago."
+
+      - name: HTTP smoke test with a real authenticated JWT (a13)
+        # Incident 2026-08-13 : Overview/Accounts were down in production
+        # while V.1 had been declared green on "full application cycle
+        # under an authenticated JWT" — that check was only ever a SQL
+        # simulation (SET LOCAL role/request.jwt.claims inside Postgres),
+        # never a real HTTP request through PostgREST/an Edge Function with
+        # a real token. This closes exactly that gap: a genuinely
+        # GoTrue-issued access token (same admin/generate_link + /verify
+        # flow used to diagnose the incident), real HTTP calls to the same
+        # endpoints the 5 main screens call. 200 + non-empty body required —
+        # a 200 with an empty array counts as failure on a non-empty
+        # portfolio (the exact trap flagged the prior round, which then
+        # materialized app-wide the same evening).
+        if: always()
+        run: |
+          set -euo pipefail
+          SR_RESP=$(curl -s -w "\n%{http_code}" "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/api-keys" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN")
+          SR_CODE=$(printf '%s' "$SR_RESP" | tail -1)
+          SR_BODY=$(printf '%s' "$SR_RESP" | head -1)
+          if [ "$SR_CODE" != "200" ]; then
+            echo "::error::a13_smoke_test — could not fetch service_role key (HTTP $SR_CODE), cannot run smoke test."
+            exit 1
+          fi
+          SERVICE_ROLE_KEY=$(printf '%s' "$SR_BODY" | jq -r '.[] | select(.name == "service_role") | .api_key')
+          # Compte de test existant (org "Test OAuth Corp", d3dc9223,
+          # portefeuille réel non vide) — vérifié en direct dans cette
+          # session sur les 4 endpoints ci-dessous avant d'écrire ce step.
+          SMOKE_EMAIL="testeur-oauth@sentio-test.io"
+          LINK_RESP=$(curl -s -w "\n%{http_code}" -X POST "https://${SUPABASE_PROJECT_REF}.supabase.co/auth/v1/admin/generate_link" \
+            -H "Content-Type: application/json" -H "apikey: ${SERVICE_ROLE_KEY}" -H "Authorization: Bearer ${SERVICE_ROLE_KEY}" \
+            -d "{\"type\":\"magiclink\",\"email\":\"${SMOKE_EMAIL}\"}")
+          LINK_CODE=$(printf '%s' "$LINK_RESP" | tail -1)
+          LINK_BODY=$(printf '%s' "$LINK_RESP" | head -1)
+          if [ "$LINK_CODE" != "200" ]; then
+            echo "::error::a13_smoke_test — generate_link failed (HTTP $LINK_CODE) for $SMOKE_EMAIL. This user must exist (real org with accounts) for a13 to run. Body: $LINK_BODY"
+            exit 1
+          fi
+          TOKEN_HASH=$(printf '%s' "$LINK_BODY" | jq -r '.hashed_token')
+          VERIFY_RESP=$(curl -s -w "\n%{http_code}" -X POST "https://${SUPABASE_PROJECT_REF}.supabase.co/auth/v1/verify" \
+            -H "Content-Type: application/json" -H "apikey: ${SERVICE_ROLE_KEY}" \
+            -d "{\"type\":\"magiclink\",\"token_hash\":\"${TOKEN_HASH}\"}")
+          ACCESS_TOKEN=$(printf '%s' "$VERIFY_RESP" | head -1 | jq -r '.access_token // empty')
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "::error::a13_smoke_test — could not obtain a real authenticated access_token."
+            exit 1
+          fi
+          FAILED=0
+          smoke_check() {
+            local NAME="$1" URL="$2"
+            local RESP CODE BODY
+            RESP=$(curl -s -w "\n%{http_code}" "$URL" -H "Authorization: Bearer ${ACCESS_TOKEN}")
+            CODE=$(printf '%s' "$RESP" | tail -1)
+            BODY=$(printf '%s' "$RESP" | head -1)
+            if [ "$CODE" != "200" ]; then
+              echo "::error::a13_smoke_test — $NAME returned HTTP $CODE. Body: $BODY"
+              FAILED=1
+              return
+            fi
+            if [ -z "$BODY" ] || [ "$BODY" = "null" ] || printf '%s' "$BODY" | jq -e '(.data == []) or (.data == {}) or (.data == null)' >/dev/null 2>&1; then
+              echo "::error::a13_smoke_test — $NAME returned 200 with an empty body — a 200 with nothing in it is a failure on a non-empty portfolio."
+              FAILED=1
+              return
+            fi
+            echo "a13: $NAME ok (200, non-empty)."
+          }
+          BASE="https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1"
+          smoke_check "Today (get-today-actions)" "${BASE}/get-today-actions"
+          smoke_check "Overview (dashboard-api/portfolio-metrics)" "${BASE}/dashboard-api/portfolio-metrics"
+          smoke_check "Accounts/Segments (accounts-api)" "${BASE}/accounts-api"
+          smoke_check "Playbooks (playbook-crud)" "${BASE}/playbook-crud"
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::a13 smoke test failed — the application is not confirmed working end-to-end. A deploy is not done until this is green."
+            exit 1
+          fi
+          echo "a13: all 5 screens confirmed working via real HTTP + real JWT."
