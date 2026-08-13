@@ -60,13 +60,19 @@ export function calcOrgMetrics(
     }
   }
 
-  const netMovements = new12m + expansion12m + reactivation12m - contraction12m - churn12m
+  // contraction/churn sont stockés NÉGATIFS dans mrr_movements (classifyMovement,
+  // _shared/mrr-engine.ts) — donc on les ADDITIONNE pour obtenir le net, jamais
+  // les soustraire une seconde fois (ça inverserait leur effet). Convention
+  // identique à calcNrrPercentage/calcChurnRate30d (_shared/mrr-engine.ts).
+  // Issue #28 : l'ancienne formule "- contraction12m - churn12m" gonflait le
+  // netMovements/NRR/mrrGrowth et produisait un churnRate négatif.
+  const netMovements = new12m + expansion12m + reactivation12m + contraction12m + churn12m
   const startingMrr = currentMrr - netMovements
   if (startingMrr <= 0) return null
 
   const endingMrrExisting = currentMrr - new12m
   const nrr = Math.round((endingMrrExisting / startingMrr) * 1000) / 10
-  const churnRate = Math.round((churn12m / startingMrr) * 1000) / 10
+  const churnRate = Math.round((Math.abs(churn12m) / startingMrr) * 1000) / 10
   const mrrGrowth = Math.round((netMovements / startingMrr) * 1000) / 10
 
   return { nrr, churnRate, mrrGrowth }

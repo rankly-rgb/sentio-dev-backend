@@ -26,18 +26,30 @@ import { findTierByStripePriceId, isSubscriptionTierKey, type SubscriptionTierKe
 interface StripeEvent {
   id: string
   type: string
+  created: number
   data: { object: Record<string, unknown> }
 }
 
+/**
+ * UPDATE conditionnel atomique — jamais de lecture préalable de
+ * billing_event_at (pas de fenêtre TOCTOU). Un événement Stripe re-délivré
+ * en retard ou hors ordre (retry réseau, resend manuel Dashboard Stripe)
+ * ne doit jamais écraser un plan_type plus récent — même mécanisme que
+ * last_event_created_at dans stripe-webhook/index.ts, appliqué ici à
+ * organizations.billing_event_at (migration 20260813000001).
+ */
 async function updatePlanType(
   supabase: SupabaseClient,
   organizationId: string,
   tier: SubscriptionTierKey,
+  eventCreatedIso: string,
 ): Promise<void> {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('organizations')
-    .update({ plan_type: tier })
+    .update({ plan_type: tier, billing_event_at: eventCreatedIso })
     .eq('id', organizationId)
+    .or(`billing_event_at.is.null,billing_event_at.lt.${eventCreatedIso}`)
+    .select('id')
 
   if (error) {
     console.error(JSON.stringify({
@@ -45,6 +57,14 @@ async function updatePlanType(
       message: `Failed to update plan_type to ${tier}: ${error.message}`,
     }))
     throw error
+  }
+
+  if (!data || data.length === 0) {
+    console.log(JSON.stringify({
+      level: 'info', function_name: 'stripe-billing-webhook', organization_id: organizationId,
+      message: `plan_type update to ${tier} skipped — event.created (${eventCreatedIso}) not newer than the last applied billing_event_at (stale or out-of-order replay)`,
+    }))
+    return
   }
 
   console.log(JSON.stringify({
@@ -63,7 +83,7 @@ function resolveOrgIdAndTier(
   return { organizationId, tier }
 }
 
-async function handleCheckoutCompleted(supabase: SupabaseClient, obj: Record<string, unknown>): Promise<void> {
+async function handleCheckoutCompleted(supabase: SupabaseClient, obj: Record<string, unknown>, eventCreatedIso: string): Promise<void> {
   const { organizationId, tier } = resolveOrgIdAndTier(obj)
   if (!organizationId || !tier) {
     console.warn(JSON.stringify({
@@ -72,10 +92,10 @@ async function handleCheckoutCompleted(supabase: SupabaseClient, obj: Record<str
     }))
     return
   }
-  await updatePlanType(supabase, organizationId, tier)
+  await updatePlanType(supabase, organizationId, tier, eventCreatedIso)
 }
 
-async function handleSubscriptionUpdated(supabase: SupabaseClient, obj: Record<string, unknown>): Promise<void> {
+async function handleSubscriptionUpdated(supabase: SupabaseClient, obj: Record<string, unknown>, eventCreatedIso: string): Promise<void> {
   const { organizationId, tier: metaTier } = resolveOrgIdAndTier(obj)
   if (!organizationId) {
     console.warn(JSON.stringify({
@@ -87,7 +107,7 @@ async function handleSubscriptionUpdated(supabase: SupabaseClient, obj: Record<s
 
   const status = obj.status as string | undefined
   if (status === 'canceled' || status === 'unpaid' || status === 'incomplete_expired') {
-    await updatePlanType(supabase, organizationId, 'free')
+    await updatePlanType(supabase, organizationId, 'free', eventCreatedIso)
     return
   }
 
@@ -98,13 +118,13 @@ async function handleSubscriptionUpdated(supabase: SupabaseClient, obj: Record<s
   const priceId = items[0]?.price?.id
   const resolvedTier = priceId ? findTierByStripePriceId(priceId)?.key : null
 
-  await updatePlanType(supabase, organizationId, resolvedTier ?? metaTier ?? 'free')
+  await updatePlanType(supabase, organizationId, resolvedTier ?? metaTier ?? 'free', eventCreatedIso)
 }
 
-async function handleSubscriptionDeleted(supabase: SupabaseClient, obj: Record<string, unknown>): Promise<void> {
+async function handleSubscriptionDeleted(supabase: SupabaseClient, obj: Record<string, unknown>, eventCreatedIso: string): Promise<void> {
   const { organizationId } = resolveOrgIdAndTier(obj)
   if (!organizationId) return
-  await updatePlanType(supabase, organizationId, 'free')
+  await updatePlanType(supabase, organizationId, 'free', eventCreatedIso)
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -152,16 +172,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Server configuration error', 500)
   }
 
+  // event.created (secondes epoch Stripe) — jamais la date de traitement,
+  // c'est ce qui alimente la garde anti-désordre de updatePlanType().
+  const eventCreatedIso = new Date(event.created * 1000).toISOString()
+
   try {
     switch (event.type) {
       case 'checkout.session.completed':
-        await handleCheckoutCompleted(supabase, event.data.object)
+        await handleCheckoutCompleted(supabase, event.data.object, eventCreatedIso)
         break
       case 'customer.subscription.updated':
-        await handleSubscriptionUpdated(supabase, event.data.object)
+        await handleSubscriptionUpdated(supabase, event.data.object, eventCreatedIso)
         break
       case 'customer.subscription.deleted':
-        await handleSubscriptionDeleted(supabase, event.data.object)
+        await handleSubscriptionDeleted(supabase, event.data.object, eventCreatedIso)
         break
       default:
         // Event non routé — 200 immédiat, pas un échec.

@@ -21,6 +21,7 @@ function account(overrides: Partial<TodayAccountInput> = {}): TodayAccountInput 
     churn_risk_score: 10,
     expansion_score: 0,
     mrr_cents: 10000,
+    mrr_status: 'ok',
     plan_tier: 'growth',
     contract_end_date: null,
     billing_interval: null,
@@ -143,6 +144,11 @@ describe('computeTodayActions', () => {
     const actions = computeTodayActions([account()], [playbook()], new Map())
     expect(actions).toHaveLength(1)
     expect(actions[0].matching_playbooks).toHaveLength(1)
+  })
+
+  it('propagates mrr_status through to the action so the frontend never renders a disguised $0 (issue #29)', () => {
+    const actions = computeTodayActions([account({ mrr_status: 'unavailable' })], [playbook()], new Map())
+    expect(actions[0].mrr_status).toBe('unavailable')
   })
 
   it('includes an account with an active insight even when no playbook matches it', () => {

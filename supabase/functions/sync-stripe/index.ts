@@ -24,6 +24,7 @@ import {
   type StripeSubscriptionLike,
 } from '../_shared/mrr-engine.ts'
 import { dedupeMovementRows, writeMrrMovementsSync, type MrrMovementSyncRow } from '../_shared/mrr-movements-writer.ts'
+import { getTier } from '../_shared/subscription-tiers.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
@@ -252,14 +253,45 @@ async function syncCustomers(
   logger: DataSyncLogger,
   writeErrors: WriteError[],
   createdAfter?: number,
-): Promise<void> {
+): Promise<{ newAccountsSkippedByQuota: number }> {
   const extraParams: Record<string, string> = {}
   if (createdAfter) extraParams['created[gt]'] = String(createdAfter)
 
+  // Chantier billing (2026-08-13) : is_over_limit (subscription-status) était
+  // affiché mais jamais appliqué — un org Free (30 comptes) pouvait en
+  // tracker des milliers sans jamais être freiné. Plafonne uniquement la
+  // CROISSANCE (stripe_customer_id jamais vus) sur le tier de l'org : les
+  // comptes déjà trackés continuent d'être synchronisés/scorés normalement,
+  // jamais gelés — geler un client déjà suivi serait une régression bien
+  // pire que plafonner l'ajout de nouveaux. Même convention de comptage que
+  // subscription-status (accounts_count = toutes les lignes accounts de
+  // l'org, sans filtre de statut).
+  const [{ data: org }, { data: existingAccounts, count: existingCount }] = await Promise.all([
+    supabase.from('organizations').select('plan_type').eq('id', organizationId).maybeSingle(),
+    supabase.from('accounts').select('stripe_customer_id', { count: 'exact' }).eq('organization_id', organizationId),
+  ])
+
+  const tier = getTier(org?.plan_type ?? null)
+  const existingIds = new Set(
+    (existingAccounts ?? [])
+      .map((a: { stripe_customer_id: string | null }) => a.stripe_customer_id)
+      .filter((id: string | null): id is string => id !== null),
+  )
+  let remainingSlots = tier.max_accounts === null ? Infinity : Math.max(0, tier.max_accounts - (existingCount ?? 0))
+
   const syncedAt = new Date().toISOString()
   const rows: Record<string, unknown>[] = []
+  let newAccountsSkippedByQuota = 0
 
   for await (const customer of paginateStripe<StripeCustomer>('/customers', apiKey, extraParams, logger)) {
+    if (!existingIds.has(customer.id)) {
+      if (remainingSlots <= 0) {
+        newAccountsSkippedByQuota++
+        continue
+      }
+      remainingSlots--
+    }
+
     const row: Record<string, unknown> = {
       organization_id: organizationId,
       stripe_customer_id: customer.id,
@@ -276,6 +308,15 @@ async function syncCustomers(
   logger.increment('records_processed', processed)
   logger.increment('accounts_processed', processed)
   logger.increment('records_failed', failed)
+
+  if (newAccountsSkippedByQuota > 0) {
+    console.warn(JSON.stringify({
+      level: 'warn', function_name: 'sync-stripe', organization_id: organizationId,
+      message: `${newAccountsSkippedByQuota} new Stripe customer(s) not synced — org is at its ${tier.key} tier's account limit (${tier.max_accounts}). Upgrade to track them.`,
+    }))
+  }
+
+  return { newAccountsSkippedByQuota }
 }
 
 // ── Sync subscriptions ────────────────────────────────────────
@@ -727,7 +768,7 @@ async function syncInvoices(
   logger: DataSyncLogger,
   writeErrors: WriteError[],
   createdAfter?: number,
-): Promise<{ invoiceOnlyAccountsCount: number }> {
+): Promise<{ invoiceOnlyAccountsCount: number; invoicesOrphaned: number }> {
   const extraParams: Record<string, string> = {}
   if (createdAfter) extraParams['created[gt]'] = String(createdAfter)
 
@@ -813,12 +854,12 @@ async function syncInvoices(
 
   if (orphaned > 0) {
     console.warn(JSON.stringify({
-      level: 'warn', function_name: 'sync-stripe',
+      level: 'warn', function_name: 'sync-stripe', organization_id: organizationId,
       message: `${orphaned} invoices skipped — no matching account (expected during initial sync)`,
     }))
   }
 
-  return { invoiceOnlyAccountsCount: invoiceOnlyAccountIds.length }
+  return { invoiceOnlyAccountsCount: invoiceOnlyAccountIds.length, invoicesOrphaned: orphaned }
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
@@ -1026,9 +1067,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const writeErrors: WriteError[] = []
 
   try {
-    await syncCustomers(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
+    const { newAccountsSkippedByQuota } = await syncCustomers(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
     const { anomalyDetected, billingProfile, restatementAccountsCount } = await syncSubscriptions(supabase, organizationId, apiKey, logger, writeErrors, restatementMode)
-    const { invoiceOnlyAccountsCount } = await syncInvoices(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
+    const { invoiceOnlyAccountsCount, invoicesOrphaned } = await syncInvoices(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
 
     if (anomalyDetected) {
       // 'validation_error' — CHECK data_syncs_error_type_check n'inclut pas de valeur
@@ -1084,6 +1125,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
         created_after: createdAfter,
         restatement_mode: restatementMode,
         ...(restatementMode ? { accounts_restated: restatementAccountsCount ?? 0 } : {}),
+        ...(newAccountsSkippedByQuota > 0 ? { new_accounts_skipped_by_quota: newAccountsSkippedByQuota } : {}),
+        ...(invoicesOrphaned > 0 ? { invoices_orphaned: invoicesOrphaned } : {}),
       },
       writeErrors,
     )
@@ -1112,6 +1155,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       organization_id: organizationId,
       sync_type: syncType,
       restatement_mode: restatementMode,
+      ...(newAccountsSkippedByQuota > 0 ? { new_accounts_skipped_by_quota: newAccountsSkippedByQuota } : {}),
+      ...(invoicesOrphaned > 0 ? { invoices_orphaned: invoicesOrphaned } : {}),
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)

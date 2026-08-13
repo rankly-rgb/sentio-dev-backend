@@ -18,6 +18,9 @@ verify_jwt = false
 [functions.stripe-billing-checkout]
 verify_jwt = false
 
+[functions.trial-status]
+verify_jwt = false
+
 # track-usage : pas de JWT (endpoints publics SDK clients)
 [functions.track-usage]
 verify_jwt = false

@@ -23,6 +23,7 @@ import {
   isAccountChurned,
   calcNrrPercentage,
   calcChurnRate30d,
+  calcMrrGrowthMetrics,
   type StripeSubscriptionLike,
 } from '../functions/_shared/mrr-engine'
 import {
@@ -568,5 +569,77 @@ describe('calcChurnRate30d', () => {
       { movement_type: 'churn', amount_cents: -10000 },
     ], true)
     expect(result).toBe(10.0)
+  })
+})
+
+describe('calcMrrGrowthMetrics', () => {
+  // Issue #28 : extrait d'une copie locale dans dashboard-api/index.ts
+  // (/dashboard-api/benchmarks) qui soustrayait contraction/churn au lieu de
+  // les additionner — gonflait net_movements/mrr_growth et rendait
+  // churn_rate négatif (visible côté client : un churn négatif se notait
+  // "excellent" via rateLower). Même bug, même correctif que
+  // compute-peer-benchmarks/calcOrgMetrics.
+
+  it('null si moins de 3 mois d\'historique, quels que soient les mouvements', () => {
+    const result = calcMrrGrowthMetrics(100000, [{ movement_type: 'churn', amount_cents: -10000 }], false)
+    expect(result.churn_rate_percentage).toBeNull()
+    expect(result.mrr_growth_percentage).toBeNull()
+  })
+
+  it('avec historique mais aucun mouvement : 0% de churn et de croissance, pas null', () => {
+    const result = calcMrrGrowthMetrics(100000, [], true)
+    expect(result.starting_mrr_cents).toBe(100000)
+    expect(result.churn_rate_percentage).toBe(0)
+    expect(result.mrr_growth_percentage).toBe(0)
+  })
+
+  it('churn négatif réaliste : additionné, jamais soustrait — churn_rate toujours positif', () => {
+    // currentMrr=115000, expansion=+20000, churn=-5000 (négatif, vraie convention)
+    // net = 20000 + (-5000) = 15000 ; startingMrr = 115000 - 15000 = 100000
+    // churnRate = |-5000| / 100000 * 100 = 5.0 ; mrrGrowth = 15000/100000*100 = 15.0
+    const result = calcMrrGrowthMetrics(115000, [
+      { movement_type: 'expansion', amount_cents: 20000 },
+      { movement_type: 'churn', amount_cents: -5000 },
+    ], true)
+    expect(result.net_movements_cents).toBe(15000)
+    expect(result.starting_mrr_cents).toBe(100000)
+    expect(result.churn_rate_percentage).toBe(5.0)
+    expect(result.mrr_growth_percentage).toBe(15.0)
+  })
+
+  it('mouvement correction exclu du calcul', () => {
+    const result = calcMrrGrowthMetrics(115000, [
+      { movement_type: 'expansion', amount_cents: 20000 },
+      { movement_type: 'churn', amount_cents: -5000 },
+      { movement_type: 'correction', amount_cents: -900000 },
+    ], true)
+    expect(result.net_movements_cents).toBe(15000)
+  })
+
+  it('starting_mrr <= 0 → churn_rate et mrr_growth null', () => {
+    const result = calcMrrGrowthMetrics(10000, [{ movement_type: 'new', amount_cents: 12000 }], true)
+    expect(result.starting_mrr_cents).toBeLessThanOrEqual(0)
+    expect(result.churn_rate_percentage).toBeNull()
+    expect(result.mrr_growth_percentage).toBeNull()
+  })
+
+  it('churn_rate plafonné à 100%', () => {
+    // currentMrr=100000, churn=-200000 (gros churn passé), expansion=+150000 (récupéré depuis)
+    // net = -200000+150000 = -50000 ; startingMrr = 100000-(-50000) = 150000
+    // churnRate brut = 200000/150000*100 = 133.3% → plafonné à 100
+    const result = calcMrrGrowthMetrics(100000, [
+      { movement_type: 'churn', amount_cents: -200000 },
+      { movement_type: 'expansion', amount_cents: 150000 },
+    ], true)
+    expect(result.churn_rate_percentage).toBe(100)
+  })
+
+  it('contraction (négative) réduit mrr_growth sans affecter churn_rate', () => {
+    // currentMrr=95000, contraction=-5000 (pas de churn)
+    // net = -5000 ; startingMrr = 95000-(-5000) = 100000
+    // mrrGrowth = -5000/100000*100 = -5.0 ; churnRate = |0|/100000*100 = 0
+    const result = calcMrrGrowthMetrics(95000, [{ movement_type: 'contraction', amount_cents: -5000 }], true)
+    expect(result.mrr_growth_percentage).toBe(-5.0)
+    expect(result.churn_rate_percentage).toBe(0)
   })
 })

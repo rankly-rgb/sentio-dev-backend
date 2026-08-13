@@ -4,6 +4,187 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Lot 1 — Verrouillage des fonctions SECURITY DEFINER exposées à anon/PUBLIC (2026-08-13)
+
+Audit Phase 0 (exécution autonome post-audit, 2026-08-13) : 24 fonctions `SECURITY DEFINER` du schéma `public` avaient `EXECUTE` accordé à `anon`/`PUBLIC`, dont 6 fonctions Vault (lecture/écriture/suppression de secrets sans aucune vérification d'identité), `cron_dispatch_via_vault` (déclenche n'importe quelle Edge Function avec le token `service_role`, sans allowlist) et 3 fonctions (`seed_default_playbooks`, `increment_webhook_failure`, `mark_playbook_executed`) acceptant un `org_id`/`run_id` arbitraire sans vérification d'appartenance.
+
+**Correction du plan initial (piège identifié avant d'écrire le code)** : le snippet de garde proposé ("reject si `request.jwt.claims IS NOT NULL`") aurait cassé les appels `service_role` légitimes — `vault_read_secret` est appelé en RPC par `_shared/vault.ts::getVaultSecret` (résolution de clé HubSpot), `mark_playbook_executed` par `export-playbook-csv/index.ts:189`, `seed_default_playbooks` via le trigger `on_organization_created` déclenché par l'INSERT `organizations` de `create-organization-with-invitation` — les trois chemins passent par PostgREST authentifiés `service_role`, donc `request.jwt.claims` y est non-NULL. La garde retenue est consciente du rôle (`role IS DISTINCT FROM 'service_role'`), pas seulement de la présence d'un JWT : bloque `anon`/`authenticated`, laisse passer `service_role` et les appels sans contexte PostgREST (pg_cron, migrations).
+
+**Changements (migration `20260813000003_security_definer_lockdown.sql`)** :
+- `REVOKE ALL ... FROM PUBLIC, anon, authenticated` en masse sur les 24 fonctions (DO block dynamique sur `pg_proc`), jamais `service_role`.
+- `user_organization_id()`/`user_role()` (utilisées à l'intérieur des policies RLS) : re-`GRANT` explicite à `authenticated` en premier, `search_path` pinné (absent auparavant).
+- 8 RPC applicatives (`get_mrr_movements_summary`, `get_mrr_trend`, `get_playbook_detail`, `get_playbook_eligible_accounts`, `get_playbook_export_summary`, `get_playbook_full_detail`, `get_segment_accounts`, `transition_playbook_status`) : `GRANT` à `authenticated` — vérifiées une par une, toutes dérivent déjà l'org via `user_organization_id()` en interne, `get_mrr_movements_summary` en particulier ne prend pas de `p_organization_id` en paramètre contrairement à l'hypothèse initiale.
+- 4 fonctions de trigger (`handle_new_user`, `handle_new_user_signup`, `on_organization_created`, `on_playbook_activate`) : aucun `GRANT`, protection structurelle Postgres (une fonction `RETURNS trigger` n'est pas invocable via RPC, quel que soit le `GRANT`).
+- 6 fonctions Vault + `cron_dispatch_via_vault` + `increment_webhook_failure`/`mark_playbook_executed`/`seed_default_playbooks` : `GRANT` à `service_role` uniquement + garde de défense en profondeur en tête de corps.
+- `cron_dispatch_via_vault` : allowlist des 4 `function_path` réellement utilisés par les jobs cron (`refresh-hubspot-tokens`, `sync-hubspot`, `playbook-scheduler`, `self-monitor` — jobid 2/6/7/8, `20260810000001`).
+- `seed_default_playbooks` : garde d'idempotence défensive ajoutée (n'insère rien si l'org a déjà des playbooks), en plus de la garde de rôle.
+- `on_playbook_activate` : clé `service_role` en clair retirée, lit désormais `cron_service_role_key` depuis Vault au moment de l'appel (même secret que `cron_dispatch_via_vault`), dégradation gracieuse identique (no-op + `RAISE NOTICE` si secret absent). Les 3 migrations historiques (`20260531000001/3/5`) qui committent le littéral en clair ne sont volontairement pas modifiées (idempotence/historique git).
+- CI (`ci.yml`) : nouveau job anti-clé-JWT-en-dur sur `supabase/migrations/**`, allowlist des 3 chemins historiques exacts, pattern JWT générique (pas seulement le littéral compromis).
+
+**Vérifié en direct sur le projet dev** (tous les critères de passage du Lot 1) :
+- `select ... has_function_privilege('anon', p.oid, 'EXECUTE') ...` sur les 24 fonctions → **0 ligne**.
+- Même requête via `information_schema.routine_privileges` pour `PUBLIC` → **0 ligne**.
+- Garde de rôle testée en isolation (GUC `request.jwt.claims` simulée, sans passer par le `REVOKE` natif) : `role=authenticated` → exception `internal function: service_role only` ; `role=service_role` → passe. Répliqué sur `vault_read_secret` et `cron_dispatch_via_vault`.
+- Allowlist `cron_dispatch_via_vault` : `function_path='admin-proxy'` (hors liste) → exception ; `function_path='self-monitor'` (dans la liste) → aucune exception.
+- Idempotence `seed_default_playbooks` : appelé deux fois sur le même org (9 playbooks existants) → toujours 9, aucun doublon inséré.
+- Job CI anti-clé-en-dur : testé localement avec un fichier de test injecté puis retiré (échec confirmé puis succès confirmé) avant d'écrire la version finale du step.
+- `npm run verify` : 1004 tests, typecheck et lint verts. Build : même échec pré-existant `NEXT_PUBLIC_SUPABASE_URL` absent de ce sandbox (non lié à ce chantier, `ci.yml` fournit déjà la variable placeholder pour la CI réelle).
+
+**Non vérifié dans ce lot** : un test end-to-end HTTP réel (login → Overview → Accounts → fiche compte → exécution manuelle d'un cron job) n'a pas pu être exécuté depuis cet environnement (pas d'accès à l'app déployée ni à un navigateur). La preuve de non-régression repose sur (a) l'identification exhaustive des 3 call sites réels de service_role RPC dans le code (`_shared/vault.ts`, `export-playbook-csv/index.ts`, trigger `on_organization_created`) et (b) la réplication de leur contexte d'appel exact (`role=service_role`) dans les tests de garde en isolation ci-dessus — pas un test bout-en-bout sur l'app réelle. À confirmer au prochain déploiement.
+
+**Action Naima, bloquante, en tête du rapport final** : `cron_dispatch_via_vault` et `vault_read_secret` étaient exposés à `anon` avant ce lot. Toute clé stockée en Vault doit être considérée comme potentiellement lue. Séquence impérative : (1) ce lot mergé, (2) rotation de la `service_role` key (Dashboard Supabase → Project Settings → API), (3) mise à jour du secret Vault `cron_service_role_key` avec la nouvelle valeur, (4) revérification. Une rotation avant le merge casserait le trigger `on_playbook_activate` et les 4 cron jobs dispatched via `cron_dispatch_via_vault`.
+
+---
+
+## Issue #36 — insight dédié `payment_delinquent` (2026-08-13)
+
+Follow-up du chantier délinquence du 2026-08-06 : `is_delinquent` était câblé au churn scoring, à la segmentation et à toutes les surfaces "at risk" trouvées, mais explicitement pas à `generate-insights` ("hors périmètre, ouvre une issue"). Un compte délinquent ne remontait un insight que si ses *autres* signaux (facture en retard, churn score...) franchissaient un seuil existant — pas de carte dédiée dans le feed Insights pour un CSM parcourant le portefeuille indépendamment de l'automatisation playbook.
+
+**Changements :**
+- `_shared/insight-rules.ts` : nouveau type `payment_delinquent`, nouvelle règle `evaluatePaymentDelinquent` — même exclusion mutuelle que le signal de churn équivalent (`_shared/scoring.ts`, audit délinquence 2026-08-06, décision 1) : suppression dès que `payment_risk` s'est déjà déclenché sur la même facture confirmée en retard de 15j+ (même fait, proxy plus précis déjà surfacé). `InsightInput` gagne `is_delinquent: boolean`.
+- `generate-insights/index.ts` : `AccountRow`/SELECT/`buildInsightInput` propagent `is_delinquent`. Aucun changement au mécanisme d'auto-résolution existant — dès que `is_delinquent` repasse à `false`, la règle ne produit plus de candidat au run suivant, `syncInsights` résout l'insight actif comme pour tout autre type.
+- Migration `20260813000002_ai_insights_payment_delinquent_type.sql` : CHECK constraint `ai_insights_insight_type_check` élargie. Appliquée et vérifiée en direct sur le projet dev.
+
+**Tests** : `supabase/tests/insight-rules.test.ts` — 8 nouveaux tests (règle isolée + orchestrateur, dont l'exclusion mutuelle avec `payment_risk`). `npm run verify` vert (1004 tests).
+
+---
+
+## Issue #30 — mention de devise sur Accounts.tsx/AccountDetail.tsx (2026-08-13)
+
+Cosmétique, backlog depuis Phase 5.4 de l'audit logique métier Stripe/MRR — la mention de devise (code ISO à côté des montants) n'avait été ajoutée qu'au Dashboard et `/mrr`, jamais à ces deux écrans.
+
+**Changements** (frontend, `sentio-dev-frontend`) :
+- `Accounts.tsx` : suffixe devise sur la tuile KPI "MRR" du résumé de page (même pattern que `kpi-cards.tsx` du Dashboard) — pas de répétition par ligne du tableau, qui aurait été redondante avec un mention unique déjà visible en haut de page.
+- `AccountDetail.tsx` : même suffixe sur la carte MRR principale, masqué quand `mrr_status='unavailable'` ("Not billable" n'a pas besoin d'un code devise à côté).
+
+**Non touché, délibérément** : les colonnes MRR par ligne des tableaux (`Accounts.tsx`) et les lignes de subscription individuelles (`AccountDetail.tsx`) — une mention par page suffit à lever l'ambiguïté, répéter le code devise sur chaque ligne aurait été du bruit visuel sans gain d'information.
+
+---
+
+## Issue #29 — `mrr_status` étendu à get-today-actions et aux 3 dernières surfaces frontend non couvertes (2026-08-13)
+
+Issue #29 listait 3 surfaces où un compte `mrr_status='unavailable'` pouvait encore s'afficher comme un `$0` trompeur au lieu de "Not billable" (pattern déjà établi ailleurs via `fr.format.mrrOrUnavailable`, `AccountDetail.tsx`/`Accounts.tsx`/`AccountFinancials.tsx`) : la page Today (`get-today-actions`, backend, ne sélectionnait pas le champ), la vue détail de segment (`SegmentDetailView.tsx`) et les cartes "top accounts" du Dashboard. L'issue notait elle-même son risque comme "jugé faible en pratique, pas vérifié empiriquement".
+
+**Vérifié en direct contre la base dev** avant de coder : sur les 3577 comptes `mrr_status='unavailable'` du portefeuille, 3157 (88%) ont un `churn_risk_score` calculé et 875 sont `is_delinquent=true` — ce sont donc des candidats réels et fréquents pour les surfaces "à risque"/priorisées justement concernées par ce chantier (Today, segments à risque, top accounts). L'hypothèse "risque faible" de l'issue ne tenait pas : ce chantier était justifié.
+
+**Changements :**
+- `_shared/today-actions-helpers.ts` : `TodayAccountInput`/`TodayAction` gagnent `mrr_status: 'ok' | 'unavailable'`, propagé tel quel dans `computeTodayActions` (aucun recalcul, même convention que `is_delinquent`).
+- `get-today-actions/index.ts` : `mrr_status` ajouté au `SELECT` accounts.
+- Frontend — `src/lib/types/today-actions.ts` (`TodayAction`), `src/lib/types/segments.ts` (`SegmentAccount`), `src/hooks/useDashboardData.ts` (`TopAccount`) : gagnent `mrr_status: MrrStatus`. `segment-queries.ts::getSegmentAccounts` propage le champ (déjà présent sur `AccountListItem` via accounts-api, simple oubli de mapping). `fetchTopAccounts` n'a nécessité aucun changement de mapping — il retourne déjà des `AccountListItem` complets, qui portent `mrr_status` depuis le chantier "Devise"/E1.2 du 2026-08-02.
+- 5 sites d'affichage MRR bruts (`TodayActionRow.tsx`, `SegmentDetailView.tsx`, `Dashboard.tsx` ×2 — cartes "at risk" et "expansion") passent de `fr.format.currency` à `fr.format.mrrOrUnavailable`, même pattern que les 3 sites déjà corrigés.
+
+**Non touché, délibérément** : le total MRR agrégé de `SegmentDetailView` (`totalMrr`, somme brute de `mrr_cents`) — cohérent avec la convention déjà établie ailleurs (KPIs agrégés type `mrr_at_risk_cents` séparent déjà le sous-ensemble chiffrable via un compteur dédié plutôt que d'exclure silencieusement du total ; changer ce total spécifique sans le même traitement aurait été une correction partielle, hors périmètre de cette issue qui ciblait l'affichage par compte).
+
+**Tests** : `supabase/tests/today-actions-helpers.test.ts` — 1 nouveau test (propagation `mrr_status` dans `computeTodayActions`, 949 tests total). Frontend : aucun test existant ne référence `SegmentAccount`/`TodayAction`/`TopAccount` directement (types uniquement) — `npx tsc --noEmit` et `npm run build` verts confirment la cohérence des nouveaux champs à travers les call sites.
+
+---
+
+## Issue #34 — couverture de sync des factures diagnostiquée : artefact de seed, pas un bug (2026-08-13)
+
+Issue #34 posait deux hypothèses non départagées : (1) artefact de données de seed, (2) `syncInvoices` sous-fetch réellement depuis Stripe. Diagnostiqué en direct contre le projet dev (org `37591436-aa31-44c6-84fc-aa2e78ceb9fc`, 82 comptes `past_due`, 4 seulement avec facture — l'écart de l'issue reproduit à l'identique sur un org différent de celui cité, les IDs ayant tourné depuis le 6 août).
+
+**Conclusion : hypothèse 1 confirmée, hypothèse 2 écartée.** Les 82 subscriptions `past_due` forment un lot **parfaitement uniforme** — toutes créées le même jour (`2026-05-16`), contre 250 subscriptions `active` organiques (dates variées, `2026-08-02`) sur le même org. Décisif : le tout premier sync de cet org (`2026-08-04`, `created_after: null` — un fetch complet non filtré, confirmé via `data_syncs.sync_summary`) a récupéré 562 factures ce jour-là pour le reste du portefeuille, mais **zéro** pour ce lot précis. Un vrai bug de pagination/filtre de `syncInvoices` n'expliquerait pas une corrélation aussi exacte avec un seul lot artificiellement seedé pendant qu'un fetch non filtré réussit pour tout le reste. `accounts.stripe_customer_id` est bien renseigné et bien formé pour ces 82 comptes — pas un problème de mapping non plus.
+
+**Vérifié au passage** : le principe "no data ≠ neutral data" tient sur ce cas limite — `payment_health_score = NULL` (jamais une valeur neutre déguisée), `health_score_status = 'insufficient'`, `is_delinquent = true` et `churn_risk_score = 35` (signal `payment_delinquent` correctement déclenché malgré l'absence de facture, exactement son rôle voulu) sur les 82 comptes, sans exception.
+
+**Trouvé au passage, corrigé** : `syncInvoices` compte déjà les factures orphelines (`customer` Stripe sans compte correspondant) mais ne les loggait qu'en `console.warn`, jamais surfacées — même classe de signal invisible que `new_accounts_skipped_by_quota` (entrée précédente) et `accounts_restated`. `invoicesOrphaned` retourné par `syncInvoices`, inclus dans `data_syncs.sync_summary` et la réponse JSON de `sync-stripe` quand > 0.
+
+**Hors périmètre** : aucune action sur les 82 comptes eux-mêmes (données de seed dev, pas un problème de prod à corriger) ; pas de garde-fou anti-seed-incomplet ajouté (hors scope, ce diagnostic ferme la question posée par l'issue, n'ouvre pas un nouveau chantier).
+
+**Tests** : suite existante inchangée (948 tests), le changement n'affecte que la visibilité d'un compteur déjà calculé, aucune nouvelle branche logique à couvrir.
+
+---
+
+## Billing — quota de comptes affiché mais jamais appliqué (2026-08-13)
+
+Audit readiness client 2026-08 : `is_over_limit`/`max_accounts` (`subscription-status`, `_shared/subscription-tiers.ts::isOverAccountLimit`) n'étaient utilisés que pour l'affichage — un avertissement dans `BillingSection.tsx` (`overLimitWarning`), jamais pour limiter quoi que ce soit côté backend. Un org Free (plafond 30 comptes) pouvait en tracker sans limite. Confirmé en base sur le projet dev : un org `growth` (plafond 200) à 2688 comptes, trois orgs `free` (plafond 30) entre 422 et 432 comptes chacun.
+
+**Décision de scope** : `is_over_limit` est aujourd'hui un avertissement, pas un blocage (`BillingSection.tsx` affiche un message, ne désactive rien) — le correctif suit cette même logique plutôt que d'en inventer une plus dure sans validation produit. Plafonne uniquement la **croissance** (nouveaux `stripe_customer_id` jamais vus par l'org), jamais les comptes déjà trackés : geler un client existant serait une régression bien pire que plafonner l'ajout de nouveaux — et le cas réel ci-dessus (comptes déjà 10x-90x au-delà du plafond) confirme que ce choix est le seul qui n'aurait aucun effet destructeur au déploiement.
+
+**Changements :**
+- `sync-stripe/index.ts::syncCustomers` : avant de construire les lignes à upserter, résout le tier de l'org (`getTier`) et l'ensemble des `stripe_customer_id` déjà trackés. Pour chaque client Stripe rencontré pendant la pagination : déjà tracké → toujours synchronisé (mise à jour) ; nouveau → synchronisé seulement si le plafond du tier n'est pas encore atteint (compte les nouveaux comptes ajoutés au fil de ce même run, pas seulement l'état de départ). Même convention de comptage que `subscription-status.accounts_count` (toutes les lignes `accounts` de l'org, sans filtre de statut).
+- **Jamais silencieux** (principe déjà établi pour `accounts_at_risk_unpriced`/`get-today-status` etc.) : `new_accounts_skipped_by_quota` compté, loggé (`console.warn`), inclus dans `data_syncs.sync_summary` et dans la réponse JSON de `sync-stripe` quand > 0 — même mécanisme que `accounts_restated`/`restatement_mode` déjà exposés par ce endpoint.
+
+**Tests** : `supabase/tests/sync-stripe-quota.test.ts` (nouveau, 6 tests) — mirror de la boucle de décision (`syncCustomers` a des imports Deno-natifs non résolvables sous Vitest ; pas d'extraction en fonction pure partagée cette fois, contrairement à `computeTrialStatus`/`calcMrrGrowthMetrics` — matérialiser la liste complète des clients Stripe à l'avance pour une fonction séparée doublerait les appels à l'API `/customers`, un coût réel pour un gain de testabilité). Couvre : sous le plafond, au-dessus, déjà au plafond, comptes existants jamais gelés même à capacité pleine, tier Enterprise (`max_accounts: null`) jamais plafonné, mélange existants/nouveaux avec plafond serré.
+
+**Vérifié en direct contre la base dev** (lecture seule) : requête confirmant l'ampleur réelle du dépassement (ci-dessus) et validant que le design (comptes existants jamais gelés) est le seul sûr à déployer sans effet de bord destructeur immédiat.
+
+**Non vérifié dans ce chantier** : `deno check` toujours indisponible dans cet environnement ; le chemin complet `syncCustomers` → `paginateStripe` → `batchUpsert` n'a pas été exercé en direct (aurait nécessité un vrai run `sync-stripe` sur un org réel, hors scope d'une vérification en lecture seule).
+
+**Hors périmètre, explicitement** : aucune notification/alerte proactive à l'org quand elle atteint son plafond (le signal existe dans `sync_summary`/logs, pas encore poussé activement vers l'utilisateur) ; pas de UI dédiée à `new_accounts_skipped_by_quota` (suit le même sort que `accounts_restated`, déjà exposé sans widget dédié).
+
+---
+
+## Billing — stripe-billing-webhook sans protection anti-désordre (2026-08-13)
+
+Audit readiness client 2026-08 : `stripe-billing-webhook` (webhook de l'abonnement Sentio elle-même, distinct de `stripe-webhook`) faisait un `UPDATE organizations SET plan_type = X` inconditionnel sur chaque event traité, `event.id` n'étant ni loggé (hors chemin d'erreur) ni utilisé pour quoi que ce soit — contrairement à `stripe-webhook`, qui protège déjà ses champs sensibles avec une garde `last_event_created_at` par subscription (event trop ancien → ignoré). Un event Stripe redélivré en retard ou hors ordre (retry réseau, resend manuel depuis le Dashboard Stripe) pouvait donc écraser `plan_type` avec un état plus ancien que celui déjà appliqué — silencieusement, sans erreur.
+
+**Changements :**
+- Migration `20260813000001_billing_webhook_event_ordering.sql` : nouvelle colonne `organizations.billing_event_at` (timestamptz, nullable) — retient le timestamp Stripe (`event.created`, jamais la date de traitement) du dernier `updatePlanType()` appliqué avec succès. Appliquée et vérifiée en direct sur le projet dev (UPDATE conditionnel simulé en SQL brut : un event plus récent s'applique, un rejeu plus ancien est correctement rejeté — 0 ligne affectée, état inchangé — puis restauré à son état d'origine).
+- `stripe-billing-webhook/index.ts::updatePlanType` : même mécanisme que `last_event_created_at` (`stripe-webhook/index.ts`), appliqué ici en un **UPDATE conditionnel atomique unique** (`WHERE billing_event_at IS NULL OR billing_event_at < event.created`) plutôt qu'une lecture préalable suivie d'une écriture — élimine toute fenêtre TOCTOU par construction, pas seulement en pratique.
+- `eventCreatedIso` calculé une fois à l'entrée (`event.created`, secondes epoch Stripe → ISO) et propagé aux 3 handlers (`handleCheckoutCompleted`, `handleSubscriptionUpdated`, `handleSubscriptionDeleted`).
+
+**Tests** : `supabase/tests/stripe-billing-webhook.test.ts` (nouveau — cette fonction n'avait aucune couverture avant ce chantier) : `resolveOrgIdAndTier` (résolution org/tier, 6 cas), conversion `event.created` → ISO, et construction du filtre PostgREST OR (bien formé, aucune virgule injectée par un timestamp ISO, branche `IS NULL` toujours présente pour le tout premier event d'une org).
+
+**Non vérifié dans ce chantier** : `deno check` toujours indisponible dans cet environnement (comme pour le reste des Edge Functions) ; vérification live limitée à la logique SQL de la garde (confirmée par simulation directe en base, ci-dessus) — le chemin HTTP complet (signature Stripe, parsing d'event réel) n'a pas été exercé de bout en bout.
+
+---
+
+## NRR/churn/croissance — bug de signe contraction/churn, deux endroits (2026-08-10, issue #28)
+
+Issue #28 (audit logique métier Stripe/MRR, Phase 4) : `compute-peer-benchmarks/calcOrgMetrics` calcule `netMovements = new + expansion + reactivation − contraction − churn` en assumant `contraction`/`churn` positifs. La convention réelle de `mrr_movements` est **négative** (`classifyMovement`, `_shared/mrr-engine.ts`, testée) — la formule les additionne donc en pratique au lieu de les soustraire, gonflant `netMovements`/NRR/`mrrGrowth` et rendant `churnRate` négatif.
+
+**Étape 1 (demandée par l'issue avant tout code)** : validation contre de vraies données. `mrr_movements` sur le projet dev ne contient aujourd'hui que des lignes `new` (le backfill Phase 2, issue #40, n'a pas encore eu lieu) — aucune ligne `contraction`/`churn` à inspecter en base. Hypothèse validée à la place par lecture du code faisant autorité : `classifyMovement` retourne explicitement `amount_cents: newMrr - prevMrr` (négatif par construction, `newMrr < prevMrr`) pour `contraction` et `amount_cents: -prevMrr` pour `churn` ; `calcNrrPercentage`/`calcChurnRate30d` (`_shared/mrr-engine.ts`, référence déjà correcte et testée) additionnent ces deux champs avec le commentaire explicite `// déjà négatif`.
+
+**Trouvé au passage, hors scope initial de l'issue** : la même formule buggy existait une **deuxième fois**, en copie locale dans `dashboard-api/index.ts::handleBenchmarks` (`GET /dashboard-api/benchmarks`, section "Benchmarks sectoriels" affichée sur le dashboard client, `BenchmarkSection.tsx` côté frontend). Ce chemin délègue déjà le NRR à `calcNrrPercentage` (correct), mais calculait `churn_rate`/`mrr_growth` avec le même `netMovements12m`/`startingMrr` buggy — un churn négatif y était même noté **"excellent"** par `rateLower` (borne `<= 3` inclut trivialement tout nombre négatif). Live, non testé (aucun test, mirror ou direct, ne couvrait ce chemin avant ce chantier).
+
+**Changements :**
+- `compute-peer-benchmarks/index.ts::calcOrgMetrics` : `+ contraction12m + churn12m` (au lieu de `−`), `churnRate` via `Math.abs(churn12m)`.
+- `_shared/mrr-engine.ts` : nouvelle fonction pure `calcMrrGrowthMetrics(currentMrrCents, movements, hasAtLeastThreeMonthsOfHistory)` — remplace la copie locale de `dashboard-api/index.ts` (extraite pour être directement testable, `index.ts` a des imports Deno-natifs non résolvables sous Vitest ; occasion de simplifier l'agrégation par type en une seule somme signée, même style que `calcChurnRate30d`). `dashboard-api/index.ts::handleBenchmarks` délègue désormais à cette fonction pour `churn_rate`/`mrr_growth`.
+- `supabase/tests/peer-benchmarks.test.ts` : le test miroir de `calcOrgMetrics` reproduisait l'hypothèse fausse (fixture `churn: +5000`, jamais observable en pratique) — corrigé en `-5000` (TDD demandé par l'issue : le test échoue d'abord contre l'ancienne formule avant le fix), plus un test dédié reproduisant explicitement le bug historique (`netMovements` gonflé à 25000 au lieu de 15000, `churnRate` négatif) pour non-régression.
+- `supabase/tests/mrr-engine.test.ts` : `calcMrrGrowthMetrics` testé directement (import réel, pas de copie miroir) — historique insuffisant, fenêtre calme (0% un vrai zéro), churn négatif additionné, `correction` exclu, `startingMrr <= 0`, plafond 100%, contraction sans churn.
+
+**Tests** : 933 tests (+7 mrr-engine, peer-benchmarks.test.ts inchangé en nombre mais réécrit). `npm run verify` vert (build : même échec pré-existant `NEXT_PUBLIC_SUPABASE_URL` absent de ce sandbox, non lié à ce chantier).
+
+**Non vérifié dans ce chantier** : impact réel en base impossible à mesurer sur ce projet dev faute de données `contraction`/`churn` existantes (cf. Étape 1) — à re-vérifier une fois le backfill `mrr_movements` (issue #40) fait, sur un portefeuille avec un vrai historique de churn.
+
+---
+
+## Trial — endpoint manquant et enforcement jamais câblé (2026-08-10)
+
+Audit readiness client 2026-08 : `organizations.trial_ends_at` est écrit à la création d'org (14 jours, `create-organization-with-invitation`) mais jamais relu pour bloquer quoi que ce soit — « le trial n'expire jamais ». Découverte en creusant plus loin : le frontend avait déjà tout le contrat construit et testé (`useTrialStatus`/`TrialBanner`/`fetchWithUserJwt::TrialExpiredError` sur 402) pour un endpoint `GET /trial-status` qui **n'existait pas côté backend** — `TrialBanner` ne s'affichait donc jamais (`{trialStatus && <TrialBanner .../>}`, `trialStatus` toujours `undefined`), et aucun 402 n'a jamais été émis.
+
+**Changements :**
+- `_shared/trial-status.ts` (nouveau) : `computeTrialStatus(planType, trialEndsAtIso, nowMs)`, fonction pure. Le trial ne s'applique qu'au tier `'free'` — un compte déjà payant n'est jamais "en trial" même avec un `trial_ends_at` résiduel en base (upgrade fait en cours d'essai, colonne jamais nettoyée). `trial_ends_at` absent → ni actif ni expiré (S1, "no data ≠ neutral data" — un trou de donnée ne doit jamais se lire comme une expiration qui bloquerait un compte). Borne : expiré strictement après `trial_ends_at` (inclusif à l'instant exact).
+- `trial-status/index.ts` (nouvelle Edge Function, `GET`, JWT vérifié dans le code) : ferme le contrat frontend existant. Volontairement **jamais** trial-gated elle-même — un compte expiré doit pouvoir lire son propre statut.
+- `_shared/auth.ts` : `TrialExpiredError` **extends `AuthError`** (402) plutôt qu'une classe sœur — les 39 appelants de `verifyUserAuth` testent déjà `err instanceof AuthError` dans leur `catch`, donc zéro changement requis sur ces 39 fichiers pour que le 402 se propage correctement. `assertTrialActive(supabase, organizationId)` : opt-in explicite (appelé une ligne à la fois par les fonctions concernées, jamais injecté dans `verifyUserAuth` lui-même) — un enforcement implicite et global aurait risqué de bloquer silencieusement les écrans dont un compte en trial expiré a justement besoin (billing, onboarding, admin).
+- Câblé explicitement sur 7 fonctions "coeur produit" (`dashboard-api`, `accounts-api`, `insights-crud`, `playbook-crud`, `playbook-execute`, `get-today-status`, `get-today-actions`) — la surface "voir son portefeuille / agir dessus". `playbook-execute` : gate posé uniquement sur le chemin utilisateur réel (JWT), jamais sur le chemin `isInternalTrigger` (cron/DB trigger) — une automatisation déjà déclenchée ne doit pas échouer silencieusement, seul un utilisateur en direct doit voir le mur.
+- Non gatées, délibérément : `subscription-status`, `stripe-billing-checkout` (un compte expiré doit pouvoir voir son statut et payer), toutes les fonctions d'onboarding (`onboarding-status`, `get-onboarding-status-v2`, `onboarding-first-win`, `create-organization-with-invitation`, `on-user-signup`, `update-onboarding-step` — un `trial_ends_at` fraîchement créé est par construction dans le futur, mais bloquer un signup en cours serait la pire régression possible), `admin-proxy`, `health-check`, `self-monitor` (ops Sentio, pas un flux client).
+
+**Frontend** (`sentio-dev-frontend`) : `src/lib/types/trial.ts::PlanType` corrigé — `'starter'` remplacé par `'scale'` (n'a jamais matché `organizations.plan_type` CHECK constraint ni `_shared/subscription-tiers.ts::SubscriptionTierKey`, un mismatch resté invisible faute d'endpoint réel pour le révéler). Aucun autre changement frontend nécessaire — `TrialBanner`/`useTrialStatus`/`TrialExpiredError` existaient déjà, complets et testés, en attente d'un backend.
+
+**Non vérifié dans ce chantier** : aucun `deno check` disponible dans cet environnement (comme pour le reste des Edge Functions — la CI de ce projet n'a jamais eu d'étape Deno), et pas de déploiement live testé (aurait divergé de la pipeline réelle, `.github/workflows/supabase-deploy.yml` sur merge vers `main`, plutôt que de la suivre) — chaque site d'appel réutilise cependant un pattern déjà déployé et fonctionnel ailleurs dans le même fichier (`getTier(org?.plan_type ?? null)`, identique à `subscription-status/index.ts`). À confirmer au prochain déploiement.
+
+**Tests** : `supabase/tests/trial-status.test.ts` (nouveau, 8 tests) — import direct de `_shared/trial-status.ts` (zéro dépendance Deno-native, pas de copie miroir) : trial actif/expiré, borne exacte, `trial_ends_at` absent, arrondi des jours partiels, tiers payants avec `trial_ends_at` résiduel, echo des champs d'entrée.
+
+---
+
+## Cron jobs — 4 jobs cassés à 100% depuis leur création, fix Vault (2026-08-10, issue #38)
+
+Root cause confirmée en base sur le projet dev (`upqakxuatlshhqiagbqw`) avant tout correctif : `refresh-hubspot-tokens` (0/779), `sync-hubspot-daily` (0/149), `playbook-scheduler` (0/14353), `self-monitor` (0/14182) — 100% d'échec depuis leur première exécution en mars 2026, erreur identique à chaque run : `unrecognized configuration parameter "app.supabase_functions_url"`. Ces 4 jobs construisaient leur URL/auth via `current_setting('app.supabase_functions_url')`/`current_setting('app.service_role_key')` — deux GUC qui n'ont **jamais** été définies au niveau base (`current_setting(..., true)` confirmé `NULL`/`NULL`). Les 6 autres jobs actifs (`sync-stripe-all-orgs`, `calculate-scores-safety`, `generate-insights-daily`, `churn-alert-daily`, `weekly-digest-monday`, `compute-peer-benchmarks-daily`) n'ont jamais été affectés : créés après le 2026-08-02, ils codent l'URL et le JWT service_role en clair directement dans `cron.job.command`, un pattern qui marche mais duplique un secret en clair à chaque nouveau job.
+
+**Conséquence directe confirmée à la réactivation** (`net._http_response`, premier run réel après fix) : `self-monitor` a exécuté **87 actions de rattrapage** (auto-fail de syncs bloquées, releases de locks expirés) accumulées sur cinq mois d'inactivité totale de ce filet de sécurité — cohérent avec l'hypothèse de l'issue #38 sur le sync ayant silencieusement droppé 422 comptes sans alerte. `sync-hubspot`, réactivé, révèle immédiatement un token HubSpot expiré sur une org (`HTTP 401` côté HubSpot) — nouveau signal, non traité ici, cf. « Hors scope » plus bas.
+
+**Fix retenu** : ni l'option (a) de l'issue (définir les GUC manquantes) ni une réplique du pattern littéral des 6 jobs sains (qui ajouterait une 5e/6e/7e/8e copie en clair de la clé service_role — déjà un secret compromis en attente de rotation, cf. entrée « Trigger playbook » plus bas). Migration `20260810000001_fix_dead_cron_jobs_vault_auth.sql` : nouvelle fonction `public.cron_dispatch_via_vault(function_path, timeout_ms)` — lit la clé service_role depuis Supabase Vault (secret `cron_service_role_key`, même pattern que `playbook_trigger_secret` de `20260802000001_fix_trigger_hardcoded_key.sql`) au lieu d'une GUC ou d'un littéral committé. `cron.alter_job()` appliqué aux 4 jobs cassés (jobid 2, 6, 7, 8) uniquement — les 6 jobs déjà sains ne sont pas touchés (minimiser le risque sur du code qui marche), mais restent une cible de suivi avant la rotation effective de la clé : le jour où elle tourne, ces 6 jobs recasseraient si on ne les migre pas aussi vers Vault.
+
+Secret Vault `cron_service_role_key` créé directement en base (`vault.create_secret`, jamais commité dans un fichier de migration — même convention que le flow manuel documenté pour `playbook_trigger_secret`), seedé avec la clé service_role actuelle (déjà exposée en clair par ailleurs, cf. ci-dessous — ce seed ne constitue pas une exposition nouvelle, et consolide toutes les futures rotations sur une seule valeur au lieu de N occurrences littérales).
+
+**Vérifié** : les 4 jobs invoqués manuellement post-migration répondent tous HTTP 200 avec un comportement métier correct (`self-monitor` 87 actions, `playbook-scheduler` "No playbooks due", `refresh-hubspot-tokens` 1/1 refreshed, `sync-hubspot` 2 orgs synced dont 1 avec 401 HubSpot). Vérification d'un tick cron réel (pas seulement un appel manuel) en cours au moment de la rédaction de cette entrée.
+
+**Hors scope de ce chantier, explicitement** : rotation de la clé service_role elle-même (toujours en attente, action Dashboard Supabase manuelle — cf. `20260802000001_fix_trigger_hardcoded_key.sql`) ; migration des 6 jobs déjà sains vers Vault (fast-follow recommandé, avant la rotation) ; le token HubSpot expiré révélé par la réactivation de `sync-hubspot-daily` (nécessite un flow de reconnexion, décision produit distincte) ; création du secret Vault `playbook_trigger_secret` (toujours absent, le trigger `on_playbook_activate` reste no-op — chantier séparé).
+
+---
+
 ## `mrr_movements` — upsert cassé depuis la création de la table, jamais une seule ligne écrite (2026-08-08)
 
 Signalé via un écart Churn Rate affiché à `0.0%` en dashboard — investigation confirmant que `mrr_movements` avait **0 ligne** en base malgré 251 runs `sync-stripe` `completed` depuis mars 2026 (`data_syncs`). Ce n'était pas une absence de churn : `calcChurnRate30d`/`calcNrrPercentage` (`_shared/mrr-engine.ts`) n'ayant jamais eu de mouvements à lire, leur garde-fou `hasAtLeastThreeMonthsOfHistory` se basait sur `organizations.created_at` en l'absence de tout historique réel, produisant un zéro trompeur au lieu d'un statut "indisponible".

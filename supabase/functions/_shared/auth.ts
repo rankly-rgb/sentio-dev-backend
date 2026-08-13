@@ -4,7 +4,9 @@
 // utilisés par les projets Supabase récents.
 // ============================================================
 
-import { createClient } from 'jsr:@supabase/supabase-js@2'
+import { createClient, SupabaseClient } from 'jsr:@supabase/supabase-js@2'
+import { getTier } from './subscription-tiers.ts'
+import { computeTrialStatus } from './trial-status.ts'
 
 export interface AuthResult {
   userId: string
@@ -76,5 +78,44 @@ export class AuthError extends Error {
     super(message)
     this.name = 'AuthError'
     this.status = status
+  }
+}
+
+/**
+ * Extends AuthError (not a sibling class) so every one of the 39 existing
+ * call sites — all written as `catch (err) { if (err instanceof AuthError)
+ * return errorResponse(err.message, err.status) }` — forwards this
+ * correctly with zero changes needed on their end. Status 402, matching
+ * the contract already implemented and tested on the frontend
+ * (fetchWithUserJwt.ts::TrialExpiredError) but never triggered until now.
+ */
+export class TrialExpiredError extends AuthError {
+  constructor() {
+    super('Trial expired — please upgrade your subscription', 402)
+    this.name = 'TrialExpiredError'
+  }
+}
+
+/**
+ * Opt-in trial gate — called explicitly by the handful of "core value"
+ * Edge Functions (see docs/openspec.md billing section) right after
+ * verifyUserAuth, NOT baked into verifyUserAuth itself. Deliberately not
+ * applied everywhere: auth/billing/onboarding/admin/monitoring endpoints
+ * must stay reachable for an expired-trial org (to view its own status,
+ * to upgrade, to finish signup, for Sentio ops) — an implicit blanket gate
+ * risks silently locking out exactly the screens a stuck org needs.
+ */
+export async function assertTrialActive(supabase: SupabaseClient, organizationId: string): Promise<void> {
+  const { data: org } = await supabase
+    .from('organizations')
+    .select('plan_type, trial_ends_at')
+    .eq('id', organizationId)
+    .maybeSingle()
+
+  const tier = getTier(org?.plan_type ?? null)
+  const status = computeTrialStatus(tier.key, org?.trial_ends_at ?? null, Date.now())
+
+  if (status.is_trial_expired) {
+    throw new TrialExpiredError()
   }
 }

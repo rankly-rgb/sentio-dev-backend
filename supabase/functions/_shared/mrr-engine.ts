@@ -572,3 +572,48 @@ export function calcChurnRate30d(
 
   return Math.round((Math.abs(churnSum) / mrrStart30dCents) * 1000) / 10
 }
+
+export interface MrrGrowthMetrics {
+  net_movements_cents: number
+  starting_mrr_cents: number
+  churn_rate_percentage: number | null
+  mrr_growth_percentage: number | null
+}
+
+/**
+ * Churn rate + croissance MRR sur une fenêtre de mouvements arbitraire
+ * (12 mois glissants pour /dashboard-api/benchmarks — même garde bootstrap,
+ * même convention de signe que calcNrrPercentage/calcChurnRate30d ci-dessus :
+ * contraction/churn sont déjà négatifs, additionnés jamais soustraits).
+ * Extrait hors dashboard-api/index.ts (issue #28 : une copie locale
+ * "- contraction - churn" y gonflait netMovements/mrrGrowth et rendait
+ * churnRate négatif) pour rester directement testable — index.ts a des
+ * imports Deno-natifs non résolvables sous Vitest.
+ */
+export function calcMrrGrowthMetrics(
+  currentMrrCents: number,
+  movements: MrrMovementForNrr[],
+  hasAtLeastThreeMonthsOfHistory: boolean,
+): MrrGrowthMetrics {
+  let netMovements = 0
+  let churnSum = 0
+  for (const m of movements) {
+    if (m.movement_type === 'correction') continue
+    netMovements += m.amount_cents
+    if (m.movement_type === 'churn') churnSum += m.amount_cents // déjà négatif
+  }
+
+  const startingMrrCents = currentMrrCents - netMovements
+  const hasValidWindow = hasAtLeastThreeMonthsOfHistory && startingMrrCents > 0
+
+  return {
+    net_movements_cents: netMovements,
+    starting_mrr_cents: startingMrrCents,
+    churn_rate_percentage: hasValidWindow
+      ? Math.min(100, Math.round((Math.abs(churnSum) / startingMrrCents) * 1000) / 10)
+      : null,
+    mrr_growth_percentage: hasValidWindow
+      ? Math.round((netMovements / startingMrrCents) * 1000) / 10
+      : null,
+  }
+}

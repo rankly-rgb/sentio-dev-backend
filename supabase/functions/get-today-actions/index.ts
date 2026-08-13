@@ -40,7 +40,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
-import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { verifyUserAuth, AuthError, assertTrialActive } from '../_shared/auth.ts'
 import {
   computeTodayActions,
   buildTodayActionsSummary,
@@ -78,6 +78,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse('Server configuration error', 500)
   }
 
+  try {
+    await assertTrialActive(supabase, auth.organizationId)
+  } catch (err) {
+    if (err instanceof AuthError) return errorResponse(err.message, err.status)
+    throw err
+  }
+
   const orgId = auth.organizationId
 
   const [accountsRes, playbooksRes, insightsRes, segmentsRes] = await Promise.all([
@@ -85,7 +92,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // droper par accident un compte pas encore scoré (churn_risk_band NULL).
     supabase
       .from('accounts')
-      .select('id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, mrr_cents, plan_tier, contract_end_date, billing_interval, created_at, is_delinquent')
+      .select('id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, mrr_cents, mrr_status, plan_tier, contract_end_date, billing_interval, created_at, is_delinquent')
       .eq('organization_id', orgId)
       .or('churn_risk_band.neq.churned,churn_risk_band.is.null')
       .limit(ACCOUNTS_LIMIT),
