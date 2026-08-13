@@ -333,6 +333,47 @@ jobs:
                 )
             ) x;"
 
+          # a18 — incident 2026-08-13, tour 6. a13 (the post-deploy HTTP smoke
+          # test, below) always uses the same fixed account (org d3dc9223,
+          # paying plan, trial concept doesn't apply to it) — it structurally
+          # can never detect a trial-gating outage like tonight's: 9 orgs,
+          # every core-product endpoint returning 402, a13 green throughout
+          # because it never once asked a gated org. Two parts:
+          #
+          # 1. hard, cheap defensive check: no paying org (plan_type != 'free')
+          #    should ever carry a state that would make it read as
+          #    trial-expired — computeTrialStatus's precondition is a strict
+          #    plan_type == 'free' check, so this should always be true by
+          #    construction; this just makes sure nothing (a migration, a
+          #    manual UPDATE, a future refactor) quietly breaks that
+          #    precondition without anyone noticing.
+          # 2. never silent (tour 6 instruction — "at minimum, publish the
+          #    count of gated orgs on every deploy"): the count of
+          #    plan_type='free' orgs whose trial_ends_at has already passed is
+          #    ALWAYS printed below, whether 0 or not. Deliberately NOT a hard
+          #    assertion on its own — an org genuinely reaching the end of its
+          #    trial is expected, normal state, not an incident; hard-failing
+          #    every future deploy the moment one trial expires would be
+          #    wrong. What broke tonight wasn't gated orgs existing, it was
+          #    that fact being invisible (a13 green, nobody told). This fixes
+          #    the invisibility. Whether the gate itself is the right UX for
+          #    a trial-ending prospect is a separate, explicitly-opened
+          #    product question (see issue tracking the gate-design review).
+          run_query "a18_paying_org_reads_as_trial_expired" "hard" "
+            select count(*) as n from organizations
+            where plan_type != 'free' and trial_ends_at is not null and trial_ends_at < now();"
+
+          GATED_QUERY='select count(*) as n from organizations where plan_type = '"'"'free'"'"' and trial_ends_at is not null and trial_ends_at < now();'
+          GATED_SQL_BODY=$(jq -Rcs '{"query":.}' <<< "$GATED_QUERY")
+          GATED_RESULT=$(curl -s -X POST \
+            "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/database/query" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$GATED_SQL_BODY")
+          GATED_COUNT=$(printf '%s' "$GATED_RESULT" | jq -r '.[0].n // "unknown"')
+          echo "::notice::a18_trial_gated_orgs — $GATED_COUNT organization(s) currently plan_type='free' with an expired trial_ends_at (will receive 402 from every trial-gated endpoint). This count is informational, not a deploy blocker — see a18's comment in this workflow for why."
+          echo "a18: $GATED_COUNT org(s) currently trial-gated." >> "$GITHUB_STEP_SUMMARY"
+
           if [ "${FAIL_HARD:-0}" = "1" ]; then
             echo "::error::One or more hard data-truth assertions failed — see above."
             exit 1
