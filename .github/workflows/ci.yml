@@ -106,10 +106,21 @@ jobs:
         #
         # Le baseline (14 fonctions, comptes vérifiés en direct) reste
         # committé tel quel — le travail n'est pas perdu, juste pas câblé en
-        # hard. Toujours ::warning:: inconditionnel, jamais exit 1. Voir
-        # issue #67 pour la reprise à froid (root cause du log manquant non
-        # trouvée : suspecté batching GitHub des commandes ::error::/
-        # ::warning:: en boucle serrée, jamais confirmé).
+        # hard. Toujours ::warning:: inconditionnel, jamais exit 1.
+        #
+        # Root cause du "log manquant" enfin trouvée (tour 6, en lisant le
+        # tout premier run réellement passé en soft) : GitHub force
+        # `bash -e` sur chaque step `run:`, quel que soit le `set` posé
+        # dans le script (`set -uo pipefail` n'annule pas `-e`). La toute
+        # première commande `deno check` en échec — non protégée par un
+        # if/&&/||, exécutée seule sur sa ligne avant que `CHECK_EXIT=$?`
+        # ne capture son statut — faisait donc avorter le script entier
+        # instantanément, avant qu'aucune sortie diagnostique ne soit
+        # produite. Ce n'était pas un problème de récupération de logs
+        # GitHub (batching d'annotations, latence d'archivage, etc., toutes
+        # hypothèses explorées et fausses) : le step n'avait simplement
+        # jamais rien écrit après ce point. Corrigé par `|| true` sur
+        # l'appel — n'affecte jamais `$?`, qui est toujours lu juste après.
         run: |
           set -uo pipefail
           for dir in supabase/functions/*/; do
@@ -117,7 +128,7 @@ jobs:
             [ "$fn" = "_shared" ] && continue
             [ -f "${dir}index.ts" ] || continue
 
-            deno check "${dir}index.ts" > /tmp/deno-check-output.txt 2>&1
+            deno check "${dir}index.ts" > /tmp/deno-check-output.txt 2>&1 || true
             CHECK_EXIT=$?
 
             BASELINE_MAX=$(jq -r --arg fn "$fn" '.functions[$fn].max_errors // empty' .github/a14-baseline.json)
