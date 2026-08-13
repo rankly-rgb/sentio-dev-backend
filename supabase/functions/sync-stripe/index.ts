@@ -768,7 +768,7 @@ async function syncInvoices(
   logger: DataSyncLogger,
   writeErrors: WriteError[],
   createdAfter?: number,
-): Promise<{ invoiceOnlyAccountsCount: number }> {
+): Promise<{ invoiceOnlyAccountsCount: number; invoicesOrphaned: number }> {
   const extraParams: Record<string, string> = {}
   if (createdAfter) extraParams['created[gt]'] = String(createdAfter)
 
@@ -854,12 +854,12 @@ async function syncInvoices(
 
   if (orphaned > 0) {
     console.warn(JSON.stringify({
-      level: 'warn', function_name: 'sync-stripe',
+      level: 'warn', function_name: 'sync-stripe', organization_id: organizationId,
       message: `${orphaned} invoices skipped — no matching account (expected during initial sync)`,
     }))
   }
 
-  return { invoiceOnlyAccountsCount: invoiceOnlyAccountIds.length }
+  return { invoiceOnlyAccountsCount: invoiceOnlyAccountIds.length, invoicesOrphaned: orphaned }
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
@@ -1069,7 +1069,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const { newAccountsSkippedByQuota } = await syncCustomers(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
     const { anomalyDetected, billingProfile, restatementAccountsCount } = await syncSubscriptions(supabase, organizationId, apiKey, logger, writeErrors, restatementMode)
-    const { invoiceOnlyAccountsCount } = await syncInvoices(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
+    const { invoiceOnlyAccountsCount, invoicesOrphaned } = await syncInvoices(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
 
     if (anomalyDetected) {
       // 'validation_error' — CHECK data_syncs_error_type_check n'inclut pas de valeur
@@ -1126,6 +1126,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         restatement_mode: restatementMode,
         ...(restatementMode ? { accounts_restated: restatementAccountsCount ?? 0 } : {}),
         ...(newAccountsSkippedByQuota > 0 ? { new_accounts_skipped_by_quota: newAccountsSkippedByQuota } : {}),
+        ...(invoicesOrphaned > 0 ? { invoices_orphaned: invoicesOrphaned } : {}),
       },
       writeErrors,
     )
@@ -1155,6 +1156,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       sync_type: syncType,
       restatement_mode: restatementMode,
       ...(newAccountsSkippedByQuota > 0 ? { new_accounts_skipped_by_quota: newAccountsSkippedByQuota } : {}),
+      ...(invoicesOrphaned > 0 ? { invoices_orphaned: invoicesOrphaned } : {}),
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)

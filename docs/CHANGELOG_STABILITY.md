@@ -4,6 +4,22 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Issue #34 — couverture de sync des factures diagnostiquée : artefact de seed, pas un bug (2026-08-13)
+
+Issue #34 posait deux hypothèses non départagées : (1) artefact de données de seed, (2) `syncInvoices` sous-fetch réellement depuis Stripe. Diagnostiqué en direct contre le projet dev (org `37591436-aa31-44c6-84fc-aa2e78ceb9fc`, 82 comptes `past_due`, 4 seulement avec facture — l'écart de l'issue reproduit à l'identique sur un org différent de celui cité, les IDs ayant tourné depuis le 6 août).
+
+**Conclusion : hypothèse 1 confirmée, hypothèse 2 écartée.** Les 82 subscriptions `past_due` forment un lot **parfaitement uniforme** — toutes créées le même jour (`2026-05-16`), contre 250 subscriptions `active` organiques (dates variées, `2026-08-02`) sur le même org. Décisif : le tout premier sync de cet org (`2026-08-04`, `created_after: null` — un fetch complet non filtré, confirmé via `data_syncs.sync_summary`) a récupéré 562 factures ce jour-là pour le reste du portefeuille, mais **zéro** pour ce lot précis. Un vrai bug de pagination/filtre de `syncInvoices` n'expliquerait pas une corrélation aussi exacte avec un seul lot artificiellement seedé pendant qu'un fetch non filtré réussit pour tout le reste. `accounts.stripe_customer_id` est bien renseigné et bien formé pour ces 82 comptes — pas un problème de mapping non plus.
+
+**Vérifié au passage** : le principe "no data ≠ neutral data" tient sur ce cas limite — `payment_health_score = NULL` (jamais une valeur neutre déguisée), `health_score_status = 'insufficient'`, `is_delinquent = true` et `churn_risk_score = 35` (signal `payment_delinquent` correctement déclenché malgré l'absence de facture, exactement son rôle voulu) sur les 82 comptes, sans exception.
+
+**Trouvé au passage, corrigé** : `syncInvoices` compte déjà les factures orphelines (`customer` Stripe sans compte correspondant) mais ne les loggait qu'en `console.warn`, jamais surfacées — même classe de signal invisible que `new_accounts_skipped_by_quota` (entrée précédente) et `accounts_restated`. `invoicesOrphaned` retourné par `syncInvoices`, inclus dans `data_syncs.sync_summary` et la réponse JSON de `sync-stripe` quand > 0.
+
+**Hors périmètre** : aucune action sur les 82 comptes eux-mêmes (données de seed dev, pas un problème de prod à corriger) ; pas de garde-fou anti-seed-incomplet ajouté (hors scope, ce diagnostic ferme la question posée par l'issue, n'ouvre pas un nouveau chantier).
+
+**Tests** : suite existante inchangée (948 tests), le changement n'affecte que la visibilité d'un compteur déjà calculé, aucune nouvelle branche logique à couvrir.
+
+---
+
 ## Billing — quota de comptes affiché mais jamais appliqué (2026-08-13)
 
 Audit readiness client 2026-08 : `is_over_limit`/`max_accounts` (`subscription-status`, `_shared/subscription-tiers.ts::isOverAccountLimit`) n'étaient utilisés que pour l'affichage — un avertissement dans `BillingSection.tsx` (`overLimitWarning`), jamais pour limiter quoi que ce soit côté backend. Un org Free (plafond 30 comptes) pouvait en tracker sans limite. Confirmé en base sur le projet dev : un org `growth` (plafond 200) à 2688 comptes, trois orgs `free` (plafond 30) entre 422 et 432 comptes chacun.
