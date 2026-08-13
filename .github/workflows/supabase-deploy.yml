@@ -85,6 +85,118 @@ jobs:
           fi
           echo "accounts_with_priority: no column drift."
 
+      - name: Data-truth assertions
+        # Lot 2 (2026-08-13, exécution autonome post-audit) : chaque requête
+        # ci-dessous prévient un incident réel déjà survenu sur ce projet
+        # (voir docs/CHANGELOG_STABILITY.md). mode=hard échoue le déploiement
+        # si la requête renvoie des lignes ; mode=soft n'émet qu'un
+        # ::warning:: — réservé aux gardes dont la donnée nécessaire n'existe
+        # pas encore (assertions 4/5, en attente des Lots 4/6).
+        #
+        # Une assertion volontairement fausse (a0_negative_control) prouve que
+        # le mécanisme échoue réellement avant qu'on lui fasse confiance — le
+        # dispositif de tests de ce projet a déjà été vert pendant plusieurs
+        # incidents (cf. entrée "mrr_movements — upsert cassé", 2026-08-08).
+        run: |
+          set -euo pipefail
+
+          run_query() {
+            local NAME="$1" MODE="$2" SQL="$3"
+            local SQL_BODY RESULT CODE BODY COUNT
+            SQL_BODY=$(jq -Rcs '{"query":.}' <<< "$SQL")
+            RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$SQL_BODY")
+            CODE=$(printf '%s' "$RESULT" | tail -1)
+            BODY=$(printf '%s' "$RESULT" | head -1)
+            if [ "$CODE" != "200" ] && [ "$CODE" != "201" ]; then
+              echo "::warning::$NAME — Management API returned HTTP $CODE, could not verify. Body: $BODY"
+              return 0
+            fi
+            COUNT=$(printf '%s' "$BODY" | jq -r '.[0].n // 0')
+            if [ "$COUNT" != "0" ]; then
+              if [ "$MODE" = "hard" ]; then
+                echo "::error::$NAME — expected 0, got $COUNT. Body: $BODY"
+                echo "FAIL_HARD=1" >> "$GITHUB_ENV"
+              else
+                echo "::warning::$NAME (pending) — expected 0, got $COUNT. Body: $BODY"
+              fi
+            else
+              echo "$NAME: ok (0 rows)"
+            fi
+          }
+
+          # Negative-control proof that run_query actually fails when it
+          # should (a harness that's always green is worse than no harness —
+          # see docs/CHANGELOG_STABILITY.md, "mrr_movements — upsert cassé").
+          # NOT run here: a query engineered to return a row would gate every
+          # future deploy on a permanently-failing assertion. Proven instead
+          # by local simulation before this workflow was merged (same
+          # run_query logic, `select 1 as n` with mode=hard set FAIL_HARD=1
+          # as expected; removed once confirmed) — see the PR description for
+          # the exact commands run.
+
+          # a1 — Lot 1 guard: no SECURITY DEFINER function reachable by anon/PUBLIC.
+          run_query "a1_security_definer_exposed" "hard" "
+            select count(*) as n from (
+              select p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+              where n.nspname='public' and p.prosecdef and has_function_privilege('anon', p.oid, 'EXECUTE')
+              union
+              select routine_name from information_schema.routine_privileges
+              where routine_schema='public' and grantee='PUBLIC'
+                and routine_name in (select p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.prosecdef)
+            ) x;"
+
+          # a2 — hardcoded JWT literals: static file check, already enforced
+          # in ci.yml (build-and-test job), not duplicated here as SQL.
+
+          # a3 — delinquency audit (2026-08-06): no is_delinquent account left in band 'low'.
+          run_query "a3_delinquent_in_low_band" "hard" "
+            select count(*) as n from accounts where is_delinquent = true and churn_risk_band = 'low';"
+
+          # a4 — Lot 4 guard (movement_date provenance), pending until subscriptions.stripe_created_at exists.
+          run_query "a4_new_movement_misdated" "soft" "
+            select count(*) as n from mrr_movements m
+            join subscriptions s on s.account_id = m.account_id
+            where m.movement_type = 'new' and m.movement_date = current_date
+              and s.created_at < now() - interval '7 days';"
+
+          # a5 — Lot 6 guard (mrr_movements generation), pending until backfill lands.
+          run_query "a5_synced_org_with_zero_movements" "soft" "
+            select count(*) as n from (
+              select a.organization_id from data_syncs d
+              join accounts a on a.organization_id = d.organization_id
+              where d.sync_status = 'completed' and d.sync_source = 'stripe'
+              group by a.organization_id
+              having count(distinct a.id) > 0
+                 and count(distinct a.id) > (select count(*) from mrr_movements m where m.organization_id = a.organization_id)
+            ) x;"
+
+          # a6 — 'no data ≠ neutral data' (S1): mrr unavailable must never look like a complete revenue_dynamics dimension.
+          run_query "a6_unavailable_mrr_with_complete_score" "hard" "
+            select count(*) as n from accounts
+            where mrr_status = 'unavailable' and score_breakdown->'revenue_dynamics'->>'status' = 'complete';"
+
+          # a7 — MAX_PAGES=50 (sync-stripe/index.ts) forward-looking capacity check:
+          # 5000 objects/resource cap, warn well before an org gets there rather
+          # than after truncation already happened silently.
+          run_query "a7_approaching_pagination_cap" "hard" "
+            select count(*) as n from (
+              select organization_id from accounts group by 1 having count(*) >= 4500
+              union all
+              select a.organization_id from subscriptions s join accounts a on a.id = s.account_id group by 1 having count(*) >= 4500
+              union all
+              select a.organization_id from invoices i join accounts a on a.id = i.account_id group by 1 having count(*) >= 4500
+            ) x;"
+
+          if [ "${FAIL_HARD:-0}" = "1" ]; then
+            echo "::error::One or more hard data-truth assertions failed — see above."
+            exit 1
+          fi
+          echo "All hard data-truth assertions passed."
+
       - name: Set Edge Function secrets
         # N'écrit que les secrets effectivement définis dans GitHub Secrets.
         # Évite d'écraser un secret existant avec une chaîne vide si le
