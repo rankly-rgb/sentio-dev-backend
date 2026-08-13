@@ -4,6 +4,30 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Lot 2 — Assertions data-truth en CI (2026-08-13)
+
+Filet post-déploiement : job dans `supabase-deploy.yml`, après `db push`, avant le déploiement des Edge Functions — chaque requête prévient un incident déjà survenu et documenté dans ce changelog.
+
+**Assertions actives (`mode=hard`, bloquent le déploiement)** :
+- `a1_security_definer_exposed` — garde Lot 1 (aucune fonction `SECURITY DEFINER` accessible à `anon`/`PUBLIC`).
+- `a3_delinquent_in_low_band` — garde l'audit délinquence 2026-08-06 (aucun `is_delinquent=true` en bande `low`).
+- `a6_unavailable_mrr_with_complete_score` — principe S1 « no data ≠ neutral data » : aucun compte `mrr_status='unavailable'` avec `score_breakdown->'revenue_dynamics'->>'status'='complete'`. Vérifié en direct avant écriture : le comportement actuel est déjà correct (`status='unavailable'` propagé correctement), cette assertion protège cet invariant plutôt que de corriger un bug.
+- `a7_approaching_pagination_cap` — remplace la vérification manuelle de `MAX_PAGES=50` (`sync-stripe/index.ts:31`) : alerte à partir de 4500 objets/ressource/org (marge avant le plafond de 5000, `PAGE_SIZE=100 × MAX_PAGES=50`), avant qu'une troncature silencieuse ait lieu plutôt qu'après. Org la plus grosse du portefeuille aujourd'hui : 2688 comptes, 103 subscriptions, 1052 invoices — largement sous le seuil.
+
+**Assertions en attente (`mode=soft`, `::warning::` uniquement, pas de blocage)** :
+- `a4_new_movement_misdated` — `pending: lot 4` (dépend de `subscriptions.stripe_created_at`, pas encore créée).
+- `a5_synced_org_with_zero_movements` — `pending: lot 6`.
+
+**a2 (littéraux JWT en dur)** : couverte par le job déjà ajouté dans `ci.yml` (Lot 1) — vérification statique de fichiers, pas une requête SQL, non dupliquée ici.
+
+**Contrôle négatif** : la logique de `run_query` (bascule `FAIL_HARD=1` si `mode=hard` et le compte renvoyé n'est pas `0`) a été prouvée en simulant localement une réponse `count=1` — confirmé : `FAIL_HARD` passe à `1`. Une requête volontairement fausse n'a **pas** été laissée dans le workflow réel (elle ferait échouer tout déploiement futur sans condition) — la preuve est faite une fois, en local, puis retirée, exactement comme pour le job anti-clé-en-dur du Lot 1 (fichier de test injecté puis supprimé).
+
+**Vérifié en direct sur le projet dev** : les 4 requêtes actives (a1, a3, a6, a7) et les 2 en attente (a4, a5) exécutées manuellement via `execute_sql` avant d'écrire le workflow — toutes retournent 0 lignes sur l'état actuel du portefeuille.
+
+**Tests** : `npm run verify` — 1004 tests, typecheck et lint verts (aucun fichier TypeScript modifié dans ce lot, changements limités à `.github/workflows/supabase-deploy.yml`).
+
+---
+
 ## Lot 1 — Verrouillage des fonctions SECURITY DEFINER exposées à anon/PUBLIC (2026-08-13)
 
 Audit Phase 0 (exécution autonome post-audit, 2026-08-13) : 24 fonctions `SECURITY DEFINER` du schéma `public` avaient `EXECUTE` accordé à `anon`/`PUBLIC`, dont 6 fonctions Vault (lecture/écriture/suppression de secrets sans aucune vérification d'identité), `cron_dispatch_via_vault` (déclenche n'importe quelle Edge Function avec le token `service_role`, sans allowlist) et 3 fonctions (`seed_default_playbooks`, `increment_webhook_failure`, `mark_playbook_executed`) acceptant un `org_id`/`run_id` arbitraire sans vérification d'appartenance.
