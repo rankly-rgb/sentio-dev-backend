@@ -120,7 +120,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError, assertTrialActive } from '../_shared/auth.ts'
-import { calcNrrPercentage, calcChurnRate30d, type MrrMovementForNrr } from '../_shared/mrr-engine.ts'
+import { calcNrrPercentage, calcChurnRate30d, calcMrrGrowthMetrics, type MrrMovementForNrr } from '../_shared/mrr-engine.ts'
 import { computeSyncFreshness } from '../_shared/sync-freshness.ts'
 
 // Seuil minimum pour qualifier un "win" (en points de health_score)
@@ -703,25 +703,10 @@ async function handleBenchmarks(
   // MRR actuel total
   const currentMrr = (snapshotRes.data as { total_mrr_cents: number } | null)?.total_mrr_cents ?? 0
 
-  // Agréger les mouvements par type
-  let new12m = 0, expansion12m = 0, contraction12m = 0, churn12m = 0, reactivation12m = 0
-  for (const m of (movements12mRes.data ?? [])) {
-    const amt = m.amount_cents ?? 0
-    switch (m.movement_type) {
-      case 'new': new12m += amt; break
-      case 'expansion': expansion12m += amt; break
-      case 'contraction': contraction12m += amt; break
-      case 'churn': churn12m += amt; break
-      case 'reactivation': reactivation12m += amt; break
-    }
-  }
-
-  // MRR de départ (il y a 12 mois) = MRR actuel - mouvements nets sur 12 mois
-  const netMovements12m = new12m + expansion12m + reactivation12m - contraction12m - churn12m
-  const startingMrr = currentMrr - netMovements12m
-
   const firstMovementDate = firstMovementRes.data?.movement_date ?? orgRes.data?.created_at ?? null
   const hasThreeMonthsHistory = firstMovementDate !== null && (now - new Date(firstMovementDate).getTime()) >= THREE_MONTHS_MS
+
+  const movements12m = (movements12mRes.data ?? []) as MrrMovementForNrr[]
 
   // NRR : déléguée à calcNrrPercentage (_shared/mrr-engine.ts) — même formule
   // et même garde bootstrap que /portfolio-metrics, plutôt qu'un second
@@ -729,22 +714,20 @@ async function handleBenchmarks(
   // l'absence d'historique ("pas d'historique = neutre"), un faux positif
   // (Problème 1, audit 2026-08) : calcNrrPercentage retourne `null` dans ce
   // cas, jamais un 100 qui se lirait comme "rétention parfaite".
-  const nrr = calcNrrPercentage(currentMrr, (movements12mRes.data ?? []) as MrrMovementForNrr[], hasThreeMonthsHistory)
+  const nrr = calcNrrPercentage(currentMrr, movements12m, hasThreeMonthsHistory)
 
-  // Churn rate revenue = MRR churné / MRR de départ × 100 (plafonné à 100%).
-  // Même garde bootstrap que le NRR ci-dessus (Priorité 1, audit 2026-08-06,
-  // jumeau du Problème 1) : sans elle, `mrr_movements` totalement vide donne
-  // `churn12m = 0` (rien à sommer) sur un `startingMrr` resté positif
-  // (= `currentMrr`, aucun mouvement à soustraire) → `0.0%`, indiscernable
-  // d'un portefeuille réellement sans churn.
-  const churnRate: number | null = !hasThreeMonthsHistory || startingMrr <= 0
-    ? null
-    : Math.min(100, Math.round((churn12m / startingMrr) * 1000) / 10)
-
-  // Croissance MRR = mouvements nets / MRR de départ × 100 — même garde.
-  const mrrGrowth: number | null = !hasThreeMonthsHistory || startingMrr <= 0
-    ? null
-    : Math.round((netMovements12m / startingMrr) * 1000) / 10
+  // Churn rate + croissance MRR : délégués à calcMrrGrowthMetrics
+  // (_shared/mrr-engine.ts) — remplace une agrégation locale qui soustrayait
+  // contraction/churn au lieu de les additionner (issue #28 : ces deux
+  // mouvements sont stockés NÉGATIFS, la soustraction en double gonflait
+  // netMovements/mrrGrowth et rendait churnRate négatif — un churn négatif
+  // se notait même "excellent" via rateLower ci-dessous). Même garde
+  // bootstrap que le NRR ci-dessus (Priorité 1, audit 2026-08-06, jumeau du
+  // Problème 1) : sans elle, `mrr_movements` vide donnait `0.0%`,
+  // indiscernable d'un portefeuille réellement sans churn.
+  const growthMetrics = calcMrrGrowthMetrics(currentMrr, movements12m, hasThreeMonthsHistory)
+  const churnRate = growthMetrics.churn_rate_percentage
+  const mrrGrowth = growthMetrics.mrr_growth_percentage
 
   // Peers : snapshot le plus récent si disponible
   const peerRow = peersRes.data

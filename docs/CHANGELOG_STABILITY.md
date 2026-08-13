@@ -4,6 +4,26 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## NRR/churn/croissance — bug de signe contraction/churn, deux endroits (2026-08-10, issue #28)
+
+Issue #28 (audit logique métier Stripe/MRR, Phase 4) : `compute-peer-benchmarks/calcOrgMetrics` calcule `netMovements = new + expansion + reactivation − contraction − churn` en assumant `contraction`/`churn` positifs. La convention réelle de `mrr_movements` est **négative** (`classifyMovement`, `_shared/mrr-engine.ts`, testée) — la formule les additionne donc en pratique au lieu de les soustraire, gonflant `netMovements`/NRR/`mrrGrowth` et rendant `churnRate` négatif.
+
+**Étape 1 (demandée par l'issue avant tout code)** : validation contre de vraies données. `mrr_movements` sur le projet dev ne contient aujourd'hui que des lignes `new` (le backfill Phase 2, issue #40, n'a pas encore eu lieu) — aucune ligne `contraction`/`churn` à inspecter en base. Hypothèse validée à la place par lecture du code faisant autorité : `classifyMovement` retourne explicitement `amount_cents: newMrr - prevMrr` (négatif par construction, `newMrr < prevMrr`) pour `contraction` et `amount_cents: -prevMrr` pour `churn` ; `calcNrrPercentage`/`calcChurnRate30d` (`_shared/mrr-engine.ts`, référence déjà correcte et testée) additionnent ces deux champs avec le commentaire explicite `// déjà négatif`.
+
+**Trouvé au passage, hors scope initial de l'issue** : la même formule buggy existait une **deuxième fois**, en copie locale dans `dashboard-api/index.ts::handleBenchmarks` (`GET /dashboard-api/benchmarks`, section "Benchmarks sectoriels" affichée sur le dashboard client, `BenchmarkSection.tsx` côté frontend). Ce chemin délègue déjà le NRR à `calcNrrPercentage` (correct), mais calculait `churn_rate`/`mrr_growth` avec le même `netMovements12m`/`startingMrr` buggy — un churn négatif y était même noté **"excellent"** par `rateLower` (borne `<= 3` inclut trivialement tout nombre négatif). Live, non testé (aucun test, mirror ou direct, ne couvrait ce chemin avant ce chantier).
+
+**Changements :**
+- `compute-peer-benchmarks/index.ts::calcOrgMetrics` : `+ contraction12m + churn12m` (au lieu de `−`), `churnRate` via `Math.abs(churn12m)`.
+- `_shared/mrr-engine.ts` : nouvelle fonction pure `calcMrrGrowthMetrics(currentMrrCents, movements, hasAtLeastThreeMonthsOfHistory)` — remplace la copie locale de `dashboard-api/index.ts` (extraite pour être directement testable, `index.ts` a des imports Deno-natifs non résolvables sous Vitest ; occasion de simplifier l'agrégation par type en une seule somme signée, même style que `calcChurnRate30d`). `dashboard-api/index.ts::handleBenchmarks` délègue désormais à cette fonction pour `churn_rate`/`mrr_growth`.
+- `supabase/tests/peer-benchmarks.test.ts` : le test miroir de `calcOrgMetrics` reproduisait l'hypothèse fausse (fixture `churn: +5000`, jamais observable en pratique) — corrigé en `-5000` (TDD demandé par l'issue : le test échoue d'abord contre l'ancienne formule avant le fix), plus un test dédié reproduisant explicitement le bug historique (`netMovements` gonflé à 25000 au lieu de 15000, `churnRate` négatif) pour non-régression.
+- `supabase/tests/mrr-engine.test.ts` : `calcMrrGrowthMetrics` testé directement (import réel, pas de copie miroir) — historique insuffisant, fenêtre calme (0% un vrai zéro), churn négatif additionné, `correction` exclu, `startingMrr <= 0`, plafond 100%, contraction sans churn.
+
+**Tests** : 933 tests (+7 mrr-engine, peer-benchmarks.test.ts inchangé en nombre mais réécrit). `npm run verify` vert (build : même échec pré-existant `NEXT_PUBLIC_SUPABASE_URL` absent de ce sandbox, non lié à ce chantier).
+
+**Non vérifié dans ce chantier** : impact réel en base impossible à mesurer sur ce projet dev faute de données `contraction`/`churn` existantes (cf. Étape 1) — à re-vérifier une fois le backfill `mrr_movements` (issue #40) fait, sur un portefeuille avec un vrai historique de churn.
+
+---
+
 ## Trial — endpoint manquant et enforcement jamais câblé (2026-08-10)
 
 Audit readiness client 2026-08 : `organizations.trial_ends_at` est écrit à la création d'org (14 jours, `create-organization-with-invitation`) mais jamais relu pour bloquer quoi que ce soit — « le trial n'expire jamais ». Découverte en creusant plus loin : le frontend avait déjà tout le contrat construit et testé (`useTrialStatus`/`TrialBanner`/`fetchWithUserJwt::TrialExpiredError` sur 402) pour un endpoint `GET /trial-status` qui **n'existait pas côté backend** — `TrialBanner` ne s'affichait donc jamais (`{trialStatus && <TrialBanner .../>}`, `trialStatus` toujours `undefined`), et aucun 402 n'a jamais été émis.
