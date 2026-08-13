@@ -30,6 +30,45 @@ jobs:
             exit 1
           fi
           echo "No migration version collisions."
+      - name: Check for hardcoded service_role JWT literals in migrations
+        run: |
+          # Lot 1 (2026-08-13, security audit) : trois migrations historiques
+          # (20260531000001/3/5) committent la clé service_role JWT en clair
+          # dans cron.job.command / net.http_post — un secret compromis en
+          # attente de rotation (voir 20260813000003_security_definer_lockdown.sql).
+          # Ce garde-fou empêche une 4e occurrence future : réécrire l'historique
+          # git n'est pas une option (idempotence des migrations), mais aucune
+          # nouvelle occurrence ne doit apparaître. Allowlist des 3 fichiers
+          # historiques, par chemin exact.
+          ALLOWLIST="supabase/migrations/20260531000001_playbook_activate_trigger.sql
+          supabase/migrations/20260531000003_fix_trigger_positional_params.sql
+          supabase/migrations/20260531000005_fix_trigger_execution_source.sql"
+
+          # Pattern JWT générique (header.payload.signature, base64url), pas le
+          # littéral exact de la clé compromise — attrape aussi une future clé
+          # différente committée par erreur, pas seulement une répétition de
+          # celle-ci.
+          PATTERN='eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'
+
+          violations=""
+          for f in supabase/migrations/*.sql; do
+            if grep -qE "$PATTERN" "$f"; then
+              if ! echo "$ALLOWLIST" | grep -qxF "$f"; then
+                violations="$violations $f"
+              fi
+            fi
+          done
+
+          if [ -n "$violations" ]; then
+            echo "Hardcoded JWT literal(s) found outside the allowlist:"
+            for v in $violations; do echo "  $v"; done
+            echo ""
+            echo "Never commit a service_role/JWT literal to a migration file — read it from"
+            echo "Supabase Vault at call time instead (see cron_dispatch_via_vault, "
+            echo "on_playbook_activate in 20260813000003_security_definer_lockdown.sql)."
+            exit 1
+          fi
+          echo "No hardcoded JWT literals outside the allowlist."
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

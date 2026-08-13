@@ -4,6 +4,38 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Lot 1 — Verrouillage des fonctions SECURITY DEFINER exposées à anon/PUBLIC (2026-08-13)
+
+Audit Phase 0 (exécution autonome post-audit, 2026-08-13) : 24 fonctions `SECURITY DEFINER` du schéma `public` avaient `EXECUTE` accordé à `anon`/`PUBLIC`, dont 6 fonctions Vault (lecture/écriture/suppression de secrets sans aucune vérification d'identité), `cron_dispatch_via_vault` (déclenche n'importe quelle Edge Function avec le token `service_role`, sans allowlist) et 3 fonctions (`seed_default_playbooks`, `increment_webhook_failure`, `mark_playbook_executed`) acceptant un `org_id`/`run_id` arbitraire sans vérification d'appartenance.
+
+**Correction du plan initial (piège identifié avant d'écrire le code)** : le snippet de garde proposé ("reject si `request.jwt.claims IS NOT NULL`") aurait cassé les appels `service_role` légitimes — `vault_read_secret` est appelé en RPC par `_shared/vault.ts::getVaultSecret` (résolution de clé HubSpot), `mark_playbook_executed` par `export-playbook-csv/index.ts:189`, `seed_default_playbooks` via le trigger `on_organization_created` déclenché par l'INSERT `organizations` de `create-organization-with-invitation` — les trois chemins passent par PostgREST authentifiés `service_role`, donc `request.jwt.claims` y est non-NULL. La garde retenue est consciente du rôle (`role IS DISTINCT FROM 'service_role'`), pas seulement de la présence d'un JWT : bloque `anon`/`authenticated`, laisse passer `service_role` et les appels sans contexte PostgREST (pg_cron, migrations).
+
+**Changements (migration `20260813000003_security_definer_lockdown.sql`)** :
+- `REVOKE ALL ... FROM PUBLIC, anon, authenticated` en masse sur les 24 fonctions (DO block dynamique sur `pg_proc`), jamais `service_role`.
+- `user_organization_id()`/`user_role()` (utilisées à l'intérieur des policies RLS) : re-`GRANT` explicite à `authenticated` en premier, `search_path` pinné (absent auparavant).
+- 8 RPC applicatives (`get_mrr_movements_summary`, `get_mrr_trend`, `get_playbook_detail`, `get_playbook_eligible_accounts`, `get_playbook_export_summary`, `get_playbook_full_detail`, `get_segment_accounts`, `transition_playbook_status`) : `GRANT` à `authenticated` — vérifiées une par une, toutes dérivent déjà l'org via `user_organization_id()` en interne, `get_mrr_movements_summary` en particulier ne prend pas de `p_organization_id` en paramètre contrairement à l'hypothèse initiale.
+- 4 fonctions de trigger (`handle_new_user`, `handle_new_user_signup`, `on_organization_created`, `on_playbook_activate`) : aucun `GRANT`, protection structurelle Postgres (une fonction `RETURNS trigger` n'est pas invocable via RPC, quel que soit le `GRANT`).
+- 6 fonctions Vault + `cron_dispatch_via_vault` + `increment_webhook_failure`/`mark_playbook_executed`/`seed_default_playbooks` : `GRANT` à `service_role` uniquement + garde de défense en profondeur en tête de corps.
+- `cron_dispatch_via_vault` : allowlist des 4 `function_path` réellement utilisés par les jobs cron (`refresh-hubspot-tokens`, `sync-hubspot`, `playbook-scheduler`, `self-monitor` — jobid 2/6/7/8, `20260810000001`).
+- `seed_default_playbooks` : garde d'idempotence défensive ajoutée (n'insère rien si l'org a déjà des playbooks), en plus de la garde de rôle.
+- `on_playbook_activate` : clé `service_role` en clair retirée, lit désormais `cron_service_role_key` depuis Vault au moment de l'appel (même secret que `cron_dispatch_via_vault`), dégradation gracieuse identique (no-op + `RAISE NOTICE` si secret absent). Les 3 migrations historiques (`20260531000001/3/5`) qui committent le littéral en clair ne sont volontairement pas modifiées (idempotence/historique git).
+- CI (`ci.yml`) : nouveau job anti-clé-JWT-en-dur sur `supabase/migrations/**`, allowlist des 3 chemins historiques exacts, pattern JWT générique (pas seulement le littéral compromis).
+
+**Vérifié en direct sur le projet dev** (tous les critères de passage du Lot 1) :
+- `select ... has_function_privilege('anon', p.oid, 'EXECUTE') ...` sur les 24 fonctions → **0 ligne**.
+- Même requête via `information_schema.routine_privileges` pour `PUBLIC` → **0 ligne**.
+- Garde de rôle testée en isolation (GUC `request.jwt.claims` simulée, sans passer par le `REVOKE` natif) : `role=authenticated` → exception `internal function: service_role only` ; `role=service_role` → passe. Répliqué sur `vault_read_secret` et `cron_dispatch_via_vault`.
+- Allowlist `cron_dispatch_via_vault` : `function_path='admin-proxy'` (hors liste) → exception ; `function_path='self-monitor'` (dans la liste) → aucune exception.
+- Idempotence `seed_default_playbooks` : appelé deux fois sur le même org (9 playbooks existants) → toujours 9, aucun doublon inséré.
+- Job CI anti-clé-en-dur : testé localement avec un fichier de test injecté puis retiré (échec confirmé puis succès confirmé) avant d'écrire la version finale du step.
+- `npm run verify` : 1004 tests, typecheck et lint verts. Build : même échec pré-existant `NEXT_PUBLIC_SUPABASE_URL` absent de ce sandbox (non lié à ce chantier, `ci.yml` fournit déjà la variable placeholder pour la CI réelle).
+
+**Non vérifié dans ce lot** : un test end-to-end HTTP réel (login → Overview → Accounts → fiche compte → exécution manuelle d'un cron job) n'a pas pu être exécuté depuis cet environnement (pas d'accès à l'app déployée ni à un navigateur). La preuve de non-régression repose sur (a) l'identification exhaustive des 3 call sites réels de service_role RPC dans le code (`_shared/vault.ts`, `export-playbook-csv/index.ts`, trigger `on_organization_created`) et (b) la réplication de leur contexte d'appel exact (`role=service_role`) dans les tests de garde en isolation ci-dessus — pas un test bout-en-bout sur l'app réelle. À confirmer au prochain déploiement.
+
+**Action Naima, bloquante, en tête du rapport final** : `cron_dispatch_via_vault` et `vault_read_secret` étaient exposés à `anon` avant ce lot. Toute clé stockée en Vault doit être considérée comme potentiellement lue. Séquence impérative : (1) ce lot mergé, (2) rotation de la `service_role` key (Dashboard Supabase → Project Settings → API), (3) mise à jour du secret Vault `cron_service_role_key` avec la nouvelle valeur, (4) revérification. Une rotation avant le merge casserait le trigger `on_playbook_activate` et les 4 cron jobs dispatched via `cron_dispatch_via_vault`.
+
+---
+
 ## Issue #36 — insight dédié `payment_delinquent` (2026-08-13)
 
 Follow-up du chantier délinquence du 2026-08-06 : `is_delinquent` était câblé au churn scoring, à la segmentation et à toutes les surfaces "at risk" trouvées, mais explicitement pas à `generate-insights` ("hors périmètre, ouvre une issue"). Un compte délinquent ne remontait un insight que si ses *autres* signaux (facture en retard, churn score...) franchissaient un seuil existant — pas de carte dédiée dans le feed Insights pour un CSM parcourant le portefeuille indépendamment de l'automatisation playbook.
