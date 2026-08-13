@@ -1,0 +1,61 @@
+{
+  "_comment": "a14 ratchet baseline (tour 5, 2026-08-13). Captured from PR #66's hard-mode CI run (commit 627f0def, run 31740110673) — the only real `deno check` run this repo has ever had. Corrects the earlier, incomplete '11 functions' claim in issue #67 / PR #66's commit message: the real count is 14. `max_errors` is each function's error count as of this baseline, AFTER the score-narratives.ts critical-band fix (accounts-api and calculate-scores each dropped by 1 — see that commit). A function passing deno check must NOT appear here. A function here whose error count exceeds max_errors, or any function NOT listed here that fails at all, hard-fails the build. A function that reaches 0 errors must be removed from this file in the same PR that fixes it — it never re-enters.",
+  "functions": {
+    "account-summary": {
+      "max_errors": 1,
+      "note": "TS2345 — .map() callback on account_segments join shape (array vs single object), _shared account-summary query typing. Unrelated to tonight's incident."
+    },
+    "accounts-api": {
+      "max_errors": 3,
+      "note": "3 remaining after score-narratives.ts critical-band fix (was 4): TS2339 created_at on GenericStringError, 2x TS2345 on .map() callbacks over a loosely-typed query result. Likely one root cause (Supabase query builder generic inference) — candidate for a single shared fix."
+    },
+    "calculate-scores": {
+      "max_errors": 1,
+      "note": "1 remaining after score-narratives.ts critical-band fix (was 2): TS2304 Cannot find name 'EdgeRuntime' — deno check doesn't see the Supabase Edge Runtime global. sync-stripe has the identical error. update-stripe-connection/verify-stripe-token/stripe-oauth-callback/hubspot-connect already use the safe pattern `(globalThis as any).EdgeRuntime?.waitUntil(...)` which passes clean — same fix applies here."
+    },
+    "dashboard-api": {
+      "max_errors": 10,
+      "note": "TS2339 health_score does not exist on narrowed account_id-only type, plus others — not yet triaged line-by-line."
+    },
+    "export-playbook-csv": {
+      "max_errors": 4,
+      "note": "TS2339 email_subject does not exist on type 'object' — shared root cause, see playbook-crud/playbook-execute/playbook-scheduler/playbook-templates/workflow-step-processor/get-today-actions below: a playbook action config typed as bare `object` somewhere shared, likely _shared/playbook-engine.ts or _shared/action-dispatcher.ts."
+    },
+    "get-today-actions": {
+      "max_errors": 5,
+      "note": "Includes the same email_subject-on-object root cause as export-playbook-csv."
+    },
+    "playbook-crud": {
+      "max_errors": 6,
+      "note": "Includes the same email_subject-on-object root cause as export-playbook-csv."
+    },
+    "playbook-execute": {
+      "max_errors": 11,
+      "note": "Includes the same email_subject-on-object root cause as export-playbook-csv."
+    },
+    "playbook-scheduler": {
+      "max_errors": 9,
+      "note": "Includes the same email_subject-on-object root cause as export-playbook-csv."
+    },
+    "playbook-templates": {
+      "max_errors": 4,
+      "note": "Includes the same email_subject-on-object root cause as export-playbook-csv."
+    },
+    "stripe-product-mappings-api": {
+      "max_errors": 1,
+      "note": "TS2353 — 'already_mapped' does not exist on the price-formatting object literal's inferred type. Standalone."
+    },
+    "stripe-webhook": {
+      "max_errors": 2,
+      "note": "TS2345 — StripeSubscription vs StripeSubscriptionLike, 'created' optional-vs-required mismatch. Standalone, plus EdgeRuntime-class issue possibly bundled — see full deno check output for exact breakdown."
+    },
+    "sync-stripe": {
+      "max_errors": 2,
+      "note": "TS2345 RejectExcessProperties generic constraint on a batch upsert helper, plus TS2304 EdgeRuntime (same false-negative as calculate-scores, same fix available)."
+    },
+    "workflow-step-processor": {
+      "max_errors": 5,
+      "note": "Includes the same email_subject-on-object root cause as export-playbook-csv."
+    }
+  }
+}

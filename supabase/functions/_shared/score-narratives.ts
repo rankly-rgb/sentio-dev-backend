@@ -204,7 +204,7 @@ function narrativePaymentHealth(
   mrrCents: number,
   overdueCount: number,
   overdueAmountCents: number,
-  churnRiskBand: 'low' | 'watch' | 'high' | 'churned' | null,
+  churnRiskBand: 'low' | 'watch' | 'high' | 'critical' | 'churned' | null,
 ): string {
   // Bug trouvé lors de l'auto-vérification adversariale du 2026-08-04
   // (IMPLEMENTATION_LOG.md) : cette branche testait mrrCents === 0 (le
