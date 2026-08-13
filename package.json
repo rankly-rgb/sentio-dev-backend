@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run lint && npm run test && npm run build",
     "seed:churn-validation": "tsx scripts/seed-churn-validation.ts",
+    "seed:insertion-check": "tsx scripts/seed-insertion-check.ts",
     "prepare": "husky"
   },
   "license": "ISC",
