@@ -41,6 +41,10 @@ export interface TodayAccountInput {
   churn_risk_score: number | null
   expansion_score: number | null
   mrr_cents: number | null
+  // 'unavailable' = compte non-chiffrable (metered, devise minoritaire...) ou
+  // jamais eu de subscription connue — mrr_cents peut être un total partiel,
+  // pas un vrai $0 (docs/openspec.md §1/§8, même convention que accounts-api).
+  mrr_status: 'ok' | 'unavailable'
   plan_tier: string | null
   contract_end_date: string | null
   billing_interval: string | null
@@ -83,6 +87,7 @@ export interface TodayAction {
   churn_risk_score: number | null
   expansion_score: number | null
   mrr_cents: number
+  mrr_status: 'ok' | 'unavailable'
   plan_tier: string | null
   days_to_renewal: number | null
   trigger_reasons: string[]
@@ -200,6 +205,7 @@ export function computeTodayActions(
       churn_risk_score: account.churn_risk_score,
       expansion_score: account.expansion_score,
       mrr_cents: account.mrr_cents ?? 0,
+      mrr_status: account.mrr_status,
       plan_tier: account.plan_tier,
       days_to_renewal: dtr,
       trigger_reasons: computeTriggerReasons(account, insights.map((i) => i.title)),

@@ -4,6 +4,24 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Issue #29 — `mrr_status` étendu à get-today-actions et aux 3 dernières surfaces frontend non couvertes (2026-08-13)
+
+Issue #29 listait 3 surfaces où un compte `mrr_status='unavailable'` pouvait encore s'afficher comme un `$0` trompeur au lieu de "Not billable" (pattern déjà établi ailleurs via `fr.format.mrrOrUnavailable`, `AccountDetail.tsx`/`Accounts.tsx`/`AccountFinancials.tsx`) : la page Today (`get-today-actions`, backend, ne sélectionnait pas le champ), la vue détail de segment (`SegmentDetailView.tsx`) et les cartes "top accounts" du Dashboard. L'issue notait elle-même son risque comme "jugé faible en pratique, pas vérifié empiriquement".
+
+**Vérifié en direct contre la base dev** avant de coder : sur les 3577 comptes `mrr_status='unavailable'` du portefeuille, 3157 (88%) ont un `churn_risk_score` calculé et 875 sont `is_delinquent=true` — ce sont donc des candidats réels et fréquents pour les surfaces "à risque"/priorisées justement concernées par ce chantier (Today, segments à risque, top accounts). L'hypothèse "risque faible" de l'issue ne tenait pas : ce chantier était justifié.
+
+**Changements :**
+- `_shared/today-actions-helpers.ts` : `TodayAccountInput`/`TodayAction` gagnent `mrr_status: 'ok' | 'unavailable'`, propagé tel quel dans `computeTodayActions` (aucun recalcul, même convention que `is_delinquent`).
+- `get-today-actions/index.ts` : `mrr_status` ajouté au `SELECT` accounts.
+- Frontend — `src/lib/types/today-actions.ts` (`TodayAction`), `src/lib/types/segments.ts` (`SegmentAccount`), `src/hooks/useDashboardData.ts` (`TopAccount`) : gagnent `mrr_status: MrrStatus`. `segment-queries.ts::getSegmentAccounts` propage le champ (déjà présent sur `AccountListItem` via accounts-api, simple oubli de mapping). `fetchTopAccounts` n'a nécessité aucun changement de mapping — il retourne déjà des `AccountListItem` complets, qui portent `mrr_status` depuis le chantier "Devise"/E1.2 du 2026-08-02.
+- 5 sites d'affichage MRR bruts (`TodayActionRow.tsx`, `SegmentDetailView.tsx`, `Dashboard.tsx` ×2 — cartes "at risk" et "expansion") passent de `fr.format.currency` à `fr.format.mrrOrUnavailable`, même pattern que les 3 sites déjà corrigés.
+
+**Non touché, délibérément** : le total MRR agrégé de `SegmentDetailView` (`totalMrr`, somme brute de `mrr_cents`) — cohérent avec la convention déjà établie ailleurs (KPIs agrégés type `mrr_at_risk_cents` séparent déjà le sous-ensemble chiffrable via un compteur dédié plutôt que d'exclure silencieusement du total ; changer ce total spécifique sans le même traitement aurait été une correction partielle, hors périmètre de cette issue qui ciblait l'affichage par compte).
+
+**Tests** : `supabase/tests/today-actions-helpers.test.ts` — 1 nouveau test (propagation `mrr_status` dans `computeTodayActions`, 949 tests total). Frontend : aucun test existant ne référence `SegmentAccount`/`TodayAction`/`TopAccount` directement (types uniquement) — `npx tsc --noEmit` et `npm run build` verts confirment la cohérence des nouveaux champs à travers les call sites.
+
+---
+
 ## Issue #34 — couverture de sync des factures diagnostiquée : artefact de seed, pas un bug (2026-08-13)
 
 Issue #34 posait deux hypothèses non départagées : (1) artefact de données de seed, (2) `syncInvoices` sous-fetch réellement depuis Stripe. Diagnostiqué en direct contre le projet dev (org `37591436-aa31-44c6-84fc-aa2e78ceb9fc`, 82 comptes `past_due`, 4 seulement avec facture — l'écart de l'issue reproduit à l'identique sur un org différent de celui cité, les IDs ayant tourné depuis le 6 août).
