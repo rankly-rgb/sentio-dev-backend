@@ -84,6 +84,32 @@ jobs:
         run: npm run lint
       - name: Run tests
         run: npm run test
+      - name: Seed script smoke check (dry-run)
+        # Lot 7 (2026-08-13, housekeeping) — two findings fixed together:
+        #
+        # 1. scripts/ is excluded from tsconfig.json's `include` (see the
+        #    exclude list), so `npm run typecheck` gives this file zero
+        #    coverage — a broken import or syntax error here would go
+        #    undetected indefinitely.
+        # 2. `npm run seed:insertion-check` (and its sibling
+        #    seed:churn-validation) was silently broken since introduction:
+        #    `tsx` was never a declared dependency, only ever exercised via
+        #    an ad-hoc `npx tsx ...` in each PR's own verification session
+        #    (which downloads tsx on demand) — `npm run seed:insertion-check`
+        #    itself failed with `sh: 1: tsx: not found` (exit 127). Fixed by
+        #    adding tsx to devDependencies (package.json) rather than
+        #    bypassing npm run here.
+        #
+        # `--dry-run` is the only mode that needs neither STRIPE_SEED_KEY
+        # nor SEED_EXPECTED_ACCOUNT_ID and makes zero external API calls
+        # (see the script's own docstring) — deliberately narrower than
+        # running the real seed, which would require a live Stripe
+        # test-mode secret in CI and would create unbounded Stripe test
+        # objects on every push/PR. The real --seed/--cleanup cycle stays a
+        # manual, documented procedure (see the script's header). This step
+        # only proves the CLI entry point still loads and executes without
+        # throwing.
+        run: npm run seed:insertion-check -- --dry-run --seed --cleanup
       - name: Build
         run: npm run build
         env:

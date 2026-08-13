@@ -37,6 +37,7 @@
     "eslint-config-next": "^14.2.35",
     "husky": "^9.1.7",
     "lint-staged": "^16.3.2",
+    "tsx": "^4.19.0",
     "typescript": "^5",
     "vitest": "^4.0.18"
   },

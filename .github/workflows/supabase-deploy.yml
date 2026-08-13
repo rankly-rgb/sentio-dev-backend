@@ -181,6 +181,17 @@ jobs:
             ) x;"
 
           # a6 — 'no data ≠ neutral data' (S1): mrr unavailable must never look like a complete revenue_dynamics dimension.
+          #
+          # Known, accepted exception to S1 within this same dimension (Lot 7
+          # housekeeping, 2026-08-13, issue #56, not fixed here): calcExpansionSignalScore
+          # (_shared/scoring.ts:234-236) returns 60, not null, when no expansion
+          # movement occurred in the last 6 months — the one revenue_dynamics
+          # sub-signal that doesn't follow the null-when-absent convention this
+          # assertion otherwise protects. Not an untracked bug: documented,
+          # deliberate (see the function's own comment), and deferred to #56
+          # pending a before/after score-distribution review, not fixed as a
+          # drive-by here. This assertion is unaffected — it checks mrr_status,
+          # not expansion_signal_score.
           run_query "a6_unavailable_mrr_with_complete_score" "hard" "
             select count(*) as n from accounts
             where mrr_status = 'unavailable' and score_breakdown->'revenue_dynamics'->>'status' = 'complete';"
