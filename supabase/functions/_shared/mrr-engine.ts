@@ -379,6 +379,63 @@ export function isAccountChurned(subscriptionStatuses: string[]): boolean {
   return subscriptionStatuses.length > 0 && subscriptionStatuses.every((s) => s === 'canceled')
 }
 
+export interface DelinquentSubscriptionInput {
+  status: string
+  contractStart: string | null
+}
+
+/**
+ * Lot 5 (2026-08-13, #35) — délinquence par durée. Candidat de date pour
+ * `accounts.delinquent_since` : la plus ancienne `current_period_start`
+ * (accountSubMeta.contractStart, sync-stripe/index.ts) parmi les
+ * subscriptions actuellement en statut délinquent (`past_due`/`unpaid`).
+ *
+ * DÉCISION AUTONOME : la priorité à 3 niveaux prévue (invoice.status_
+ * transitions → invoice.due_date → current_period_start) n'est
+ * qu'à moitié réalisable telle quelle. `is_delinquent` est produit par
+ * `aggregateAccountMrr`, fonction pure sans accès aux invoices ; et
+ * `sync-stripe` ne les a de toute façon pas encore fetchées à ce stade du
+ * pipeline (`syncCustomers` → `syncSubscriptions` → `syncInvoices`). Seul
+ * le 3e niveau (déjà en mémoire dans `accountSubMeta`) est
+ * architecturalement disponible sans restructuration disproportionnée du
+ * chemin de sync pour ce chantier. Simplification assumée, cohérente avec
+ * S1 : jamais de date fabriquée — `null` si aucune subscription délinquente
+ * n'a de `contractStart` connu.
+ */
+export function computeDelinquentSinceCandidate(subs: DelinquentSubscriptionInput[]): string | null {
+  let earliest: string | null = null
+  for (const sub of subs) {
+    if (!DELINQUENT_STATUSES.has(sub.status) || !sub.contractStart) continue
+    if (earliest === null || sub.contractStart < earliest) earliest = sub.contractStart
+  }
+  return earliest
+}
+
+/**
+ * Résolution "sticky" de `accounts.delinquent_since`. Vit délibérément hors
+ * d'`aggregateAccountMrr` : c'est une fonction pure sans accès DB, seul
+ * l'appelant (sync-stripe/index.ts) connaît la valeur déjà persistée.
+ *
+ * - non-délinquent → non-délinquent : reste `null`.
+ * - devient délinquent (`previousDelinquentSince === null`) : prend le
+ *   candidat de ce run (peut être `null` si aucune date connue — jamais
+ *   `now()`, S1).
+ * - délinquence continue (`previousDelinquentSince` déjà connu) : la
+ *   préserve, ne la remplace JAMAIS par le candidat du run courant — sinon
+ *   un compte délinquent depuis 40 jours "rajeunirait" dès qu'une nouvelle
+ *   subscription passe `past_due` sur le même compte.
+ * - redevient non-délinquent : repasse à `null`.
+ */
+export function resolveDelinquentSince(
+  isDelinquentNow: boolean,
+  previousDelinquentSince: string | null,
+  candidateSinceIso: string | null,
+): string | null {
+  if (!isDelinquentNow) return null
+  if (previousDelinquentSince !== null) return previousDelinquentSince
+  return candidateSinceIso
+}
+
 /**
  * Détecte le profil de facturation d'un compte (docs/openspec.md §8.2).
  * Un customer avec des invoices mais aucune subscription est facturé

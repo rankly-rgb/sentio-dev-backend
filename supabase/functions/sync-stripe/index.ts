@@ -20,6 +20,8 @@ import {
   aggregateAccountMrr,
   classifyMovement,
   detectOrgMajorityCurrency,
+  computeDelinquentSinceCandidate,
+  resolveDelinquentSince,
   type SubscriptionMrrResult,
   type StripeSubscriptionLike,
 } from '../_shared/mrr-engine.ts'
@@ -348,16 +350,20 @@ async function syncSubscriptions(
   // + snapshot du MRR/mrr_status actuels pour détecter les mouvements
   const { data: subSyncAccounts } = await supabase
     .from('accounts')
-    .select('id, stripe_customer_id, mrr_cents, mrr_status')
+    .select('id, stripe_customer_id, mrr_cents, mrr_status, delinquent_since')
     .eq('organization_id', organizationId)
 
   const customerToAccount = new Map<string, string>()
   const prevMrrByAccount = new Map<string, number>()
   const prevMrrStatusByAccount = new Map<string, 'ok' | 'unavailable'>()
+  // Lot 5 (2026-08-13, #35) : valeur déjà persistée, nécessaire à la
+  // résolution "sticky" de resolveDelinquentSince ci-dessous.
+  const prevDelinquentSinceByAccount = new Map<string, string | null>()
   for (const a of subSyncAccounts ?? []) {
     if (a.stripe_customer_id) customerToAccount.set(a.stripe_customer_id, a.id)
     prevMrrByAccount.set(a.id, a.mrr_cents ?? 0)
     prevMrrStatusByAccount.set(a.id, a.mrr_status === 'unavailable' ? 'unavailable' : 'ok')
+    prevDelinquentSinceByAccount.set(a.id, a.delinquent_since ?? null)
   }
 
   // Track per-account metadata from active subs for MRR aggregation
@@ -550,6 +556,18 @@ async function syncSubscriptions(
     newMrrByAccount.set(acctId, agg.mrr_cents)
     accountMrrStatus.set(acctId, agg.mrr_status)
 
+    // Lot 5 (2026-08-13, #35) : escalade par durée — voir CLAUDE.md,
+    // resolveDelinquentSince (_shared/mrr-engine.ts) pour la sémantique
+    // "sticky" (une délinquence continue ne rajeunit jamais).
+    const delinquentSinceCandidate = computeDelinquentSinceCandidate(
+      subs.map((s) => ({ status: s.status, contractStart: s.contractStart })),
+    )
+    const delinquentSince = resolveDelinquentSince(
+      agg.is_delinquent,
+      prevDelinquentSinceByAccount.get(acctId) ?? null,
+      delinquentSinceCandidate,
+    )
+
     // Résoudre le mapping produit à partir du price_id de l'abonnement principal
     const primaryPriceId = getPrimaryPriceId(subs.map((s) => ({ mrrCents: s.result.mrr_cents, createdAt: s.createdAt, priceId: s.priceId })))
     const mapping = primaryPriceId ? mappingByPriceId.get(primaryPriceId) : undefined
@@ -594,6 +612,7 @@ async function syncSubscriptions(
       trial_mrr_cents: agg.trial_mrr_cents,
       mrr_status: agg.mrr_status,
       is_delinquent: agg.is_delinquent,
+      delinquent_since: delinquentSince,
       pending_cancellation: agg.pending_cancellation,
       is_zero_dollar_active: agg.is_zero_dollar_active,
       seat_count: totalSeats > 0 ? totalSeats : null,

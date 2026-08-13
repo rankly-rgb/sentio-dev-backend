@@ -48,7 +48,7 @@ export interface TriggeredSignal {
 }
 
 export interface AlertEligibilityInput {
-  churnRiskBand: 'low' | 'watch' | 'high' | null
+  churnRiskBand: 'low' | 'watch' | 'high' | 'critical' | null
   lastChurnAlertAt: string | null
   lastAlertSignalCodes: string[] | null
   riskSignalsTriggered: TriggeredSignal[]
@@ -59,10 +59,12 @@ const COOLDOWN_MS = 14 * 24 * 60 * 60 * 1000
 
 // ── Helpers exportés pour les tests ──────────────────────────
 
-// S9 : n'alerte que pour band='high', avec cooldown 14j sauf nouveau signal
-// CRITIQUE non présent lors de la dernière alerte envoyée à ce compte.
+// S9 : n'alerte que pour band='high'/'critical' (Lot 5, 2026-08-13, #35 —
+// 'critical' est un tier strictement au-dessus de 'high', jamais moins
+// urgent), avec cooldown 14j sauf nouveau signal CRITIQUE non présent lors
+// de la dernière alerte envoyée à ce compte.
 export function isEligibleForChurnAlert(input: AlertEligibilityInput): boolean {
-  if (input.churnRiskBand !== 'high') return false
+  if (input.churnRiskBand !== 'high' && input.churnRiskBand !== 'critical') return false
   if (!input.lastChurnAlertAt) return true
 
   const elapsed = input.now - new Date(input.lastChurnAlertAt).getTime()
@@ -185,15 +187,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
 
     try {
-      // Candidats band='high' — le triage anti-spam (cooldown 14j / bypass
-      // signal CRITIQUE, S9) est appliqué en mémoire via isEligibleForChurnAlert
-      // car il dépend d'une comparaison avant/après par compte, pas exprimable
-      // proprement en un seul filtre SQL.
+      // Candidats band='high'/'critical' (Lot 5, 2026-08-13, #35 — 'critical'
+      // strictement au-dessus de 'high') — le triage anti-spam (cooldown 14j
+      // / bypass signal CRITIQUE, S9) est appliqué en mémoire via
+      // isEligibleForChurnAlert car il dépend d'une comparaison avant/après
+      // par compte, pas exprimable proprement en un seul filtre SQL.
       const { data: candidateAccounts, error: acctError } = await supabase
         .from('accounts')
         .select('id, stripe_customer_id, display_name, mrr_cents, churn_risk_score, health_score, churn_risk_band, risk_signals_triggered, last_churn_alert_at, last_alert_signals')
         .eq('organization_id', org.id)
-        .eq('churn_risk_band', 'high')
+        .in('churn_risk_band', ['high', 'critical'])
         .gt('mrr_cents', 0)
         .order('churn_risk_score', { ascending: false })
         .order('mrr_cents', { ascending: false })

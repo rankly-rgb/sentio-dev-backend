@@ -170,7 +170,7 @@ export interface NarrativeInputsV3 {
   contract_end_date: string | null
   billing_interval: string | null
   // D-NEXT (2026-08-04) : distinct de mrr_cents=0, voir narrativePaymentHealth.
-  churn_risk_band: 'low' | 'watch' | 'high' | 'churned' | null
+  churn_risk_band: 'low' | 'watch' | 'high' | 'critical' | 'churned' | null
 }
 
 export interface ScoreNarrativesV3 {

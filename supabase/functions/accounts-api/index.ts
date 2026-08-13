@@ -32,7 +32,11 @@
 //   priority_label calculé côté SQL (vue accounts_with_priority, Scoring V2) :
 //     churned  : churn_risk_band = 'churned' (D1/C2.2 — évalué en premier, un
 //                compte parti n'est pas "à risque" même si health_score <= 30/55)
-//     critical : churn_risk_band = 'high' OU health_score <= 30
+//     critical : churn_risk_band = 'high'/'critical' (Lot 5, 2026-08-13, #35 —
+//                plancher par durée de délinquence) OU health_score <= 30,
+//                OU is_delinquent (évalué avant ces deux, migration
+//                20260806000002 — 'critical' n'existe que si is_delinquent
+//                est déjà vrai, donc toujours intercepté avant d'y arriver)
 //     watch    : churn_risk_band = 'watch' OU health_score <= 55
 //     new      : created_at < 90j ET churn_risk_band = 'low'
 //     stable   : sinon
@@ -142,7 +146,7 @@ async function handleList(
   let query = supabase
     .from('accounts_with_priority')
     .select(
-      'id, stripe_customer_id, display_name, plan_tier, billing_interval, mrr_cents, mrr_status, is_delinquent, ' +
+      'id, stripe_customer_id, display_name, plan_tier, billing_interval, mrr_cents, mrr_status, is_delinquent, delinquent_since, ' +
       'seat_count, seat_limit, ' +
       'health_score, health_score_status, health_score_band, trend_30d, ' +
       'churn_risk_score, churn_risk_band, ' +
@@ -353,6 +357,11 @@ export async function handleGetOne(
       mrr_cents: account.mrr_cents,
       mrr_status: account.mrr_status,
       is_delinquent: account.is_delinquent,
+      // Lot 5 (2026-08-13, #35) : DATE brute, jamais une durée précalculée —
+      // le frontend calcule l'affichage ("since MMM D" / durée) côté client,
+      // même convention que contract_end_date. null tant qu'aucune date
+      // n'est connue (S1) : jamais "delinquent since today" par défaut.
+      delinquent_since: account.delinquent_since,
       arr_cents: account.arr_cents,
       seat_count: account.seat_count,
       seat_limit: account.seat_limit,

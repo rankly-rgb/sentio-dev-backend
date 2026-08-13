@@ -11,7 +11,7 @@ import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
 import { writeToDLQ } from '../_shared/dlq.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { verifyStripeSignature } from '../_shared/stripe-signature.ts'
-import { calcSubscriptionMrrCents, aggregateAccountMrr, classifyMovement, type StripeSubscriptionLike } from '../_shared/mrr-engine.ts'
+import { calcSubscriptionMrrCents, aggregateAccountMrr, classifyMovement, resolveDelinquentSince, type StripeSubscriptionLike } from '../_shared/mrr-engine.ts'
 import { isCronLockHeld } from '../_shared/cron-lock.ts'
 
 // ── Résolution de l'organization depuis stripe_account_id ───
@@ -114,7 +114,7 @@ async function handleSubscriptionEvent(
   // Résoudre l'account via le customer
   const { data: accountRow } = await supabase
     .from('accounts')
-    .select('id, mrr_cents, mrr_status')
+    .select('id, mrr_cents, mrr_status, delinquent_since')
     .eq('organization_id', organizationId)
     .eq('stripe_customer_id', sub.customer)
     .maybeSingle()
@@ -246,6 +246,25 @@ async function handleSubscriptionEvent(
   const newAccountMrr = accountAgg.mrr_cents
   const newAccountMrrStatus = accountAgg.mrr_status
 
+  // Lot 5 (2026-08-13, #35) — délinquence par durée. DÉCISION AUTONOME :
+  // contrairement à sync-stripe (accès à accountSubMeta, la liste complète
+  // des subscriptions du compte avec leur contractStart), un event webhook
+  // ne porte que la subscription qui l'a déclenché — `subscriptions` ne
+  // persiste pas `current_period_start` par ligne (seulement `accounts.
+  // contract_start_date`, écrasé par la subscription "primaire"). Candidat
+  // limité à CE sub, seulement s'il est lui-même délinquent — sinon `null`
+  // (jamais une date fabriquée, S1). resolveDelinquentSince (sticky) fait
+  // le reste : si une date a déjà été captée par un run sync-stripe
+  // (vision complète), elle est préservée telle quelle par ce chemin.
+  const delinquentSinceCandidate = (sub.status === 'past_due' || sub.status === 'unpaid') && sub.current_period_start
+    ? new Date(sub.current_period_start * 1000).toISOString().split('T')[0]
+    : null
+  const delinquentSince = resolveDelinquentSince(
+    accountAgg.is_delinquent,
+    accountRow.delinquent_since ?? null,
+    delinquentSinceCandidate,
+  )
+
   // Classification unique — même fonction pure que sync-stripe
   // (_shared/mrr-engine.ts), garantissant des classifications identiques
   // pour le même événement quel que soit le chemin d'ingestion
@@ -321,6 +340,7 @@ async function handleSubscriptionEvent(
       trial_mrr_cents: accountAgg.trial_mrr_cents,
       mrr_status: accountAgg.mrr_status,
       is_delinquent: accountAgg.is_delinquent,
+      delinquent_since: delinquentSince,
       pending_cancellation: accountAgg.pending_cancellation,
       is_zero_dollar_active: accountAgg.is_zero_dollar_active,
       // billing_model='subscription' : recevoir un event de subscription

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { isAccountChurned } from '../functions/_shared/mrr-engine'
+import { applyDelinquencyBandFloor } from '../functions/_shared/scoring'
 
 // ── Mirror of the churned-state decision (calculate-scores/index.ts,
 // scoreAccountPure) — calculate-scores/index.ts imports jsr: specifiers
@@ -78,5 +79,97 @@ describe('D-NEXT — churned account state, decoupled from mrr_cents (2026-08-04
     const result = frozenChurnedResult()
     expect(result.risk_signals_triggered).toEqual([])
     expect(result.risk_signals_evaluated).toBe(0)
+  })
+})
+
+// ── Mirror of the delinquency-duration-floor glue (Lot 5, 2026-08-13, #35,
+// scoreAccountPure) — the duration computation and risk_signals_triggered
+// injection live inline in calculate-scores/index.ts (jsr: imports, not
+// resolvable by Vitest); applyDelinquencyBandFloor itself is real production
+// code imported directly (zero jsr: deps), only the day-count arithmetic and
+// signal-injection glue are mirrored here.
+
+function computeDelinquentDurationDays(delinquentSince: string | null, now: number): number | null {
+  return delinquentSince ? Math.floor((now - new Date(delinquentSince).getTime()) / 86400000) : null
+}
+
+function applyFloorAndInjectSignal(
+  rawChurn: { churn_risk_band: 'low' | 'watch' | 'high'; risk_signals_triggered: Array<{ code: string; label: string; severity: string; points: number }> },
+  isDelinquent: boolean,
+  delinquentSince: string | null,
+  now: number,
+) {
+  const delinquentDurationDays = computeDelinquentDurationDays(delinquentSince, now)
+  const floor = applyDelinquencyBandFloor(rawChurn.churn_risk_band, isDelinquent, delinquentDurationDays)
+  return {
+    ...rawChurn,
+    churn_risk_band: floor.band,
+    risk_signals_triggered: floor.floor_applied
+      ? [...rawChurn.risk_signals_triggered, { code: 'delinquency_duration_floor', label: floor.floor_reason ?? '', severity: 'CRITIQUE', points: 0 }]
+      : rawChurn.risk_signals_triggered,
+  }
+}
+
+describe('Lot 5 (2026-08-13, #35) — delinquency-duration-floor glue (scoreAccountPure mirror)', () => {
+  const NOW = new Date('2026-08-13T00:00:00Z').getTime()
+
+  it('a 60-day-delinquent account with no other signals resolves to critical — negative test', () => {
+    const delinquentSince = new Date(NOW - 60 * 86400000).toISOString().split('T')[0]
+    const result = applyFloorAndInjectSignal(
+      { churn_risk_band: 'low', risk_signals_triggered: [] },
+      true,
+      delinquentSince,
+      NOW,
+    )
+    expect(result.churn_risk_band).toBe('critical')
+    expect(result.churn_risk_band).not.toBe('low')
+    expect(result.churn_risk_band).not.toBe('watch')
+    expect(result.churn_risk_band).not.toBe('high')
+  })
+
+  it('injects a delinquency_duration_floor signal with points:0 (never double-counted in churn_risk_score)', () => {
+    const delinquentSince = new Date(NOW - 60 * 86400000).toISOString().split('T')[0]
+    const result = applyFloorAndInjectSignal(
+      { churn_risk_band: 'low', risk_signals_triggered: [] },
+      true,
+      delinquentSince,
+      NOW,
+    )
+    const floorSignal = result.risk_signals_triggered.find((s) => s.code === 'delinquency_duration_floor')
+    expect(floorSignal).toBeDefined()
+    expect(floorSignal?.points).toBe(0)
+    expect(floorSignal?.label).toContain('60 day(s)')
+  })
+
+  it('injects no floor signal when the raw band already satisfies the floor', () => {
+    const delinquentSince = new Date(NOW - 60 * 86400000).toISOString().split('T')[0]
+    const result = applyFloorAndInjectSignal(
+      { churn_risk_band: 'critical' as unknown as 'high', risk_signals_triggered: [{ code: 'invoice_overdue_15d', label: 'x', severity: 'CRITIQUE', points: 35 }] },
+      true,
+      delinquentSince,
+      NOW,
+    )
+    expect(result.risk_signals_triggered.some((s) => s.code === 'delinquency_duration_floor')).toBe(false)
+  })
+
+  it('a non-delinquent account is never floored, regardless of a stale delinquent_since', () => {
+    const staleDelinquentSince = new Date(NOW - 90 * 86400000).toISOString().split('T')[0]
+    const result = applyFloorAndInjectSignal(
+      { churn_risk_band: 'low', risk_signals_triggered: [] },
+      false,
+      staleDelinquentSince,
+      NOW,
+    )
+    expect(result.churn_risk_band).toBe('low')
+  })
+
+  it('a delinquent account with delinquent_since=null (unknown duration) floors to watch, not low', () => {
+    const result = applyFloorAndInjectSignal(
+      { churn_risk_band: 'low', risk_signals_triggered: [] },
+      true,
+      null,
+      NOW,
+    )
+    expect(result.churn_risk_band).toBe('watch')
   })
 })

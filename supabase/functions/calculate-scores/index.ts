@@ -40,6 +40,7 @@ import {
   calcContractRenewalDimension,
   calcHealthScoreV3,
   calcChurnRiskV2,
+  applyDelinquencyBandFloor,
   buildChurnSignals,
   countPaymentFailures90d,
   calcExpansionScoreV2,
@@ -58,7 +59,7 @@ interface AccountWithCreatedAt extends Account {
   seat_count: number | null
   billing_interval: string | null
   contract_start_date: string | null
-  churn_risk_band?: 'low' | 'watch' | 'high' | 'churned' | null
+  churn_risk_band?: 'low' | 'watch' | 'high' | 'critical' | 'churned' | null
   health_score_status?: 'complete' | 'partial' | 'insufficient' | null
 }
 
@@ -79,7 +80,7 @@ interface ScoreResult {
   health_score_max_points: number
   health_score_band: 'healthy' | 'watch' | 'at_risk' | null
   churn_risk_score: number | null
-  churn_risk_band: 'low' | 'watch' | 'high' | 'churned'
+  churn_risk_band: 'low' | 'watch' | 'high' | 'critical' | 'churned'
   risk_signals_triggered: Array<{ code: string; label: string; severity: string; points: number }>
   risk_signals_evaluated: number
   expansion_score: number | null
@@ -107,7 +108,7 @@ function getPrimarySegment(segTypes: SegmentTypeV3[]): string {
 function getPreviousPrimarySegment(account: AccountWithCreatedAt): string {
   if ((account.mrr_cents ?? 0) === 0) return 'en_churn'
   if (account.churn_risk_band === null || account.churn_risk_band === undefined) return 'jamais_score'
-  if (account.churn_risk_band === 'high') return 'en_danger_critique'
+  if (account.churn_risk_band === 'high' || account.churn_risk_band === 'critical') return 'en_danger_critique'
   if (account.churn_risk_band === 'watch') return 'a_risque_leger'
   return 'stables'
 }
@@ -185,7 +186,10 @@ async function ensureSystemSegments(
 const SCORING_BATCH_SIZE = 500
 const MAX_BATCHES = 200 // Safety guard: 200 * 500 = 100k accounts max per org
 
-const MODEL_VERSION = 'v3' // Scoring Engine V2 (produit) — voir migration 20260725000001
+// v3.1 (Lot 5, 2026-08-13, #35) : plancher de bande churn_risk_band par
+// durée de délinquence (applyDelinquencyBandFloor, _shared/scoring.ts) —
+// modification de la formule de scoring, bump obligatoire (CLAUDE.md).
+const MODEL_VERSION = 'v3.1' // Scoring Engine V2 (produit) — voir migration 20260725000001
 
 interface SubscriptionInfo {
   status: string
@@ -434,7 +438,7 @@ function scoreAccountPure(input: ScoreAccountInput, now: number = Date.now()): S
   // reste 'active', jamais 'canceled').
   const isChurned = subscriptionCanceled
 
-  let churn: { churn_risk_score: number | null; churn_risk_band: 'low' | 'watch' | 'high' | 'churned'; risk_signals_triggered: Array<{ code: string; label: string; severity: string; points: number }>; risk_signals_evaluated: number }
+  let churn: { churn_risk_score: number | null; churn_risk_band: 'low' | 'watch' | 'high' | 'critical' | 'churned'; risk_signals_triggered: Array<{ code: string; label: string; severity: string; points: number }>; risk_signals_evaluated: number }
 
   if (isChurned) {
     churn = { churn_risk_score: null, churn_risk_band: 'churned', risk_signals_triggered: [], risk_signals_evaluated: 0 }
@@ -449,7 +453,28 @@ function scoreAccountPure(input: ScoreAccountInput, now: number = Date.now()): S
       hasInvoiceOverdueUnder15: invoices90d.length > 0 ? hasOverdueUnder15 : null,
       isDelinquent: account.is_delinquent,
     }
-    churn = calcChurnRiskV2(buildChurnSignals(signalInputs))
+    const rawChurn = calcChurnRiskV2(buildChurnSignals(signalInputs))
+
+    // Lot 5 (2026-08-13, #35) : plancher par durée de délinquence — voir
+    // applyDelinquencyBandFloor (_shared/scoring.ts). delinquent_since est
+    // une DATE (jour, pas d'heure) — durée arrondie au jour près, jamais
+    // négative (delinquent_since ne peut être postérieur à `now`, écrit par
+    // sync-stripe/stripe-webhook au moment même où is_delinquent devient true).
+    const delinquentDurationDays = account.delinquent_since
+      ? Math.floor((now - new Date(account.delinquent_since).getTime()) / 86400000)
+      : null
+    const floor = applyDelinquencyBandFloor(rawChurn.churn_risk_band, account.is_delinquent, delinquentDurationDays)
+
+    churn = {
+      ...rawChurn,
+      churn_risk_band: floor.band,
+      risk_signals_triggered: floor.floor_applied
+        ? [
+            ...rawChurn.risk_signals_triggered,
+            { code: 'delinquency_duration_floor', label: floor.floor_reason ?? '', severity: 'CRITIQUE', points: 0 },
+          ]
+        : rawChurn.risk_signals_triggered,
+    }
   }
 
   // ── Expansion ──
@@ -741,7 +766,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           batchCount++
           const { data: batch, error: batchError } = await supabase
             .from('accounts')
-            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, contract_start_date, billing_interval, health_score, churn_risk_score, expansion_score, churn_risk_band, health_score_status, stripe_customer_id, created_at, is_delinquent')
+            .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, contract_start_date, billing_interval, health_score, churn_risk_score, expansion_score, churn_risk_band, health_score_status, stripe_customer_id, created_at, is_delinquent, delinquent_since')
             .eq('organization_id', organizationId)
             .range(batchOffset, batchOffset + SCORING_BATCH_SIZE - 1)
 
@@ -922,7 +947,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
               // modèle additif v3, churn_risk_score n'a plus la même
               // distribution que l'ancien "100-health+additifs" — un seuil
               // magique comme ">= 60" hérité du V1 serait mal calibré ici.
-              if (oldSegment !== newSegment || scores.churn_risk_band === 'high') {
+              if (oldSegment !== newSegment || scores.churn_risk_band === 'high' || scores.churn_risk_band === 'critical') {
                 dispatchQueue.push({ account, scores, oldSegment, newSegment, hasOverdue: hasOverdueInvoices })
               }
             } catch (err) {
