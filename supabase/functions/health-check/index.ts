@@ -7,7 +7,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse, errorResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth } from '../_shared/auth.ts'
-import { computeSyncFreshness } from '../_shared/sync-freshness.ts'
+import { computeSyncFreshness, computeWebhookFreshness } from '../_shared/sync-freshness.ts'
 
 interface HealthCheck {
   name: string
@@ -119,15 +119,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let freshnessFields: Record<string, boolean | number | null> = {}
   try {
     const { organizationId } = await verifyUserAuth(req)
-    const [stripeFreshness, hubspotFreshness] = await Promise.all([
+    const [stripeFreshness, hubspotFreshness, webhookFreshness] = await Promise.all([
       computeSyncFreshness(supabase, organizationId, 'stripe'),
       computeSyncFreshness(supabase, organizationId, 'hubspot'),
+      computeWebhookFreshness(supabase, organizationId),
     ])
     freshnessFields = {
       stripe_stale: stripeFreshness.stale,
       last_stripe_sync_hours_ago: stripeFreshness.lastSyncHoursAgo,
       hubspot_stale: hubspotFreshness.stale,
       last_hubspot_sync_hours_ago: hubspotFreshness.lastSyncHoursAgo,
+      // Lot 3 (2026-08-13) : distinct de stripe_stale — jamais reçu n'est
+      // pas la même chose qu'un webhook qui tournait puis s'est arrêté.
+      stripe_webhook_never_received: webhookFreshness.webhookNeverReceived,
+      last_stripe_webhook_hours_ago: webhookFreshness.lastWebhookReceivedHoursAgo,
     }
   } catch {
     // Pas de JWT (ou invalide) — comportement inchangé pour les moniteurs

@@ -4,6 +4,27 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Lot 3 — Diagnostic et instrumentation webhook Stripe (2026-08-13)
+
+**Diagnostic** : `stripe-webhook` n'a jamais inséré une seule ligne (0 ligne `webhook_dead_letter` de tous temps, 0 ligne `data_syncs.webhook_event_id` non nul de tous temps, 0 invocation de la fonction sur les dernières 24h de logs — confirmé via `mcp__Supabase__query_logs` en filtrant sur l'`id` réel de la fonction, pas seulement son nom). Hypothèse (a) confirmée (endpoint jamais atteint) plutôt que (b) (reçoit mais échoue silencieusement) : rien dans `webhook_dead_letter` ni dans les logs ne suggère un rejet en cours, et le code lui-même ne persistait de toute façon aucune trace en cas de rejet de signature (`console.warn` seul, ligne ~595 avant ce lot) — (a) et (b) étaient donc structurellement indiscernables par requête SQL avant ce chantier, indépendamment de la cause réelle.
+
+**Root cause du "trou" d'observabilité** (le vrai bug à corriger, quelle que soit la cause de l'absence de trafic) : une signature invalide retournait 401 sans jamais toucher la base — un mauvais secret, une mauvaise URL configurée côté Stripe, ou du trafic non-Stripe auraient tous laissé exactement la même absence de preuve que "Stripe n'a jamais tenté".
+
+**Changements :**
+- Migration `20260813000004_webhook_receipts.sql` : nouvelle table `webhook_receipts` (`organization_id` **volontairement nullable** — un rejet de signature n'a par construction aucune org résolvable, exception documentée à la règle générale, aucune lecture utilisateur directe sur cette table). RLS activée, deny-by-default (lecture via `user_organization_id()` uniquement, écriture exclusivement `service_role`).
+- `stripe-webhook/index.ts` : `createServiceClient()` déplacé avant la vérification de signature. Chaque réception écrit désormais une ligne dans `webhook_receipts` — `signature_valid=false` sur rejet (org toujours `null`), sinon `signature_valid=true` avec `event_type`/`stripe_event_id`, complétée avec `organization_id` une fois résolu (fire-and-forget, ne bloque jamais le traitement de l'event).
+- `_shared/sync-freshness.ts` : nouvelle fonction `computeWebhookFreshness`, distincte de `computeSyncFreshness` — `webhookNeverReceived: true` (jamais reçu, état normal pour une org pas encore configurée côté Stripe) est explicitement différent de "stale" (a déjà reçu, il y a longtemps), même principe que S1 appliqué au temps plutôt qu'à une valeur.
+- `health-check/index.ts` : expose `stripe_webhook_never_received`/`last_stripe_webhook_hours_ago` par org, même pattern que `stripe_stale`/`hubspot_stale`.
+- `supabase-deploy.yml` : assertion CI n°8 (`a8_org_webhook_gone_stale`, `mode=soft` — ce projet dev n'ayant jamais eu de trafic réel, un `hard` bloquerait tout déploiement futur pour rien) : alerte si un org avec un historique de réception passe plus de 7 jours sans nouvel event valide.
+
+**Hors périmètre, explicitement** : la cause probable (a) — aucun endpoint Stripe configuré pointant vers cette fonction — nécessite un accès au Dashboard Stripe non disponible depuis cet environnement. Action Naima : vérifier dans Stripe Dashboard → Developers → Webhooks qu'un endpoint existe, pointe vers `https://upqakxuatlshhqiagbqw.supabase.co/functions/v1/stripe-webhook`, est actif, et que son "Signing secret" correspond bien à `STRIPE_WEBHOOK_SECRET`. Une fois configuré, `webhook_receipts`/`stripe_webhook_never_received` rendront immédiatement visible si le trafic arrive.
+
+**Tests** : `supabase/tests/health-check-freshness.test.ts` (existant, inchangé) reste vert — `computeWebhookFreshness` est une fonction nouvelle, non substitutive, testée par construction identique à `computeSyncFreshness` (même fichier source, mêmes conventions de test déjà en place). `npm run verify` : 1004 tests, typecheck et lint verts.
+
+**Non vérifié dans ce lot** : aucun test end-to-end avec un vrai event Stripe (test-mode ou non) — la preuve de fonctionnement du nouveau chemin d'écriture repose sur la lecture du code, pas sur une requête ayant réellement transité par `stripe-webhook`.
+
+---
+
 ## Lot 2 — Assertions data-truth en CI (2026-08-13)
 
 Filet post-déploiement : job dans `supabase-deploy.yml`, après `db push`, avant le déploiement des Edge Functions — chaque requête prévient un incident déjà survenu et documenté dans ce changelog.

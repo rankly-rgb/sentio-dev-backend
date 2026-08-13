@@ -38,3 +38,38 @@ export async function computeSyncFreshness(
   const hoursAgo = (Date.now() - new Date(data.completed_at).getTime()) / (1000 * 60 * 60)
   return { stale: hoursAgo > STALE_THRESHOLD_HOURS, lastSyncHoursAgo: Math.round(hoursAgo * 10) / 10 }
 }
+
+// Lot 3 (2026-08-13, diagnostic webhook Stripe) : distinct de
+// computeSyncFreshness — une org sans aucun webhook_receipts pour son
+// organization_id n'a jamais eu d'event Stripe résolu à son compte, ce qui
+// est un état normal pour une org dont l'endpoint webhook n'a simplement
+// jamais reçu de trafic (pas encore configuré côté Stripe) — pas
+// nécessairement une panne, contrairement à un sync batch qui tourne en
+// cron et DOIT produire un résultat régulier. `webhookNeverReceived: true`
+// distingue explicitement ce cas de "stale" (a déjà reçu, mais il y a
+// longtemps).
+export interface WebhookFreshness {
+  webhookNeverReceived: boolean
+  lastWebhookReceivedHoursAgo: number | null
+}
+
+export async function computeWebhookFreshness(
+  supabase: SupabaseClient,
+  organizationId: string,
+): Promise<WebhookFreshness> {
+  const { data } = await supabase
+    .from('webhook_receipts')
+    .select('received_at')
+    .eq('organization_id', organizationId)
+    .eq('signature_valid', true)
+    .order('received_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (!data?.received_at) {
+    return { webhookNeverReceived: true, lastWebhookReceivedHoursAgo: null }
+  }
+
+  const hoursAgo = (Date.now() - new Date(data.received_at).getTime()) / (1000 * 60 * 60)
+  return { webhookNeverReceived: false, lastWebhookReceivedHoursAgo: Math.round(hoursAgo * 10) / 10 }
+}

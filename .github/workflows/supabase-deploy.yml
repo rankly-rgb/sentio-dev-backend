@@ -191,6 +191,20 @@ jobs:
               select a.organization_id from invoices i join accounts a on a.id = i.account_id group by 1 having count(*) >= 4500
             ) x;"
 
+          # a8 — Lot 3 (webhook diagnostic, 2026-08-13): a connected org whose
+          # webhook endpoint has gone silent for 7+ days after previously
+          # receiving traffic. soft: this dev project has never had real
+          # Stripe webhook traffic (see docs/CHANGELOG_STABILITY.md, "Lot 3"),
+          # so warn rather than block until that changes.
+          run_query "a8_org_webhook_gone_stale" "soft" "
+            select count(*) as n from (
+              select organization_id, max(received_at) as last_received
+              from webhook_receipts
+              where signature_valid = true and organization_id is not null
+              group by organization_id
+              having max(received_at) < now() - interval '7 days'
+            ) x;"
+
           if [ "${FAIL_HARD:-0}" = "1" ]; then
             echo "::error::One or more hard data-truth assertions failed — see above."
             exit 1
