@@ -4,6 +4,21 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Billing — stripe-billing-webhook sans protection anti-désordre (2026-08-13)
+
+Audit readiness client 2026-08 : `stripe-billing-webhook` (webhook de l'abonnement Sentio elle-même, distinct de `stripe-webhook`) faisait un `UPDATE organizations SET plan_type = X` inconditionnel sur chaque event traité, `event.id` n'étant ni loggé (hors chemin d'erreur) ni utilisé pour quoi que ce soit — contrairement à `stripe-webhook`, qui protège déjà ses champs sensibles avec une garde `last_event_created_at` par subscription (event trop ancien → ignoré). Un event Stripe redélivré en retard ou hors ordre (retry réseau, resend manuel depuis le Dashboard Stripe) pouvait donc écraser `plan_type` avec un état plus ancien que celui déjà appliqué — silencieusement, sans erreur.
+
+**Changements :**
+- Migration `20260813000001_billing_webhook_event_ordering.sql` : nouvelle colonne `organizations.billing_event_at` (timestamptz, nullable) — retient le timestamp Stripe (`event.created`, jamais la date de traitement) du dernier `updatePlanType()` appliqué avec succès. Appliquée et vérifiée en direct sur le projet dev (UPDATE conditionnel simulé en SQL brut : un event plus récent s'applique, un rejeu plus ancien est correctement rejeté — 0 ligne affectée, état inchangé — puis restauré à son état d'origine).
+- `stripe-billing-webhook/index.ts::updatePlanType` : même mécanisme que `last_event_created_at` (`stripe-webhook/index.ts`), appliqué ici en un **UPDATE conditionnel atomique unique** (`WHERE billing_event_at IS NULL OR billing_event_at < event.created`) plutôt qu'une lecture préalable suivie d'une écriture — élimine toute fenêtre TOCTOU par construction, pas seulement en pratique.
+- `eventCreatedIso` calculé une fois à l'entrée (`event.created`, secondes epoch Stripe → ISO) et propagé aux 3 handlers (`handleCheckoutCompleted`, `handleSubscriptionUpdated`, `handleSubscriptionDeleted`).
+
+**Tests** : `supabase/tests/stripe-billing-webhook.test.ts` (nouveau — cette fonction n'avait aucune couverture avant ce chantier) : `resolveOrgIdAndTier` (résolution org/tier, 6 cas), conversion `event.created` → ISO, et construction du filtre PostgREST OR (bien formé, aucune virgule injectée par un timestamp ISO, branche `IS NULL` toujours présente pour le tout premier event d'une org).
+
+**Non vérifié dans ce chantier** : `deno check` toujours indisponible dans cet environnement (comme pour le reste des Edge Functions) ; vérification live limitée à la logique SQL de la garde (confirmée par simulation directe en base, ci-dessus) — le chemin HTTP complet (signature Stripe, parsing d'event réel) n'a pas été exercé de bout en bout.
+
+---
+
 ## NRR/churn/croissance — bug de signe contraction/churn, deux endroits (2026-08-10, issue #28)
 
 Issue #28 (audit logique métier Stripe/MRR, Phase 4) : `compute-peer-benchmarks/calcOrgMetrics` calcule `netMovements = new + expansion + reactivation − contraction − churn` en assumant `contraction`/`churn` positifs. La convention réelle de `mrr_movements` est **négative** (`classifyMovement`, `_shared/mrr-engine.ts`, testée) — la formule les additionne donc en pratique au lieu de les soustraire, gonflant `netMovements`/NRR/`mrrGrowth` et rendant `churnRate` négatif.
