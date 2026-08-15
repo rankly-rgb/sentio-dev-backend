@@ -331,7 +331,7 @@ async function syncSubscriptions(
   logger: DataSyncLogger,
   writeErrors: WriteError[],
   restatementMode = false,
-): Promise<{ anomalyDetected: boolean; billingProfile?: BillingProfileCounts; restatementAccountsCount?: number }> {
+): Promise<{ anomalyDetected: boolean; billingProfile?: BillingProfileCounts; restatementAccountsCount?: number; subscriptionsOrphaned?: number }> {
   const extraParams: Record<string, string> = { status: 'all' }
 
   // Détection du profil de facturation (Phase 3, docs/openspec.md §11) —
@@ -398,10 +398,23 @@ async function syncSubscriptions(
   // Collect all subscription rows — batch upsert at the end
   const subRows: Record<string, unknown>[] = []
 
+  // Subscriptions dont le customer Stripe n'a pas de compte correspondant —
+  // ce n'est PAS un échec d'écriture, exactement comme `orphaned` côté
+  // syncInvoices. Cas nominal quand `syncCustomers` a délibérément sauté ces
+  // customers (plafond de comptes du tier, 2026-08-13) ou lors d'un premier
+  // sync partiel. Les compter en `records_failed` produisait un
+  // `completed_with_errors` accompagné du message « N record(s) failed to
+  // write — no structured error captured » : alarmant, et faux — rien n'avait
+  // été tenté en écriture. Observé sur l'org la plus grosse du projet, où le
+  // plafond du tier écartait 422 customers : 210 subscriptions comptées en
+  // échec, pendant que les 388 factures dans exactement la même situation
+  // étaient correctement comptées comme orphelines.
+  let subscriptionsOrphaned = 0
+
   for await (const sub of paginateStripe<StripeSubscription>('/subscriptions', apiKey, extraParams, logger)) {
     const accountId = customerToAccount.get(sub.customer)
     if (!accountId) {
-      logger.increment('records_failed')
+      subscriptionsOrphaned++
       continue
     }
 
@@ -509,6 +522,18 @@ async function syncSubscriptions(
         message: `Failed to update organizations.currency: ${currencyError.message}`,
       }))
     }
+  }
+
+  // Jamais silencieux (même convention que invoicesOrphaned /
+  // new_accounts_skipped_by_quota) : le compteur est loggé et remonté dans
+  // sync_summary plutôt que dissous dans records_failed.
+  if (subscriptionsOrphaned > 0) {
+    console.warn(JSON.stringify({
+      level: 'warn',
+      function_name: 'sync-stripe',
+      organization_id: organizationId,
+      message: `${subscriptionsOrphaned} subscriptions skipped — no matching account (expected when customers were skipped by the tier account cap, or during an initial sync)`,
+    }))
   }
 
   // Phase 1 : batch upsert subscriptions
@@ -721,7 +746,7 @@ async function syncSubscriptions(
       message: `restatement_mode: ${restatementRows.length}/${customerToAccount.size} comptes restated, 0 mrr_movements générés`,
     }))
 
-    return { anomalyDetected: false, billingProfile: billingProfileCounts, restatementAccountsCount: restatementRows.length }
+    return { anomalyDetected: false, billingProfile: billingProfileCounts, restatementAccountsCount: restatementRows.length, subscriptionsOrphaned }
   }
 
   const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id', writeErrors)
@@ -792,7 +817,7 @@ async function syncSubscriptions(
     writeErrors.push(mvtWriteError)
   }
 
-  return { anomalyDetected: false, billingProfile: billingProfileCounts }
+  return { anomalyDetected: false, billingProfile: billingProfileCounts, subscriptionsOrphaned }
 }
 
 // ── Sync invoices ─────────────────────────────────────────────
@@ -1118,9 +1143,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   })
   const syncWorkPromise = (async () => {
     const { newAccountsSkippedByQuota } = await syncCustomers(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
-    const { anomalyDetected, billingProfile, restatementAccountsCount } = await syncSubscriptions(supabase, organizationId, apiKey, logger, writeErrors, restatementMode)
+    const { anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned } = await syncSubscriptions(supabase, organizationId, apiKey, logger, writeErrors, restatementMode)
     const { invoiceOnlyAccountsCount, invoicesOrphaned } = await syncInvoices(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
-    return { newAccountsSkippedByQuota, anomalyDetected, billingProfile, restatementAccountsCount, invoiceOnlyAccountsCount, invoicesOrphaned, outcome: 'done' as const }
+    return { newAccountsSkippedByQuota, anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned, invoiceOnlyAccountsCount, invoicesOrphaned, outcome: 'done' as const }
   })()
 
   try {
@@ -1131,7 +1156,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', organization_id: organizationId, message: `org timed out after ${SYNC_STEPS_TIMEOUT_MS}ms — marked failed/timeout, releasing lock` }))
       return errorResponse(`Sync timed out after ${SYNC_STEPS_TIMEOUT_MS}ms for this organization`, 504)
     }
-    const { newAccountsSkippedByQuota, anomalyDetected, billingProfile, restatementAccountsCount, invoiceOnlyAccountsCount, invoicesOrphaned } = syncRaceResult
+    const { newAccountsSkippedByQuota, anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned, invoiceOnlyAccountsCount, invoicesOrphaned } = syncRaceResult
 
     if (anomalyDetected) {
       // 'validation_error' — CHECK data_syncs_error_type_check n'inclut pas de valeur
@@ -1188,6 +1213,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         restatement_mode: restatementMode,
         ...(restatementMode ? { accounts_restated: restatementAccountsCount ?? 0 } : {}),
         ...(newAccountsSkippedByQuota > 0 ? { new_accounts_skipped_by_quota: newAccountsSkippedByQuota } : {}),
+        ...((subscriptionsOrphaned ?? 0) > 0 ? { subscriptions_orphaned: subscriptionsOrphaned } : {}),
         ...(invoicesOrphaned > 0 ? { invoices_orphaned: invoicesOrphaned } : {}),
       },
       writeErrors,
@@ -1218,7 +1244,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       sync_type: syncType,
       restatement_mode: restatementMode,
       ...(newAccountsSkippedByQuota > 0 ? { new_accounts_skipped_by_quota: newAccountsSkippedByQuota } : {}),
-      ...(invoicesOrphaned > 0 ? { invoices_orphaned: invoicesOrphaned } : {}),
+      ...((subscriptionsOrphaned ?? 0) > 0 ? { subscriptions_orphaned: subscriptionsOrphaned } : {}),
+        ...(invoicesOrphaned > 0 ? { invoices_orphaned: invoicesOrphaned } : {}),
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
