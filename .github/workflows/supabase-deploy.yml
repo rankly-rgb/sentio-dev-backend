@@ -402,7 +402,15 @@ jobs:
 
       - name: Deploy Edge Functions
         id: deploy_edge_functions
-        run: supabase functions deploy
+        # La sortie est capturée (tee) pour a11 : depuis que la CLI compare le
+        # hash du bundle avant d'uploader, un push qui ne touche aucune source
+        # de fonction affiche `No change found in Function: X` pour chacune et
+        # n'écrit AUCUN `updated_at`. Le compte bundled/unchanged est ce qui
+        # permet à a11 de distinguer ce no-op légitime d'un deploy qui n'a rien
+        # fait pour une mauvaise raison (token vide, flag mal formé).
+        run: |
+          set -euo pipefail
+          supabase functions deploy 2>&1 | tee /tmp/deploy-edge-functions.log
 
       - name: Schedule compute-peer-benchmarks (daily 02:00 UTC)
         # Récupère la service_role key via la Management API, puis crée/remplace
@@ -505,11 +513,36 @@ jobs:
           MOST_RECENT_MS=$(printf '%s' "$BODY" | jq -r '[.[].updated_at] | max')
           MOST_RECENT_S=$((MOST_RECENT_MS / 1000))
           AGE_S=$((NOW_S - MOST_RECENT_S))
+          # Un `updated_at` ancien n'est un incident que si la CLI avait
+          # réellement quelque chose à uploader. Depuis qu'elle compare le hash
+          # du bundle, un push qui ne touche aucune source de fonction (une
+          # migration seule, un fichier docs) affiche `No change found in
+          # Function: X` pour CHAQUE fonction et ne réécrit rien — l'absence de
+          # `updated_at` frais y est le comportement correct, pas un silence.
+          # 2026-08-15 : ce cas exact a fait échouer le déploiement du merge
+          # #75 (migration + PARKING_LOT.md uniquement, 67/67 inchangées) alors
+          # que db push, a10 et a13 étaient verts.
+          # La garde reste entière pour ce qu'elle vise : un token vide ou un
+          # flag mal formé ne produit pas 67 lignes `No change found` — il
+          # échoue, ou n'imprime rien, et les deux comptes ci-dessous divergent.
+          # `grep -c` imprime déjà `0` avant de sortir en 1 sur un fichier vide :
+          # `|| echo 0` y ajouterait un second `0` et casserait la comparaison
+          # entière qui suit. `|| true` avale le statut sans rien imprimer, et
+          # `${VAR:-0}` couvre le seul cas où stdout est réellement vide (log
+          # absent — le deploy n'a jamais tourné, déjà attrapé plus haut).
+          BUNDLED=$(grep -c 'Bundling Function:' /tmp/deploy-edge-functions.log 2>/dev/null || true)
+          UNCHANGED=$(grep -c 'No change found in Function:' /tmp/deploy-edge-functions.log 2>/dev/null || true)
+          BUNDLED=${BUNDLED:-0}
+          UNCHANGED=${UNCHANGED:-0}
+          if [ "$BUNDLED" -gt 0 ] && [ "$BUNDLED" -eq "$UNCHANGED" ]; then
+            echo "a11: no Edge Function source changed in this push — the CLI bundled $BUNDLED function(s) and reported all $UNCHANGED unchanged, so no updated_at was rewritten (most recent is ${AGE_S}s old). Legitimate no-op, not a silent skip."
+            exit 0
+          fi
           if [ "$AGE_S" -gt 900 ]; then
-            echo "::error::a11_deploy_edge_functions_stale — the step reported success but no Edge Function shows an updated_at within the last 15 minutes (most recent is ${AGE_S}s old). The deploy likely no-op'd silently."
+            echo "::error::a11_deploy_edge_functions_stale — the step reported success but no Edge Function shows an updated_at within the last 15 minutes (most recent is ${AGE_S}s old), and the CLI did NOT report every function as unchanged (bundled=$BUNDLED, unchanged=$UNCHANGED). The deploy likely no-op'd silently."
             exit 1
           fi
-          echo "a11: Deploy Edge Functions ran and redeployed at least one function ${AGE_S}s ago."
+          echo "a11: Deploy Edge Functions ran and redeployed at least one function ${AGE_S}s ago (bundled=$BUNDLED, unchanged=$UNCHANGED)."
 
       - name: HTTP smoke test with a real authenticated JWT (a13)
         # Incident 2026-08-13 : Overview/Accounts were down in production
