@@ -48,8 +48,42 @@ END $$;
 ALTER FUNCTION public.user_organization_id() SET search_path = public, pg_temp;
 ALTER FUNCTION public.user_role() SET search_path = public, pg_temp;
 
-GRANT EXECUTE ON FUNCTION public.user_organization_id() TO authenticated;
-GRANT EXECUTE ON FUNCTION public.user_role() TO authenticated;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.user_organization_id()') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.user_organization_id() TO authenticated';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.user_organization_id() absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.user_role()') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.user_role() TO authenticated';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.user_role() absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+
+-- ============================================================
+-- Rejouabilité (ajouté 2026-08-15)
+-- ============================================================
+-- Les GRANT ci-dessous étaient des instructions nues. Sur le projet dev, où
+-- cette migration est déjà appliquée, toutes leurs cibles existent — mais sur
+-- une base neuve, plusieurs de ces fonctions ne sont pas encore là au moment
+-- où ce fichier s'exécute :
+--   · get_mrr_movements_summary / get_mrr_trend /
+--     get_playbook_eligible_accounts / get_segment_accounts
+--     n'étaient créées par AUCUNE migration (capturées par 20260815000004)
+--   · get_playbook_export_summary est créée par 20260815000002, donc APRÈS
+--     ce fichier
+-- Un GRANT sur une fonction absente est une erreur dure : le rejeu s'arrêtait
+-- ici, ce qui rendait `supabase db diff --linked` inutilisable et la détection
+-- de dérive de schéma structurellement aveugle.
+--
+-- Chaque GRANT est donc désormais conditionné par to_regprocedure(). Sur une
+-- base où la fonction existe (le projet dev), le comportement est identique
+-- au précédent. Ailleurs, le GRANT est sauté avec un NOTICE, et la migration
+-- qui crée la fonction pose elle-même ses propres GRANT.
+-- ============================================================
 
 -- ============================================================
 -- 3. RPC applicatives — authenticated (appelées depuis le frontend avec le
@@ -58,14 +92,62 @@ GRANT EXECUTE ON FUNCTION public.user_role() TO authenticated;
 --    le GRANT restreint la surface, pas la logique métier qui était déjà
 --    correcte)
 -- ============================================================
-GRANT EXECUTE ON FUNCTION public.get_mrr_movements_summary(date, date) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.get_mrr_trend(date, date) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.get_playbook_detail(uuid) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.get_playbook_eligible_accounts(uuid, integer, integer) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.get_playbook_export_summary(uuid, jsonb) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.get_playbook_full_detail(uuid) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.get_segment_accounts(text, text, text, integer, integer) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.transition_playbook_status(uuid, text) TO authenticated;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.get_mrr_movements_summary(date, date)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.get_mrr_movements_summary(date, date) TO authenticated';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.get_mrr_movements_summary(date, date) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.get_mrr_trend(date, date)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.get_mrr_trend(date, date) TO authenticated';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.get_mrr_trend(date, date) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.get_playbook_detail(uuid)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.get_playbook_detail(uuid) TO authenticated';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.get_playbook_detail(uuid) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.get_playbook_eligible_accounts(uuid, integer, integer)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.get_playbook_eligible_accounts(uuid, integer, integer) TO authenticated';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.get_playbook_eligible_accounts(uuid, integer, integer) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.get_playbook_export_summary(uuid, jsonb)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.get_playbook_export_summary(uuid, jsonb) TO authenticated';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.get_playbook_export_summary(uuid, jsonb) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.get_playbook_full_detail(uuid)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.get_playbook_full_detail(uuid) TO authenticated';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.get_playbook_full_detail(uuid) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.get_segment_accounts(text, text, text, integer, integer)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.get_segment_accounts(text, text, text, integer, integer) TO authenticated';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.get_segment_accounts(text, text, text, integer, integer) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.transition_playbook_status(uuid, text)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.transition_playbook_status(uuid, text) TO authenticated';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.transition_playbook_status(uuid, text) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
 
 -- ============================================================
 -- 4. Fonctions de trigger — AUCUN GRANT à personne.
@@ -212,12 +294,48 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.vault_read_secret(uuid) TO service_role;
-GRANT EXECUTE ON FUNCTION public.vault_store_secret(text, text, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.vault_update_secret(uuid, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.vault_replace_secret(uuid, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.vault_delete_secret(uuid) TO service_role;
-GRANT EXECUTE ON FUNCTION public.vault_remove_secret(uuid) TO service_role;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.vault_read_secret(uuid)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.vault_read_secret(uuid) TO service_role';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.vault_read_secret(uuid) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.vault_store_secret(text, text, text)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.vault_store_secret(text, text, text) TO service_role';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.vault_store_secret(text, text, text) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.vault_update_secret(uuid, text)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.vault_update_secret(uuid, text) TO service_role';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.vault_update_secret(uuid, text) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.vault_replace_secret(uuid, text)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.vault_replace_secret(uuid, text) TO service_role';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.vault_replace_secret(uuid, text) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.vault_delete_secret(uuid)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.vault_delete_secret(uuid) TO service_role';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.vault_delete_secret(uuid) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.vault_remove_secret(uuid)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.vault_remove_secret(uuid) TO service_role';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.vault_remove_secret(uuid) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
 
 -- ============================================================
 -- 6. cron_dispatch_via_vault — même garde + allowlist des function_path.
@@ -269,7 +387,13 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.cron_dispatch_via_vault(text, integer) TO service_role;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.cron_dispatch_via_vault(text, integer)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.cron_dispatch_via_vault(text, integer) TO service_role';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.cron_dispatch_via_vault(text, integer) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
 
 -- ============================================================
 -- 7. increment_webhook_failure / mark_playbook_executed / seed_default_playbooks
@@ -452,9 +576,27 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.increment_webhook_failure(uuid) TO service_role;
-GRANT EXECUTE ON FUNCTION public.mark_playbook_executed(uuid, uuid, uuid) TO service_role;
-GRANT EXECUTE ON FUNCTION public.seed_default_playbooks(uuid) TO service_role;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.increment_webhook_failure(uuid)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.increment_webhook_failure(uuid) TO service_role';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.increment_webhook_failure(uuid) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.mark_playbook_executed(uuid, uuid, uuid)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.mark_playbook_executed(uuid, uuid, uuid) TO service_role';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.mark_playbook_executed(uuid, uuid, uuid) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
+DO $grant$ BEGIN
+  IF to_regprocedure('public.seed_default_playbooks(uuid)') IS NOT NULL THEN
+    EXECUTE 'GRANT EXECUTE ON FUNCTION public.seed_default_playbooks(uuid) TO service_role';
+  ELSE
+    RAISE NOTICE 'GRANT ignoré : public.seed_default_playbooks(uuid) absente à ce stade du rejeu';
+  END IF;
+END $grant$;
 
 -- ============================================================
 -- 8. on_playbook_activate — retire la clé service_role en clair, lit
