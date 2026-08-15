@@ -134,9 +134,60 @@ export class DataSyncLogger {
 
       if (error) {
         console.error('[DataSyncLogger] complete() UPDATE failed:', error.message, error.code, JSON.stringify(this.counts))
+        // Un UPDATE de complétion rejeté laissait la ligne à 'running'
+        // indéfiniment — self-monitor la marquait alors « exceeded 15 min
+        // running time » 15 minutes plus tard, un diagnostic faux décrivant un
+        // blocage là où le sync avait terminé son travail. C'est exactement ce
+        // qui s'est produit du 2026-08-04 au 2026-08-15 avec
+        // error_type='write_error', absent de la CHECK constraint (23514).
+        //
+        // Le statut terminal prime sur la richesse du diagnostic : on réécrit
+        // sans les colonnes susceptibles d'être rejetées, en conservant le
+        // détail dans error_message (colonne libre). Mieux vaut une ligne
+        // terminale un peu moins typée qu'une ligne éternellement 'running'.
+        await this.forceTerminalStatus(status, update.error_message as string | undefined, error.message)
       }
     } catch (err) {
       console.error('[DataSyncLogger] complete() threw:', err instanceof Error ? err.message : String(err))
+      await this.forceTerminalStatus(status, update.error_message as string | undefined, err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  /**
+   * Dernier recours : garantir que la ligne quitte l'état 'running'.
+   *
+   * N'écrit que des colonnes sans CHECK constraint de valeur (hors
+   * `sync_status`, dont les valeurs sont celles de SyncStatus, déjà validées
+   * par le type). `error_type` est délibérément omis — c'est la colonne qui a
+   * causé le rejet initial dans le cas connu, et aucun diagnostic ne vaut de
+   * laisser la ligne coincée.
+   */
+  private async forceTerminalStatus(
+    status: SyncStatus,
+    originalErrorMessage: string | undefined,
+    rejectionReason: string,
+  ): Promise<void> {
+    if (!this.syncId) return
+    const detail = [originalErrorMessage, `[status write retried: ${rejectionReason}]`]
+      .filter(Boolean)
+      .join(' | ')
+      .slice(0, 2000)
+
+    try {
+      const { error } = await this.supabase
+        .from('data_syncs')
+        .update({
+          sync_status: status,
+          completed_at: new Date().toISOString(),
+          error_message: detail,
+        })
+        .eq('id', this.syncId)
+
+      if (error) {
+        console.error('[DataSyncLogger] forceTerminalStatus() also failed:', error.message, error.code)
+      }
+    } catch (err) {
+      console.error('[DataSyncLogger] forceTerminalStatus() threw:', err instanceof Error ? err.message : String(err))
     }
   }
 

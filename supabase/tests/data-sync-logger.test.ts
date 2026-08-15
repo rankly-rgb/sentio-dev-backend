@@ -85,3 +85,100 @@ describe('DataSyncLogger.complete — status reflects records_failed (no more si
     expect(update.error_message).toContain('mrr_restatements:')
   })
 })
+
+// ── Incident 2026-08-15 : un UPDATE de complétion rejeté laissait la ligne
+// à 'running' pour toujours ──
+//
+// error_type='write_error' (écrit depuis le 2026-08-04) n'a jamais figuré dans
+// data_syncs_error_type_check. Tout run avec records_failed>0 voyait donc son
+// UPDATE rejeté en bloc (23514), la ligne restait 'running', et self-monitor la
+// marquait 15 min plus tard « exceeded 15 min running time » — un diagnostic
+// faux : le sync avait terminé en 27 secondes. Mesure avant correctif : ZÉRO
+// ligne 'completed_with_errors' sur 1938 syncs depuis mars 2026.
+//
+// La migration 20260815000001 ajoute la valeur manquante ; ces tests couvrent
+// le filet applicatif, qui doit tenir pour TOUT rejet, pas seulement celui-là.
+
+function mockSupabaseRejectingFirstUpdate(captured: CapturedUpdate[], rejection: { message: string; code: string }) {
+  let updateCount = 0
+  return {
+    from: (_table: string) => ({
+      insert: () => ({
+        select: () => ({ single: () => Promise.resolve({ data: { id: 'sync-1' }, error: null }) }),
+      }),
+      update: (payload: CapturedUpdate) => {
+        captured.push(payload)
+        updateCount += 1
+        // Le premier UPDATE (complet, avec error_type) est rejeté ; le
+        // repli (sans error_type) passe.
+        const error = updateCount === 1 ? rejection : null
+        return { eq: () => Promise.resolve({ error }) }
+      },
+    }),
+  } as unknown as ConstructorParameters<typeof DataSyncLogger>[0]['supabase']
+}
+
+describe('DataSyncLogger.complete — a rejected status write must never leave the row running', () => {
+  async function runWithRejection() {
+    const captured: CapturedUpdate[] = []
+    const logger = new DataSyncLogger({
+      supabase: mockSupabaseRejectingFirstUpdate(captured, {
+        message: 'new row for relation "data_syncs" violates check constraint "data_syncs_error_type_check"',
+        code: '23514',
+      }),
+      organizationId: 'org-1',
+      syncSource: 'stripe',
+      syncType: 'full_sync',
+    })
+    await logger.start()
+    logger.increment('records_processed', 367)
+    logger.increment('records_failed', 189)
+    await logger.complete({}, [{ table: 'invoices', message: 'no matching account', code: null }])
+    return captured
+  }
+
+  it('REGRESSION: retries with a safe payload when the first UPDATE is rejected', async () => {
+    const captured = await runWithRejection()
+    expect(captured).toHaveLength(2)
+  })
+
+  it('REGRESSION: the retry still writes a TERMINAL status, never leaving sync_status=running', async () => {
+    const captured = await runWithRejection()
+    const retry = captured[1]
+    // Le statut dégradé exact est préservé — le repli ne dégrade pas
+    // 'completed_with_errors' en 'failed', ce qui ferait passer un run
+    // partiellement réussi pour un échec total.
+    expect(retry.sync_status).toBe('completed_with_errors')
+    expect(retry.completed_at).toBeTruthy()
+    expect(retry.sync_status).not.toBe('running')
+  })
+
+  it('the retry drops error_type — the column that caused the rejection', async () => {
+    const captured = await runWithRejection()
+    expect(captured[0].error_type).toBe('write_error')
+    expect(captured[1].error_type).toBeUndefined()
+  })
+
+  it('the retry preserves the original diagnostic AND names the rejection reason', async () => {
+    const captured = await runWithRejection()
+    const message = captured[1].error_message as string
+    expect(message).toContain('invoices:')
+    expect(message).toContain('no matching account')
+    expect(message).toContain('data_syncs_error_type_check')
+  })
+
+  it('error_message stays within the 2000-char column budget even after the retry suffix', async () => {
+    const captured: CapturedUpdate[] = []
+    const logger = new DataSyncLogger({
+      supabase: mockSupabaseRejectingFirstUpdate(captured, { message: 'x'.repeat(3000), code: '23514' }),
+      organizationId: 'org-1',
+      syncSource: 'stripe',
+      syncType: 'full_sync',
+    })
+    await logger.start()
+    logger.increment('records_processed', 1)
+    logger.increment('records_failed', 1)
+    await logger.complete({}, [{ table: 'invoices', message: 'y'.repeat(3000), code: null }])
+    expect((captured[1].error_message as string).length).toBeLessThanOrEqual(2000)
+  })
+})
