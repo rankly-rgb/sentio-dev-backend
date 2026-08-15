@@ -58,6 +58,33 @@ jobs:
 
           echo "OK — chaque fonction déployée a sa source dans le repo, et réciproquement."
 
+      # ⚠️ CONNU ROUGE au 2026-08-15 — état assumé, pas un oubli.
+      #
+      # Ce job fonctionne : après les correctifs de rejouabilité (#75, #77), le
+      # rejeu des migrations dans la base shadow va jusqu'au bout et `db diff`
+      # produit enfin un diff. Ce diff n'est pas vide, pour deux raisons de
+      # nature très différentes :
+      #
+      #   1. BRUIT (~90% des lignes) — des centaines de
+      #      `grant select/insert/update/delete on table "public"."X" to
+      #      "anon"/"authenticated"/"service_role"`. Ce sont les privilèges par
+      #      défaut que la plateforme Supabase pose elle-même sur chaque table ;
+      #      la base shadow ne les a pas. Ce n'est pas de la dérive, et ça
+      #      apparaîtra à CHAQUE exécution tant que ces lignes ne sont pas
+      #      filtrées. C'est ce qui rend ce job rouge en permanence aujourd'hui.
+      #
+      #   2. DÉRIVE RÉELLE (2 lignes) — les policies RLS
+      #      `oauth_states_service_role_only` (oauth_states) et
+      #      `org_integrations_org_isolation` (organization_integrations)
+      #      existent en production sans être créées par aucune migration.
+      #      Même classe que le Lot 8, à capturer.
+      #
+      # Pour rendre ce job utilisable : filtrer (1) puis capturer (2). Tant que
+      # ce n'est pas fait, un rouge ici ne veut RIEN dire de nouveau — ne pas
+      # le lire comme une alerte, et ne pas le laisser dans cet état longtemps :
+      # un signal qu'on apprend à ignorer est pire que pas de signal.
+      # Le job "Fonctions déployées vs repo" ci-dessus est, lui, pleinement
+      # opérant et vert. Voir PARKING_LOT.md.
       - name: Schéma base vs migrations
         run: |
           set -o pipefail
