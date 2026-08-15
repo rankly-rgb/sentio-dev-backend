@@ -4,6 +4,40 @@ Historique complet des audits de stabilité et corrections. Extrait du CLAUDE.md
 
 ---
 
+## Connexion Stripe — clé refusée en boucle, collision `stripe_account_id` masquée en 500 (2026-08-15)
+
+Symptôme signalé : impossible d'enregistrer une clé `sk_` depuis Settings → Stripe connection, message rouge « Failed to update the organization record » à chaque tentative. Le format `sk_` n'était pas en cause (accepté depuis la création de la fonction, `VALID_PREFIXES`) — la clé passait la validation Stripe et était **déjà écrite dans le Vault** avant l'échec.
+
+**Root cause confirmée en direct** (`function_logs`, `function_id=da87a75d…`, 2026-08-15T06:37:51, à l'horodatage exact du symptôme) :
+
+```
+duplicate key value violates unique constraint "organizations_stripe_account_id_key"
+```
+
+`organizations.stripe_account_id` porte une contrainte UNIQUE globale (`20260301000002`). `update-stripe-connection` écrivait ce champ depuis `/v1/account` sans jamais vérifier si une autre org le revendiquait — le `23505` remontait en 500 générique.
+
+**L'unicité n'est pas le bug et n'a pas été levée** : `stripe-webhook/index.ts:25` résout l'org d'un event entrant par `.eq('stripe_account_id', ...)`. Deux orgs sur le même compte Stripe rendraient ce routage ambigu. Le bug est l'absence de garde applicative et, en amont, une fuite.
+
+**La fuite (cause première)** : `disconnect` remettait `stripe_api_key`/`stripe_connected`/`stripe_connection_method` à null mais **jamais `stripe_account_id`** — une org déconnectée continuait de réserver son compte Stripe indéfiniment. État constaté en base avant correctif : 4 orgs détenant un `acct_`, dont **3 avec `stripe_connected = false`**. Le log montre d'ailleurs un `disconnect` sur l'org concernée 6 secondes avant le premier échec.
+
+**Changements :**
+- `_shared/stripe-account-claim.ts` (nouveau) : `findConflictingOrganization` (lecture `.eq(stripe_account_id).neq(id)` — le `.neq` est ce qui permet de se reconnecter à son **propre** compte, jamais un conflit), `isStripeAccountConflict` (traduction du `23505`), `STRIPE_ACCOUNT_CONFLICT_MESSAGE`/`_STATUS` (409). Extrait en `_shared/` car consommé par les deux chemins de connexion (règle « pas d'abstraction sauf réutilisée 2+ fois »).
+- `update-stripe-connection/index.ts` : `stripe_account_id: null` ajouté à l'UPDATE de `disconnect` (ferme la fuite) ; `tryFetchAccountId` + vérification de collision déplacés **avant** `upsertVaultSecret` — l'ordre inverse laissait, sur échec, la nouvelle clé dans le Vault pendant que `organizations.stripe_api_key` gardait l'ancienne, deux stockages divergents sans rollback alors que `sync-stripe` ne lit que la seconde ; traduction `23505` → 409 conservée en filet derrière la vérification préalable, qui reste TOCTOU-sensible par construction (seule la contrainte est atomique).
+- `stripe-oauth-callback/index.ts` : même bug latent (ligne 139, écriture de `stripe_account_id` sans garde, 500 générique) — même garde appliquée, avant l'écriture Vault.
+- `lookupFailed` distingue « aucun conflit » de « je n'ai pas pu vérifier » (S1) : sur échec de lecture on **n'échoue pas**, on laisse la contrainte DB trancher plutôt que de refuser une connexion légitime sur une panne de lecture.
+
+**Aucun changement frontend nécessaire** — `fetchWithUserJwt.ts:67` relaie `data.error` verbatim et `Settings.tsx:264` l'affiche déjà (c'est ce chemin qui rendait le message d'origine). Le 409 remonte donc tel quel.
+
+**Correction de données appliquée en direct sur le projet dev** : `UPDATE organizations SET stripe_account_id = NULL WHERE stripe_connected = false AND stripe_account_id IS NOT NULL` — 3 lignes libérées (Sentio Demo, Test OAuth Corp, Churn Seed Validation). L'org `test` (seule réellement connectée, 432 comptes) n'a pas été touchée. Sans ce nettoyage, le correctif de code seul n'aurait pas débloqué les comptes déjà squattés.
+
+**Vérifié en direct** : la requête de `findConflictingOrganization` rejouée en SQL contre la base réelle renvoie bien l'org en conflit pour un `acct_` détenu ailleurs, et aucune ligne pour un compte libre.
+
+**Tests** : `supabase/tests/update-stripe-connection.test.ts` — 10 nouveaux tests (import réel du module, pas de copie miroir : le specifier `jsr:` est aliasé par `vitest.config.ts` et `SupabaseClient` n'y sert que de type). Couvre le message d'erreur `23505` exact relevé dans les logs, le refus de confondre avec une autre contrainte unique (`organizations_slug_key`), le `23505` sans message lisible, et les 3 branches de `findConflictingOrganization` (conflit / libre / lecture échouée). `npm run typecheck`, `npm run lint` et `npm run test` verts (1048 tests). Build : même échec pré-existant `NEXT_PUBLIC_SUPABASE_URL` absent de ce sandbox, non lié à ce chantier.
+
+**Non vérifié dans ce chantier** : le chemin HTTP complet n'a pas été rejoué contre la fonction déployée (les changements ne sont pas encore live) — la preuve repose sur le log de production identifiant le `23505`, la relecture du code, et la vérification SQL de la garde. À confirmer au prochain déploiement, en tentant une reconnexion réelle.
+
+---
+
 ## Lot 5 — Délinquence : escalade par durée (2026-08-13, #35)
 
 Suite de l'audit délinquence du 2026-08-06 : `is_delinquent` est un booléen plat, sans horodatage compagnon — un impayé du jour et un impayé de 40 jours scoraient identiquement (35pts, `payment_delinquent`), explicitement listé "hors périmètre" à l'époque. Ce lot ajoute la durée comme axe d'escalade.
