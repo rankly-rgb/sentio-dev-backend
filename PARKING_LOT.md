@@ -18,3 +18,9 @@ s'arrêter.
 ## Divers
 
 - 2026-08-15 — `_shared/mrr-engine.test-fixtures.ts` importe `./mrr-engine` sans extension `.ts` (résolution Node/Vitest). Pré-existant, sans effet sur le déploiement Deno (le fichier n'est pas importé par une Edge Function), mais c'est la seule entorse à la convention d'import du dossier.
+
+## Dérive base de données trouvée pendant le Lot 8 (2026-08-15)
+
+- 2026-08-15 — `public.handle_new_user()` existe en base, est référencée par la matrice du Lot 1, mais **n'est rattachée à aucun trigger** (`pg_trigger` vérifié, ni sur `auth.users` ni ailleurs). La fonction active est `handle_new_user_signup` (déclarée, elle, dans `20260503000004`). Deux implémentations proches d'un même besoin, dont une morte. Capturée telle quelle par `20260815000003` ; savoir laquelle garder est une décision produit.
+- 2026-08-15 — `public.account_notes` (1602 lignes) n'était déclarée dans aucune migration. Ses deux FK portent le suffixe `_fk` là où tout le reste du schéma utilise `_fkey` — reproduit à l'identique pour ne pas créer de faux diff, mais c'est une incohérence de nommage.
+- 2026-08-15 — Inventaire complet fait à cette occasion : 74 objets `public` (tables/vues/fonctions) + 36 triggers. Après les migrations `20260815000002`/`20260815000003`, tout est déclaré. Ce recensement n'a **pas** couvert : politiques RLS des tables déjà déclarées, contraintes ajoutées hors migration sur des tables déjà déclarées, colonnes ajoutées hors migration, index hors migration, jobs `cron.job`. Un `supabase db diff --linked` réel reste le seul contrôle exhaustif.

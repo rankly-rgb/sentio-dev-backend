@@ -96,6 +96,12 @@ CREATE POLICY playbook_exports_org_isolation ON public.playbook_exports
     OR (public.user_role() = 'service_role'::text)
   );
 
+-- ── Trigger updated_at ─────────────────────────────────────
+DROP TRIGGER IF EXISTS update_playbook_exports_updated_at ON public.playbook_exports;
+CREATE TRIGGER update_playbook_exports_updated_at
+  BEFORE UPDATE ON public.playbook_exports
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
 -- ── RPC ────────────────────────────────────────────────────
 -- Corps repris verbatim de pg_get_functiondef sur le projet.
 CREATE OR REPLACE FUNCTION public.get_playbook_export_summary(p_playbook_id uuid, p_filters jsonb DEFAULT '{}'::jsonb)
