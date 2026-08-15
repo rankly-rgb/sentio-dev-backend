@@ -231,3 +231,53 @@ verify_jwt = false
 # destination résolue exclusivement côté serveur (T022, chantier C)
 [functions.playbook-link]
 verify_jwt = false
+
+# ============================================================
+# Lot 8 (2026-08-15) — les 9 fonctions rapatriées d'un déploiement
+# hors git (issue #55). Chaque valeur ci-dessous REPRODUIT la valeur
+# `verify_jwt` réellement en place sur le projet au moment du
+# rapatriement (relevée via list_edge_functions) — ce n'est pas un
+# choix de conception fait ici.
+#
+# Sans ces blocs, `supabase functions deploy` appliquerait son défaut
+# (`verify_jwt = true`) à ces 9 fonctions au premier déploiement qui
+# les inclut, ce qui casserait les 8 qui vérifient elles-mêmes un JWT
+# ES256 dans leur code (verify_jwt=true rejette ES256 — cf. en-tête de
+# _shared/auth.ts).
+# ============================================================
+
+# export-playbook-accounts : JWT vérifié dans le code (ES256)
+[functions.export-playbook-accounts]
+verify_jwt = false
+
+# export-segment-csv : verify_jwt=true en place sur le projet (reproduit tel quel)
+[functions.export-segment-csv]
+verify_jwt = true
+
+# get-benchmark-data : JWT vérifié dans le code (ES256)
+[functions.get-benchmark-data]
+verify_jwt = false
+
+# org-settings : JWT vérifié dans le code (ES256)
+[functions.org-settings]
+verify_jwt = false
+
+# get-organization-locale : JWT vérifié dans le code (ES256)
+[functions.get-organization-locale]
+verify_jwt = false
+
+# update-organization-locale : JWT vérifié dans le code (ES256)
+[functions.update-organization-locale]
+verify_jwt = false
+
+# integration-oauth : JWT vérifié dans le code (ES256) + callbacks OAuth sans session
+[functions.integration-oauth]
+verify_jwt = false
+
+# webhook-config : JWT vérifié dans le code (ES256)
+[functions.webhook-config]
+verify_jwt = false
+
+# refresh-hubspot-tokens : cron toutes les 5h, dispatché via cron_dispatch_via_vault
+[functions.refresh-hubspot-tokens]
+verify_jwt = false
