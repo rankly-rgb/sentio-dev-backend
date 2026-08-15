@@ -1,0 +1,83 @@
+name: Drift check (prod vs git)
+
+# Pièce 2 de l'infrastructure de fin de chantier.
+#
+# Une seule question : la prod est-elle exactement ce que git dit qu'elle est ?
+# Deux comparaisons, aucune autre. Le moindre écart = échec rouge, et GitHub
+# envoie un email automatiquement quand un workflow planifié échoue.
+#
+# Ce workflow ne déploie rien et n'écrit rien : il lit et compare.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # lundi 06:00 UTC (08:00 Paris)
+  workflow_dispatch:       # déclenchable à la main
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Lier le projet
+        run: supabase link --project-ref "$PROJECT_REF"
+
+      - name: Fonctions déployées vs repo
+        run: |
+          set -o pipefail
+          supabase functions list --project-ref "$PROJECT_REF" -o json \
+            | jq -r '.[].slug' | sort > /tmp/deployed.txt
+
+          # Garde-fou d'outillage, pas un contrôle supplémentaire : si le format
+          # de sortie du CLI change, jq rend une liste vide et le diff ci-dessous
+          # annoncerait "toutes les fonctions ont disparu de la prod". On veut une
+          # erreur d'outil lisible, pas une fausse alerte de dérive.
+          if [ ! -s /tmp/deployed.txt ]; then
+            echo "::error::Impossible de lire la liste des fonctions déployées (sortie CLI vide ou format inattendu)."
+            exit 1
+          fi
+
+          # _shared n'est pas une fonction déployable.
+          find supabase/functions -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+            | grep -v '^_' | sort > /tmp/repo.txt
+
+          echo "Déployées : $(wc -l < /tmp/deployed.txt) · dans le repo : $(wc -l < /tmp/repo.txt)"
+
+          #   '<' = déployée sans source dans le repo (le cas du Lot 8)
+          #   '>' = présente dans le repo mais jamais déployée
+          diff /tmp/deployed.txt /tmp/repo.txt \
+            || { echo "::error::DÉRIVE : la prod et le repo divergent (liste ci-dessus)"; exit 1; }
+
+          echo "OK — chaque fonction déployée a sa source dans le repo, et réciproquement."
+
+      - name: Schéma base vs migrations
+        run: |
+          set -o pipefail
+          if ! supabase db diff --linked > /tmp/schema.diff 2> /tmp/schema.err; then
+            cat /tmp/schema.err
+            echo "::error::supabase db diff --linked a échoué (voir la sortie ci-dessus) — dérive non évaluée."
+            exit 1
+          fi
+          cat /tmp/schema.err
+
+          # Le CLI écrit ses messages d'avancement sur stderr, mais "No schema
+          # changes found" a déjà été vu sur stdout selon les versions. On neutralise
+          # donc les lignes vides et cette phrase avant de juger le fichier non vide,
+          # pour ne pas transformer un schéma conforme en échec permanent.
+          SIGNIFICANT=$(sed -e '/^[[:space:]]*$/d' -e '/^No schema changes found\.\?$/d' /tmp/schema.diff)
+
+          if [ -n "$SIGNIFICANT" ]; then
+            echo "$SIGNIFICANT"
+            echo "::error::DÉRIVE : le schéma en prod diverge des migrations"
+            exit 1
+          fi
+
+          echo "OK — le schéma de la base correspond aux migrations versionnées."
