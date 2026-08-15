@@ -793,6 +793,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
             .from('accounts')
             .select('id, organization_id, mrr_cents, seat_count, seat_limit, contract_end_date, contract_start_date, billing_interval, health_score, churn_risk_score, expansion_score, churn_risk_band, health_score_status, stripe_customer_id, created_at, is_delinquent, delinquent_since')
             .eq('organization_id', organizationId)
+            // ORDER BY stable, obligatoire avec .range() : sans tri explicite
+            // Postgres ne garantit aucun ordre, et cette boucle met à jour les
+            // lignes qu'elle pagine — elles se déplacent donc dans le heap
+            // entre deux batches. Certains comptes étaient lus deux fois,
+            // d'autres jamais.
+            //
+            // Invisible jusqu'ici parce que l'org concernée n'avait jamais
+            // terminé un run (timeout à 90s, cf. le N+1 corrigé au-dessus).
+            // Au premier run complet, l'écart s'est mesuré directement :
+            // 2689 lignes lues pour seulement 2110 comptes distincts
+            // réellement écrits — 579 comptes jamais scorés de ce run.
+            //
+            // `id` est immuable : contrairement à un tri sur un champ que la
+            // boucle modifie (scores_calculated_at, health_score…), la clé de
+            // tri ne bouge pas sous la pagination.
+            .order('id', { ascending: true })
             .range(batchOffset, batchOffset + SCORING_BATCH_SIZE - 1)
 
           if (batchError) {
