@@ -820,6 +820,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
           // Score each account (pure — no DB calls)
           const historyRows: Array<Record<string, unknown>> = []
+          // Écritures `accounts` accumulées puis upsertées en un seul
+          // aller-retour, comme historyRows juste à côté et comme le fait
+          // déjà sync-stripe (`accountUpdateRows` + upsert sur 'id').
+          //
+          // Avant (audit 2026-08-15) : un `.update().eq('id', …)` par compte,
+          // séquentiel, dans cette boucle — 2688 allers-retours PostgREST pour
+          // l'org la plus grosse, ~80s, contre ORG_SCORING_TIMEOUT_MS=90_000.
+          // Elle n'a jamais terminé un seul run ; les orgs à 422 comptes
+          // passaient (~13s), ce qui a longtemps fait passer le problème pour
+          // une lenteur générale plutôt que pour un N+1. `score_history`, dans
+          // la même boucle, était déjà correctement batché.
+          const accountUpdateRows: Array<Record<string, unknown>> = []
+          // Dispatch différé : ne peut être décidé qu'après l'écriture réelle
+          // — dispatcher un changement de segment dont l'UPDATE a échoué
+          // enverrait un webhook sortant sur un état jamais persisté.
+          const pendingDispatch: typeof dispatchQueue = []
 
           for (const account of batch as AccountWithCreatedAt[]) {
             try {
@@ -918,9 +934,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
               // Update account current scores + narratives (usage_narrative/
               // engagement_narrative volontairement omis — dimensions retirées).
-              const { error: updateError } = await supabase
-                .from('accounts')
-                .update({
+              accountUpdateRows.push({
+                  id: account.id,
+                  // organization_id requis : l'upsert est un INSERT ... ON
+                  // CONFLICT, et la colonne est NOT NULL sur accounts. En
+                  // pratique le conflit sur 'id' se produit toujours (le
+                  // compte vient d'être lu), mais la ligne doit rester
+                  // insérable pour que PostgREST l'accepte.
+                  organization_id: organizationId,
                   health_score: scores.health_score,
                   health_score_status: scores.health_score_status,
                   health_score_max_points: scores.health_score_max_points,
@@ -941,24 +962,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                   financial_narrative: narratives.financial_narrative,
                   contract_narrative: narratives.contract_narrative,
                   scores_calculated_at: new Date().toISOString(),
-                })
-                .eq('id', account.id)
-
-              if (updateError) {
-                console.error(JSON.stringify({
-                  level: 'error',
-                  function_name: 'calculate-scores',
-                  organization_id: organizationId,
-                  account_id: account.id,
-                  message: `accounts update failed: ${updateError.message}`,
-                }))
-                errors++
-                logger.increment('records_failed')
-                continue
-              }
-
-              accountsScored++
-              logger.increment('records_processed')
+              })
 
               // Détecter changement de segment ou seuil churn (pour dispatch outbound).
               // Ancien état = dernier churn_risk_band/health_score_status persistés sur
@@ -973,7 +977,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
               // distribution que l'ancien "100-health+additifs" — un seuil
               // magique comme ">= 60" hérité du V1 serait mal calibré ici.
               if (oldSegment !== newSegment || scores.churn_risk_band === 'high' || scores.churn_risk_band === 'critical') {
-                dispatchQueue.push({ account, scores, oldSegment, newSegment, hasOverdue: hasOverdueInvoices })
+                pendingDispatch.push({ account, scores, oldSegment, newSegment, hasOverdue: hasOverdueInvoices })
               }
             } catch (err) {
               console.error(JSON.stringify({
@@ -985,6 +989,32 @@ Deno.serve(async (req: Request): Promise<Response> => {
               }))
               errors++
               logger.increment('records_failed')
+            }
+          }
+
+          // Batch upsert accounts pour ce batch — un aller-retour au lieu
+          // de `batch.length`. Les compteurs et le dispatch ne sont validés
+          // qu'après l'écriture réelle : sans ça, un batch rejeté serait
+          // compté "scored" et déclencherait des webhooks sortants sur un
+          // état jamais persisté.
+          if (accountUpdateRows.length > 0) {
+            const { error: accountsError } = await supabase
+              .from('accounts')
+              .upsert(accountUpdateRows, { onConflict: 'id' })
+
+            if (accountsError) {
+              console.error(JSON.stringify({
+                level: 'error',
+                function_name: 'calculate-scores',
+                organization_id: organizationId,
+                message: `accounts batch upsert failed (${accountUpdateRows.length} rows): ${accountsError.message}`,
+              }))
+              errors += accountUpdateRows.length
+              logger.increment('records_failed', accountUpdateRows.length)
+            } else {
+              accountsScored += accountUpdateRows.length
+              logger.increment('records_processed', accountUpdateRows.length)
+              for (const item of pendingDispatch) dispatchQueue.push(item)
             }
           }
 

@@ -989,7 +989,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .eq('is_active', true)
       .order('created_at', { ascending: true })
     if (error) console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', step: 'orgs_query', error: error.message }))
-    orgsToSync = (data ?? []).filter((o) => o.stripe_api_key || Deno.env.get('STRIPE_SECRET_KEY'))
+    // Une org sans clé Stripe propre n'est PAS synchronisée.
+    //
+    // Avant (audit 2026-08-15) : ce filtre acceptait l'org dès que
+    // STRIPE_SECRET_KEY existait dans l'environnement — or cette variable est
+    // la clé du compte Stripe de Sentio elle-même (OAuth callback et Checkout
+    // Sessions, cf. CLAUDE.md), jamais celle d'un client. Toute org sans clé
+    // propre ingérait donc les customers de Sentio comme si c'étaient les
+    // siens. Mesuré sur le projet dev : 9 orgs actives concernées,
+    // synchronisées chaque nuit, toutes avec exactement le même nombre de
+    // comptes — elles importaient toutes le même compte Stripe.
+    //
+    // `disconnect` (update-stripe-connection) met stripe_api_key à null :
+    // sans cette garde, se déconnecter faisait basculer l'org sur le compte
+    // de Sentio au lieu d'arrêter le sync.
+    orgsToSync = (data ?? []).filter((o) => Boolean(o.stripe_api_key))
   }
 
   if (orgsToSync.length === 0) {
@@ -1025,7 +1039,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   // ── Traitement d'une seule org ────────────────────────────────
   const organizationId = orgsToSync[0].id
-  const apiKey = orgsToSync[0].stripe_api_key ?? Deno.env.get('STRIPE_SECRET_KEY')
+  // Même garde sur le chemin org unique (appel ciblé `organization_id`), qui
+  // ne passe pas par le filtre ci-dessus : pas de repli sur la clé Sentio,
+  // sinon l'org importerait un compte Stripe qui n'est pas le sien.
+  const apiKey = orgsToSync[0].stripe_api_key
   if (!apiKey) {
     return errorResponse('Stripe key not configured. Add your key under Integrations → Stripe.', 500)
   }
