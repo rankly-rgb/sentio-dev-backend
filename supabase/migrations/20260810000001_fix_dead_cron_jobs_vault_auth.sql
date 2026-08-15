@@ -78,7 +78,56 @@ $$;
 COMMENT ON FUNCTION public.cron_dispatch_via_vault(TEXT, INTEGER) IS
   'Dispatch cron -> Edge Function via net.http_post, auth lue depuis Supabase Vault (secret cron_service_role_key). Introduite pour fixer refresh-hubspot-tokens/sync-hubspot-daily/playbook-scheduler/self-monitor (issue #38) sans dupliquer davantage la clé service_role en clair dans cron.job.';
 
-SELECT cron.alter_job(2, command := $cron$SELECT public.cron_dispatch_via_vault('refresh-hubspot-tokens')$cron$);
-SELECT cron.alter_job(6, command := $cron$SELECT public.cron_dispatch_via_vault('sync-hubspot')$cron$);
-SELECT cron.alter_job(7, command := $cron$SELECT public.cron_dispatch_via_vault('playbook-scheduler')$cron$);
-SELECT cron.alter_job(8, command := $cron$SELECT public.cron_dispatch_via_vault('self-monitor')$cron$);
+-- Rejouabilité (ajouté 2026-08-15) : ces quatre appels désignaient les jobs par
+-- leur `jobid` numérique nu. Ces identifiants n'existent que sur le projet dev —
+-- aucune migration ne crée de cron job, ils ont tous été créés à la main. Sur
+-- toute base neuve (base shadow de `supabase db diff`, restauration, nouvel
+-- environnement), `cron.alter_job(2, ...)` échouait donc avec « Job 2 does not
+-- exist », interrompant le rejeu de l'historique complet des migrations — et
+-- rendant `db diff --linked` inutilisable, donc la détection de dérive aveugle.
+--
+-- La garde ci-dessous ne change RIEN là où les jobs existent (le projet dev, où
+-- cette migration est déjà appliquée depuis le 2026-08-10) : jobid ET jobname
+-- doivent correspondre, ce qui est le cas. Ailleurs, elle rend l'appel no-op au
+-- lieu d'échouer. Le `jobname` est vérifié en plus du `jobid` pour ne jamais
+-- réécrire par accident un job différent qui aurait hérité du même numéro.
+--
+-- Le fond du problème — les cron jobs ne sont pas versionnés du tout — n'est pas
+-- traité ici : voir PARKING_LOT.md.
+
+DO $guard$
+BEGIN
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobid = 2 AND jobname = 'refresh-hubspot-tokens') THEN
+    PERFORM cron.alter_job(2, command := $cron$SELECT public.cron_dispatch_via_vault('refresh-hubspot-tokens')$cron$);
+  ELSE
+    RAISE NOTICE 'cron job 2 (%) absent — alter_job ignoré (base neuve ou jobid réattribué).', 'refresh-hubspot-tokens';
+  END IF;
+END
+$guard$;
+DO $guard$
+BEGIN
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobid = 6 AND jobname = 'sync-hubspot-daily') THEN
+    PERFORM cron.alter_job(6, command := $cron$SELECT public.cron_dispatch_via_vault('sync-hubspot')$cron$);
+  ELSE
+    RAISE NOTICE 'cron job 6 (%) absent — alter_job ignoré (base neuve ou jobid réattribué).', 'sync-hubspot-daily';
+  END IF;
+END
+$guard$;
+DO $guard$
+BEGIN
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobid = 7 AND jobname = 'playbook-scheduler') THEN
+    PERFORM cron.alter_job(7, command := $cron$SELECT public.cron_dispatch_via_vault('playbook-scheduler')$cron$);
+  ELSE
+    RAISE NOTICE 'cron job 7 (%) absent — alter_job ignoré (base neuve ou jobid réattribué).', 'playbook-scheduler';
+  END IF;
+END
+$guard$;
+DO $guard$
+BEGIN
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobid = 8 AND jobname = 'self-monitor') THEN
+    PERFORM cron.alter_job(8, command := $cron$SELECT public.cron_dispatch_via_vault('self-monitor')$cron$);
+  ELSE
+    RAISE NOTICE 'cron job 8 (%) absent — alter_job ignoré (base neuve ou jobid réattribué).', 'self-monitor';
+  END IF;
+END
+$guard$;
