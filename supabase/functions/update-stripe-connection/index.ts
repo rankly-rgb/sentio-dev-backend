@@ -36,6 +36,12 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import {
+  findConflictingOrganization,
+  isStripeAccountConflict,
+  STRIPE_ACCOUNT_CONFLICT_MESSAGE,
+  STRIPE_ACCOUNT_CONFLICT_STATUS,
+} from '../_shared/stripe-account-claim.ts'
 
 // Restreintes (rk_) ET secrètes complètes (sk_) toutes deux acceptées —
 // aligné avec verify-stripe-token/integrations-config, qui acceptent déjà
@@ -244,9 +250,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
         .eq('id', existing.id)
     }
 
+    // `stripe_account_id: null` est indispensable, pas cosmétique : la colonne
+    // porte une contrainte UNIQUE globale. Le laisser en place après une
+    // déconnexion faisait squatter le compte Stripe indéfiniment par une org
+    // qui ne l'utilise plus — plus aucune autre org ne pouvait le connecter,
+    // et l'org elle-même ne pouvait plus rebasculer vers un autre compte.
+    // C'est cette fuite qui a produit l'incident du 2026-08-15 (3 orgs
+    // déconnectées retenant encore un `acct_`).
     const { error: orgErr } = await supabase
       .from('organizations')
-      .update({ stripe_api_key: null, stripe_connected: false, stripe_connection_method: null })
+      .update({
+        stripe_api_key: null,
+        stripe_connected: false,
+        stripe_connection_method: null,
+        stripe_account_id: null,
+      })
       .eq('id', orgId)
 
     if (orgErr) {
@@ -275,13 +293,44 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return errorResponse(validation.error ?? 'Stripe key validation failed', 400)
   }
 
+  // L'id de compte est résolu AVANT toute écriture, et la collision d'unicité
+  // vérifiée dans la foulée. L'ordre inverse (Vault d'abord) laissait, sur
+  // échec de l'UPDATE org, la nouvelle clé dans le Vault pendant que
+  // `organizations.stripe_api_key` gardait l'ancienne — deux stockages
+  // divergents, sans rollback, alors que `sync-stripe` ne lit que la seconde.
+  // Un refus doit ne rien avoir écrit du tout.
+  const accountId = await tryFetchAccountId(apiKey)
+
+  if (accountId) {
+    const { conflictingOrgId, lookupFailed } = await findConflictingOrganization(supabase, accountId, orgId)
+    if (conflictingOrgId) {
+      console.warn(JSON.stringify({
+        level: 'warn',
+        function_name: 'update-stripe-connection',
+        organization_id: orgId,
+        message: 'stripe_account_id already claimed by another organization',
+        conflicting_organization_id: conflictingOrgId,
+      }))
+      return errorResponse(STRIPE_ACCOUNT_CONFLICT_MESSAGE, STRIPE_ACCOUNT_CONFLICT_STATUS)
+    }
+    if (lookupFailed) {
+      // Lecture impossible ≠ pas de conflit : on continue et on laisse la
+      // contrainte DB trancher plus bas, plutôt que de refuser une connexion
+      // légitime à cause d'une panne de lecture.
+      console.warn(JSON.stringify({
+        level: 'warn',
+        function_name: 'update-stripe-connection',
+        organization_id: orgId,
+        message: 'stripe_account_id conflict lookup failed, deferring to DB constraint',
+      }))
+    }
+  }
+
   const { error: vaultError } = await upsertVaultSecret(supabase, orgId, apiKey)
   if (vaultError) {
     console.error(JSON.stringify({ level: 'error', function_name: 'update-stripe-connection', message: `Vault storage failed: ${vaultError}` }))
     return errorResponse('Failed to store the key securely. Please try again.', 500)
   }
-
-  const accountId = await tryFetchAccountId(apiKey)
 
   const orgUpdate: Record<string, unknown> = {
     stripe_api_key: apiKey,
@@ -297,6 +346,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (orgErr) {
     console.error(JSON.stringify({ level: 'error', function_name: 'update-stripe-connection', message: orgErr.message }))
+    // Filet atomique derrière la vérification préalable, qui est
+    // TOCTOU-sensible : deux connexions concurrentes du même compte Stripe
+    // passent toutes deux la lecture, seule la contrainte départage.
+    if (isStripeAccountConflict(orgErr)) {
+      return errorResponse(STRIPE_ACCOUNT_CONFLICT_MESSAGE, STRIPE_ACCOUNT_CONFLICT_STATUS)
+    }
     return errorResponse('Failed to update the organization record', 500)
   }
 

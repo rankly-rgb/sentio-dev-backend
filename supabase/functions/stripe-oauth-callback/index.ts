@@ -19,6 +19,12 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse, errorResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import {
+  findConflictingOrganization,
+  isStripeAccountConflict,
+  STRIPE_ACCOUNT_CONFLICT_MESSAGE,
+  STRIPE_ACCOUNT_CONFLICT_STATUS,
+} from '../_shared/stripe-account-claim.ts'
 
 Deno.serve(async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
@@ -117,6 +123,31 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   // Stocker stripe_user_id dans Vault
+  // Même garde que `update-stripe-connection` : `organizations.
+  // stripe_account_id` est UNIQUE globalement, et une collision remontait
+  // ici aussi en 500 générique. Vérifié avant l'écriture Vault pour qu'un
+  // refus ne laisse aucun état partiel derrière lui.
+  const { conflictingOrgId, lookupFailed } = await findConflictingOrganization(supabase, stripeUserId, orgId)
+  if (conflictingOrgId) {
+    console.warn(JSON.stringify({
+      level: 'warn',
+      function_name: 'stripe-oauth-callback',
+      organization_id: orgId,
+      message: 'stripe_account_id already claimed by another organization',
+      conflicting_organization_id: conflictingOrgId,
+    }))
+    return errorResponse(STRIPE_ACCOUNT_CONFLICT_MESSAGE, STRIPE_ACCOUNT_CONFLICT_STATUS)
+  }
+  if (lookupFailed) {
+    // Lecture impossible ≠ pas de conflit : on laisse la contrainte DB trancher.
+    console.warn(JSON.stringify({
+      level: 'warn',
+      function_name: 'stripe-oauth-callback',
+      organization_id: orgId,
+      message: 'stripe_account_id conflict lookup failed, deferring to DB constraint',
+    }))
+  }
+
   const { error: vaultErr } = await supabase.rpc('vault_create_secret', {
     secret: stripeUserId,
     name: `stripe_oauth_org_${orgId}`,
@@ -143,6 +174,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   if (updateErr) {
     console.error(JSON.stringify({ level: 'error', function_name: 'stripe-oauth-callback', message: updateErr.message }))
+    if (isStripeAccountConflict(updateErr)) {
+      return errorResponse(STRIPE_ACCOUNT_CONFLICT_MESSAGE, STRIPE_ACCOUNT_CONFLICT_STATUS)
+    }
     return errorResponse('Failed to update organization', 500)
   }
 
