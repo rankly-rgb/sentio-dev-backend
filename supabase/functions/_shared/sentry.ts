@@ -60,6 +60,17 @@ export function withSentry(name: string, handler: Handler): Handler {
     try {
       return await handler(req)
     } catch (err) {
+      // Loggé AUSSI en local, pas seulement envoyé à Sentry. Sans cette ligne,
+      // un 500 produit par ce wrapper ne laisse aucune trace dans les logs
+      // Supabase — c'est exactement ce qui a rendu le 500 du 2026-08-16
+      // 19:18:25 indiagnosticable sans accès à Sentry. Une erreur ne doit
+      // jamais être visible dans un seul endroit.
+      console.error(JSON.stringify({
+        level: 'error',
+        function_name: name,
+        message: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      }))
       Sentry.withScope((scope) => {
         scope.setTag('function', name)
         Sentry.captureException(err)
