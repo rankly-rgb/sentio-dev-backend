@@ -9,6 +9,27 @@ on:
       - 'supabase/config.toml'
   workflow_dispatch:
 
+# Pièce 1 de l'infrastructure de fin de chantier (2026-08-15).
+#
+# Ce workflow EST le pipeline de déploiement du guide : il fait déjà
+# link → db push → functions deploy → smoke test a13 en dernière marche,
+# plus les assertions a10/a11 et les assertions data-truth. Un second
+# workflow `deploy.yml` n'a donc pas été créé — deux pipelines déclenchés
+# par le même push se seraient couru après sur `db push` et
+# `functions deploy`, et remplacer celui-ci par la version courte du guide
+# aurait fait perdre toutes les assertions.
+#
+# Le seul élément du guide qui manquait est ce bloc `concurrency`. Sans lui,
+# deux merges rapprochés sur `main` lancent deux runs en parallèle : deux
+# `supabase db push` concurrents sur la même base, et deux
+# `functions deploy` dont l'ordre d'arrivée décide de ce qui est live.
+# `cancel-in-progress: false` est délibéré : on ne coupe JAMAIS un
+# déploiement en cours (une migration à moitié appliquée est pire que
+# d'attendre) — le second run patiente et s'exécute après.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
