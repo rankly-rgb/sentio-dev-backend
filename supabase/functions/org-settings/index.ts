@@ -26,11 +26,12 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { type Lang, getTranslationDict } from '../_shared/translations.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const SUPPORTED_LOCALES = ['fr', 'en'] as const
 type Locale = typeof SUPPORTED_LOCALES[number]
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('org-settings', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -95,7 +96,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return errorResponse('Method not allowed', 405)
-})
+}))
 
 // ── Validation ─────────────────────────────────────────────
 

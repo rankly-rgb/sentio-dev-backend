@@ -17,6 +17,7 @@ import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { computeHmacSignature } from '../_shared/webhook-dispatcher.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { getWebhookSecret, storeVaultSecret, updateVaultSecret } from '../_shared/vault.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const VALID_EVENTS = [
   'churn_risk_critical',
@@ -48,7 +49,7 @@ function getSubPath(req: Request): string {
   return match ? match[1] : ''
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('webhook-config', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -365,4 +366,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return errorResponse('Method not allowed', 405)
-})
+}))

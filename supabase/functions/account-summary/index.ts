@@ -26,6 +26,7 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const SUMMARY_TTL_MS = 24 * 60 * 60 * 1000
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
@@ -34,7 +35,7 @@ const FUNCTION_VERSION = '1.3.0'
 
 // ── Entrypoint ───────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('account-summary', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -186,7 +187,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq('organization_id', orgId)
 
   return jsonResponse({ summary, generated_at: generatedAt, cached: false })
-})
+}))
 
 // ── Prompt builder ───────────────────────────────────────────
 

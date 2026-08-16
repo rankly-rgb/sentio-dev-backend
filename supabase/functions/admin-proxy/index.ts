@@ -10,6 +10,7 @@ import { createServiceClient, jsonResponse, errorResponse } from '../_shared/sup
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { createLogger } from '../_shared/structured-logger.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const ALLOWED_ACTIONS = ['sync-stripe', 'sync-hubspot', 'calculate-scores', 'health-check', 'self-monitor', 'generate-insights', 'dlq-hubspot', 'playbook-executions'] as const
 type AllowedAction = typeof ALLOWED_ACTIONS[number]
@@ -25,7 +26,7 @@ interface ProxyRequest {
 // Actions qui nécessitent un organization_id
 const ACTIONS_REQUIRING_ORG: AllowedAction[] = ['sync-stripe', 'sync-hubspot', 'calculate-scores']
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('admin-proxy', async (req: Request): Promise<Response> => {
   // 1. CORS
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
@@ -245,4 +246,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
       502
     )
   }
-})
+}))

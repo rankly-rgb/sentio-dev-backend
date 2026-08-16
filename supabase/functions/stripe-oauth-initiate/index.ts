@@ -16,8 +16,9 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse, errorResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('stripe-oauth-initiate', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -77,4 +78,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const url = `https://connect.stripe.com/oauth/authorize?${params.toString()}`
 
   return jsonResponse({ url })
-})
+}))

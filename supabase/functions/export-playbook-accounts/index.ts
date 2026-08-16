@@ -48,6 +48,7 @@ import {
   formatActionType,
   CSV_COLUMNS,
 } from '../_shared/export-helpers.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // ============================================================
 // Types
@@ -81,7 +82,7 @@ interface ExportMeta {
 // Main handler
 // ============================================================
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('export-playbook-accounts', async (req: Request): Promise<Response> => {
   // 1. CORS
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
@@ -445,4 +446,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
       ...corsHeaders,
     },
   })
-})
+}))

@@ -60,6 +60,7 @@ import { callSlack } from '../_shared/connectors/slack.ts'
 import { callCustom } from '../_shared/connectors/custom.ts'
 import type { ConnectorConfig, ConnectorPayload, ConnectorResult } from '../_shared/connectors/types.ts'
 import { truncate } from '../_shared/connectors/types.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -175,7 +176,7 @@ async function runConnector(
 
 // ── Entrypoint ───────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('playbook-executor', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -419,4 +420,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return jsonResponse({ executed, queued, failed, destinations: triggeredNames })
-})
+}))

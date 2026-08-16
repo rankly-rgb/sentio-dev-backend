@@ -24,8 +24,9 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { SUBSCRIPTION_TIERS, getTier, isOverAccountLimit } from '../_shared/subscription-tiers.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('subscription-status', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -72,4 +73,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
       tiers: SUBSCRIPTION_TIERS,
     },
   })
-})
+}))

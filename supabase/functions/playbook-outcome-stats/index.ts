@@ -10,6 +10,7 @@ import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const SAMPLE_SIZE_WARNING_THRESHOLD = 20
 
@@ -22,7 +23,7 @@ interface GroupStats {
 
 // ── Entrypoint ──────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('playbook-outcome-stats', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -50,7 +51,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (!playbookId) return errorResponse('playbook_id query parameter required', 400)
 
   return handleStats(supabase, playbookId, auth.organizationId)
-})
+}))
 
 // ── Stats ───────────────────────────────────────────────────
 

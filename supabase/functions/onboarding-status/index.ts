@@ -45,8 +45,9 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('onboarding-status', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -81,7 +82,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method === 'GET') return handleGetStatus(supabase, orgId)
 
   return errorResponse('Method not allowed', 405)
-})
+}))
 
 // ── GET /onboarding-status ───────────────────────────────────
 

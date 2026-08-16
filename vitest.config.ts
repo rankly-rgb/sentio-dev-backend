@@ -8,6 +8,7 @@ export default defineConfig({
       // instead of duplicating handler logic — see also setupFiles below.
       'jsr:@supabase/supabase-js@2': '@supabase/supabase-js',
       'jsr:@supabase/functions-js/edge-runtime.d.ts': './supabase/tests/__stubs__/deno-edge-runtime-stub.ts',
+      'npm:@sentry/deno@^8': './supabase/tests/__stubs__/sentry-deno-stub.ts',
     },
   },
   test: {

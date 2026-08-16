@@ -38,6 +38,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 interface AccountRow {
   id: string
@@ -70,7 +71,7 @@ interface AtRiskAccount {
   top_risk_reason: string
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('onboarding-first-win', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -188,7 +189,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       global_health_score: globalHealthScore,
     },
   })
-})
+}))
 
 export function buildRiskReason(
   account: AccountRow,

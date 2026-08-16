@@ -28,6 +28,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse, errorResponse } from '../_shared/supabase-client.ts'
 import { sendEmail } from '../_shared/resend.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const APP_URL = Deno.env.get('NEXT_PUBLIC_APP_URL') || 'https://app.sentioapp.io'
 
@@ -151,7 +152,7 @@ export function buildChurnAlertEmail(accounts: CriticalAccount[]): string {
 
 // ── Handler principal ─────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('churn-alert', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -264,4 +265,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return jsonResponse(results)
-})
+}))

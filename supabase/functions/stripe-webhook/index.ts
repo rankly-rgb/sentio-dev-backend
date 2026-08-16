@@ -13,6 +13,7 @@ import { alertSlack } from '../_shared/slack-alert.ts'
 import { verifyStripeSignature } from '../_shared/stripe-signature.ts'
 import { calcSubscriptionMrrCents, aggregateAccountMrr, classifyMovement, resolveDelinquentSince, type StripeSubscriptionLike } from '../_shared/mrr-engine.ts'
 import { isCronLockHeld } from '../_shared/cron-lock.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // ── Résolution de l'organization depuis stripe_account_id ───
 async function resolveOrganization(
@@ -590,7 +591,7 @@ const ROUTED_EVENTS = new Set([
 ])
 
 // ── Entrypoint ───────────────────────────────────────────────
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('stripe-webhook', async (req: Request): Promise<Response> => {
   // CORS preflight handling
   if (req.method === 'OPTIONS') {
     return new Response(null, {
@@ -865,4 +866,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Toujours 200 pour éviter les retries Stripe sur des erreurs internes
     return jsonResponse({ received: true, error: 'internal_error' })
   }
-})
+}))

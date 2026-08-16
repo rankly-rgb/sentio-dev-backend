@@ -58,6 +58,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError, assertTrialActive } from '../_shared/auth.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const AT_RISK_CHURN_THRESHOLD = 70
 const AT_RISK_RATIO_THRESHOLD = 0.3
@@ -129,7 +130,7 @@ interface PortfolioSnapshot {
   scored_accounts_count: number
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('get-today-status', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -263,4 +264,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
       },
     },
   })
-})
+}))

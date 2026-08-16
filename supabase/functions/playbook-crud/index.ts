@@ -22,6 +22,7 @@ import {
   type PlaybookStatus,
   type ExecutionFrequency,
 } from '../_shared/playbook-engine.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // ── Validation link_redirect_url (chantier C, T022) ──────────
 // Anti-open-redirect : validée à l'écriture (schéma https: obligatoire),
@@ -36,7 +37,7 @@ export function isValidHttpsUrl(value: string): boolean {
 
 // ── Entrypoint ──────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('playbook-crud', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -83,7 +84,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     default:
       return errorResponse('Method not allowed', 405)
   }
-})
+}))
 
 // ── CREATE ──────────────────────────────────────────────────
 

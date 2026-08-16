@@ -33,6 +33,7 @@ import { callHubspot } from '../_shared/connectors/hubspot.ts'
 import { callSlack } from '../_shared/connectors/slack.ts'
 import { callCustom } from '../_shared/connectors/custom.ts'
 import type { ConnectorConfig, ConnectorPayload, ConnectorResult } from '../_shared/connectors/types.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const TEST_STRIPE_CUSTOMER_ID = 'cus_TEST_SENTIO'
 
@@ -54,7 +55,7 @@ async function runConnector(
   }
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('playbook-test', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -173,4 +174,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
     http_status: result.http_status ?? null,
     response: result.connector_response ?? result.error_message ?? '',
   })
-})
+}))

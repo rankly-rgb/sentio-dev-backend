@@ -9,6 +9,7 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const VALID_EVENT_TYPES = ['login', 'feature_used', 'api_call', 'export', 'report_viewed'] as const
 const VALID_SOURCES = ['api', 'webhook', 'manual'] as const
@@ -42,7 +43,7 @@ function isValidDate(v: unknown): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v))
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('track-usage', async (req: Request): Promise<Response> => {
   // CORS preflight
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
@@ -178,4 +179,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
     event_date: eventDate,
     event_count: eventCount,
   }, 201)
-})
+}))

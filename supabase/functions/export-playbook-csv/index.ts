@@ -42,6 +42,7 @@ import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { resolvePlaybookTargetAccounts, type TargetablePlaybook } from '../_shared/playbook-targeting.ts'
 import { resolveEmails, escapeField, type ContactInfo } from '../_shared/csv-export-utils.ts'
 import type { AccountData } from '../_shared/playbook-engine.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const MAX_ACCOUNTS_PER_RUN = 200
 const DEFAULT_EXCLUDE_EXECUTED_WITHIN_DAYS = 30
@@ -348,7 +349,7 @@ async function handleGet(req: Request, supabase: SupabaseClient, organizationId:
 
 // ── Entrypoint ──────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('export-playbook-csv', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -380,4 +381,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return handlePatch(req, supabase, auth.organizationId)
   }
   return handlePost(req, supabase, auth.organizationId)
-})
+}))

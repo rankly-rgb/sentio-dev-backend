@@ -55,6 +55,7 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { writeToDLQ } from '../_shared/dlq.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -105,7 +106,7 @@ const DISPATCH_TIMEOUT_MS = 10000
 
 // ── Entrypoint ────────────────────────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('outbound-webhook-dispatch', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -315,4 +316,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return jsonResponse({ dispatched, failed, destinations: dispatchedNames })
-})
+}))

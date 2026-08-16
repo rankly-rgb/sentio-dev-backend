@@ -24,6 +24,7 @@ import {
 import { dispatchAction } from '../_shared/action-dispatcher.ts'
 import { getBatchCompanyContacts } from '../_shared/hubspot-client.ts'
 import { resolveHubSpotApiKey } from '../_shared/vault.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const MAX_ACCOUNTS_PER_PLAYBOOK = 200
 const COOLDOWN_HOURS = 24
@@ -32,7 +33,7 @@ const LOCK_TTL_SECONDS = 300
 
 // ── Entrypoint ──────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('playbook-scheduler', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -372,7 +373,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       }))
     }
   }
-})
+}))
 
 // ── Helper ──────────────────────────────────────────────────
 

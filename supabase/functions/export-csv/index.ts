@@ -31,6 +31,7 @@ import {
   escapeField,
   resolveEmails,
 } from '../_shared/csv-export-utils.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const MAX_LIMIT = 2000
 const DEFAULT_LIMIT = 500
@@ -156,7 +157,7 @@ No personal data is stored by Sentio.
 
 // ── Handler principal ─────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('export-csv', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -359,4 +360,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
       'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
     },
   })
-})
+}))

@@ -27,6 +27,7 @@ import {
 } from '../_shared/mrr-engine.ts'
 import { dedupeMovementRows, writeMrrMovementsSync, resolveMovementDateAndProvenance, type MrrMovementSyncRow } from '../_shared/mrr-movements-writer.ts'
 import { getTier } from '../_shared/subscription-tiers.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const PAGE_SIZE = 100
@@ -923,7 +924,7 @@ async function syncInvoices(
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -1288,4 +1289,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
       await releaseCronLock(supabase, restatementLockName)
     }
   }
-})
+}))

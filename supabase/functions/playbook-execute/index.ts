@@ -23,6 +23,7 @@ import { getBatchCompanyContacts } from '../_shared/hubspot-client.ts'
 import { resolveHubSpotApiKey } from '../_shared/vault.ts'
 import { resolvePlaybookTargetAccounts } from '../_shared/playbook-targeting.ts'
 import { calculateAttributionDeadline, deriveAttributionStatus } from '../_shared/playbook-engine.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const MAX_ACCOUNTS_PER_RUN = 200
 const UNMARK_WINDOW_MS = 5 * 60 * 1000
@@ -39,7 +40,7 @@ interface ExecutePayload {
 
 // ── Entrypoint ──────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('playbook-execute', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -545,7 +546,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     has_more: hasMore,
     results: executionResults,
   })
-})
+}))
 
 // ============================================================
 // Playbook Outcome Tracking (chantier C) — sous-routes exécution

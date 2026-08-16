@@ -13,11 +13,12 @@ import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { getVaultSecret, updateVaultSecret, storeVaultSecret } from '../_shared/vault.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const LOCK_KEY = 'refresh-hubspot-tokens'
 const TOKEN_BUFFER_MS = 60 * 60 * 1000 // 1h — refresh si expire dans < 1h
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('refresh-hubspot-tokens', async (req: Request): Promise<Response> => {
   if (req.method !== 'POST') {
     return errorResponse('Method not allowed', 405)
   }
@@ -191,4 +192,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   } finally {
     try { await releaseCronLock(supabase, LOCK_KEY) } catch { /* safety */ }
   }
-})
+}))
