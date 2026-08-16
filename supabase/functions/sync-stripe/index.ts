@@ -14,6 +14,7 @@ import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { retryWithBackoff } from '../_shared/retry-with-backoff.ts'
 import { CircuitBreaker } from '../_shared/circuit-breaker.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
+import { startCronCheckin } from '../_shared/sentry-cron.ts'
 import { detectMrrCollapseAnomaly, type AccountMrrUpdate } from '../_shared/sync-anomaly-guard.ts'
 import {
   calcSubscriptionMrrCents,
