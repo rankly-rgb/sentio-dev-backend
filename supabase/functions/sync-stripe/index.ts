@@ -1013,6 +1013,19 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
 
   console.log(JSON.stringify({ level: 'info', function_name: 'sync-stripe', step: 'orgs_resolved', count: orgsToSync.length, sync_type: syncType }))
 
+  // Pointage Sentry Crons — uniquement pour le run planifié, qui traite tout
+  // le portefeuille (le cron poste un body vide, cf. cron.job jobid 38). Les
+  // ré-invocations par org déclenchées juste en dessous portent, elles, un
+  // `organization_id` : elles héritent donc du no-op, sinon un seul run
+  // planifié produirait autant de pointages que d'orgs.
+  // `cronOutcome` démarre à 'error' : le chemin org unique a plusieurs
+  // sorties d'échec, et seule la sortie de succès le repasse à 'ok' — un
+  // oubli se traduit par une alerte, jamais par un silence rassurant.
+  const checkin = body.organization_id
+    ? { finish: () => Promise.resolve() }
+    : await startCronCheckin('nightly-sync')
+  let cronOutcome: 'ok' | 'error' = 'error'
+
   // ── Si plusieurs orgs → traitement séquentiel (fire-and-return) ─
   if (orgsToSync.length > 1) {
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
@@ -1035,6 +1048,7 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
       }
     }
 
+    await checkin.finish(results.every((r) => r.status === 'triggered') ? 'ok' : 'error')
     return jsonResponse({ success: true, mode: 'all_orgs', results })
   }
 
@@ -1045,6 +1059,10 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
   // sinon l'org importerait un compte Stripe qui n'est pas le sien.
   const apiKey = orgsToSync[0].stripe_api_key
   if (!apiKey) {
+    // Sortie avant le try/finally plus bas : le pointage doit être clôturé
+    // ici, sinon il resterait ouvert et Sentry signalerait un dépassement de
+    // durée là où il s'agit d'une configuration manquante.
+    await checkin.finish('error')
     return errorResponse('Stripe key not configured. Add your key under Integrations → Stripe.', 500)
   }
 
@@ -1103,6 +1121,7 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
   const lockTtlSeconds = restatementMode ? 600 : 300
   const lockAcquired = await acquireCronLock(supabase, lockName, lockTtlSeconds)
   if (!lockAcquired) {
+    await checkin.finish('error')
     return errorResponse('Sync already in progress for this organization', 409)
   }
 
@@ -1256,6 +1275,7 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
       EdgeRuntime.waitUntil(scorePromise)
     }
 
+    cronOutcome = 'ok'
     return jsonResponse({
       success: true,
       organization_id: organizationId,
@@ -1288,5 +1308,8 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
     if (restatementMode) {
       await releaseCronLock(supabase, restatementLockName)
     }
+    // No-op sauf sur le chemin « run planifié avec une seule org à
+    // synchroniser », qui ne passe pas par le fan-out ci-dessus.
+    await checkin.finish(cronOutcome)
   }
 }))
