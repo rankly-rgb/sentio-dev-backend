@@ -22,6 +22,7 @@ import { createServiceClient, errorResponse, jsonResponse } from '../_shared/sup
 import { DataSyncLogger } from '../_shared/data-sync-logger.ts'
 import { acquireCronLock, releaseCronLock } from '../_shared/cron-lock.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
+import { startCronCheckin } from '../_shared/sentry-cron.ts'
 import {
   type Account,
   type SegmentType,
@@ -714,6 +715,16 @@ Deno.serve(withSentry('calculate-scores', async (req: Request): Promise<Response
     return errorResponse('Scoring already in progress', 409)
   }
 
+  // Pointage Sentry Crons — uniquement pour le run planifié, qui traite tout
+  // le portefeuille (le cron poste un body vide, cf. cron.job jobid 39). Un
+  // appel ciblé sur une seule org (UI, rejeu manuel) n'est pas l'exécution
+  // que le monitor surveille : le compter fabriquerait un pointage à une
+  // heure quelconque, exactement le bruit qui ferait passer un run planifié
+  // manquant pour un run réussi.
+  const checkin = body.organization_id
+    ? { finish: () => Promise.resolve() }
+    : await startCronCheckin('nightly-scoring')
+
   const results: Array<{ organization_id: string; accounts_scored: number; segments_assigned: number; errors: number; status: 'succeeded' | 'failed' | 'timed_out'; duration_ms: number }> = []
 
   try {
@@ -1208,6 +1219,9 @@ Deno.serve(withSentry('calculate-scores', async (req: Request): Promise<Response
     }
 
     const timedOutCount = results.filter((r) => r.status === 'timed_out').length
+    // Un org en échec ou en timeout n'est pas un run réussi : le monitor doit
+    // le voir comme tel, même si la fonction répond 200 avec le détail.
+    await checkin.finish(results.some((r) => r.status !== 'succeeded') ? 'error' : 'ok')
     return jsonResponse({
       success: true,
       snapshot_date: snapshotDate,
@@ -1227,6 +1241,7 @@ Deno.serve(withSentry('calculate-scores', async (req: Request): Promise<Response
       `calculate-scores failed: ${msg}`,
       { level: 'critical' },
     )
+    await checkin.finish('error')
 
     return errorResponse(`Scoring failed: ${msg}`, 500)
   } finally {
