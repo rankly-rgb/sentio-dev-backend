@@ -50,12 +50,13 @@ import {
   type TodayInsightInput,
 } from '../_shared/today-actions-helpers.ts'
 import type { ConditionGroup } from '../_shared/playbook-engine.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const ACCOUNTS_LIMIT = 5000
 const PLAYBOOKS_LIMIT = 500
 const INSIGHTS_LIMIT = 10000
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('get-today-actions', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -172,4 +173,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
       actions: summary.actions,
     },
   })
-})
+}))

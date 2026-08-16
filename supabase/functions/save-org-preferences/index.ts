@@ -11,13 +11,14 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const VALID_ALERT_CHANNELS = ['none', 'slack', 'email', 'both'] as const
 
 // Étapes depuis lesquelles on peut passer à 'invested'
 const INVESTABLE_STEPS = new Set(['stripe', 'revelation'])
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('save-org-preferences', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -129,4 +130,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
     saved: true,
     onboarding_step: newStep,
   })
-})
+}))

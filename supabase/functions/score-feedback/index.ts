@@ -23,6 +23,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 export interface ScoreFeedbackBody {
   account_id: string
@@ -63,7 +64,7 @@ export function validateScoreFeedbackBody(body: unknown): ValidationResult {
   }
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('score-feedback', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -135,4 +136,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return jsonResponse({ data: { id: inserted.id } }, 201)
-})
+}))

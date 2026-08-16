@@ -21,12 +21,13 @@ import { createServiceClient, errorResponse, jsonResponse } from '../_shared/sup
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { getTier, resolveStripePriceId, isSubscriptionTierKey } from '../_shared/subscription-tiers.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 interface CheckoutRequestBody {
   tier?: string
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('stripe-billing-checkout', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -147,4 +148,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }))
 
   return jsonResponse({ data: { checkout_url: session.url } })
-})
+}))

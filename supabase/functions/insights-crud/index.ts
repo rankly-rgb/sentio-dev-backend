@@ -16,6 +16,7 @@ import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError, assertTrialActive } from '../_shared/auth.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // ── Valid values ─────────────────────────────────────────────
 const VALID_INSIGHT_TYPES = ['churn_prediction', 'expansion_opportunity', 'renewal_alert', 'payment_risk', 'usage_drop', 'account_health_summary'] as const
@@ -52,7 +53,7 @@ export function parseCsvFilter<T extends string>(raw: string | null, valid: read
 
 // ── Entrypoint ───────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('insights-crud', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -96,7 +97,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     default:
       return errorResponse('Method not allowed', 405)
   }
-})
+}))
 
 // ── GET list ─────────────────────────────────────────────────
 //

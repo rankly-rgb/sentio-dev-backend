@@ -281,3 +281,9 @@ verify_jwt = false
 # refresh-hubspot-tokens : cron toutes les 5h, dispatché via cron_dispatch_via_vault
 [functions.refresh-hubspot-tokens]
 verify_jwt = false
+
+# sentry-selftest : lève une exception à chaque appel, pour prouver la chaîne
+# « exception Edge → Sentry ». verify_jwt = true : rejeté par la plateforme
+# sans JWT valide, avant d'atteindre le code.
+[functions.sentry-selftest]
+verify_jwt = true

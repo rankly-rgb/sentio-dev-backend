@@ -51,6 +51,7 @@ import {
 } from '../_shared/scoring.ts'
 import { generateNarrativesV3 } from '../_shared/score-narratives.ts'
 import { isAccountChurned } from '../_shared/mrr-engine.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // ── Types internes ──────────────────────────────────────────
 interface AccountWithCreatedAt extends Account {
@@ -666,7 +667,7 @@ async function assignSegments(
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('calculate-scores', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -1231,4 +1232,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   } finally {
     await releaseCronLock(supabase, 'calculate-scores')
   }
-})
+}))

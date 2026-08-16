@@ -25,8 +25,9 @@ import {
   STRIPE_ACCOUNT_CONFLICT_MESSAGE,
   STRIPE_ACCOUNT_CONFLICT_STATUS,
 } from '../_shared/stripe-account-claim.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('stripe-oauth-callback', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -214,4 +215,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }))
 
   return jsonResponse({ success: true })
-})
+}))

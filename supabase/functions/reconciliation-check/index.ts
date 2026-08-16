@@ -17,13 +17,14 @@ import { createServiceClient, jsonResponse, errorResponse } from '../_shared/sup
 import { acquireCronLock, releaseCronLock } from '../_shared/cron-lock.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { findDrift, type SegmentCount, type DriftEntry } from '../_shared/reconciliation.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 interface OrgDriftResult {
   organization_id: string
   drifts: DriftEntry[]
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('reconciliation-check', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -152,4 +153,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
     details: orgResults,
     timestamp: new Date().toISOString(),
   })
-})
+}))

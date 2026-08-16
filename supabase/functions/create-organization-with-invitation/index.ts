@@ -13,6 +13,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // Comptes démo représentatifs pour la révélation progressive
 const DEMO_ACCOUNTS = [
@@ -22,7 +23,7 @@ const DEMO_ACCOUNTS = [
   { company_name: 'Strio',      mrr_cents:  99000, health_score: 67, churn_risk_score: 35, segment: 'Stable'            },
 ]
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('create-organization-with-invitation', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -187,4 +188,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
     onboarding_step: 'promise',
     has_demo_data: (demoAccounts?.length ?? 0) > 0,
   })
-})
+}))

@@ -10,6 +10,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // Ordre canonique des étapes — index = priorité
 const STEP_ORDER = ['promise', 'stripe', 'revelation', 'invested', 'hubspot', 'completed'] as const
@@ -24,7 +25,7 @@ export function isValidTransition(current: string, next: string): boolean {
   return nextIdx > currentIdx && nextIdx <= currentIdx + 2
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('update-onboarding-step', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -122,4 +123,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
     onboarding_step: nextStep,
     onboarding_completed: nextStep === 'completed',
   })
-})
+}))

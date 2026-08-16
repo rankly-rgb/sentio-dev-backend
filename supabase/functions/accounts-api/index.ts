@@ -85,10 +85,11 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError, assertTrialActive } from '../_shared/auth.ts'
 import { generateNarrativesV3 } from '../_shared/score-narratives.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // ── Entrypoint ───────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('accounts-api', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -130,7 +131,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     default:
       return errorResponse('Method not allowed', 405)
   }
-})
+}))
 
 // ── GET list ─────────────────────────────────────────────────
 

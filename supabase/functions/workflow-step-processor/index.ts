@@ -13,12 +13,13 @@ import { createLogger } from '../_shared/structured-logger.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { calculateStepDueDate, type WorkflowStep, type AccountData } from '../_shared/playbook-engine.ts'
 import { executeWorkflowStep } from '../_shared/workflow-executor.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const LOCK_KEY = 'workflow-step-processor'
 const LOCK_TTL_SECONDS = 600
 const MAX_EXECUTIONS_PER_RUN = 100
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('workflow-step-processor', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -253,4 +254,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return jsonResponse({ processed: processedCount, errors: errorCount })
-})
+}))

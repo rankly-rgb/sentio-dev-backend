@@ -28,6 +28,7 @@ import {
   type HubSpotCompanyProperties,
 } from '../_shared/hubspot-sync-helpers.ts'
 import { getVaultSecret, resolveHubSpotApiKey } from '../_shared/vault.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const HUBSPOT_BASE_URL = 'https://api.hubapi.com'
 const PAGE_SIZE = 100
@@ -320,7 +321,7 @@ async function syncOrgHubSpot(
 
 // ── Entrypoint ───────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('sync-hubspot', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -486,4 +487,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
       }))
     }
   }
-})
+}))

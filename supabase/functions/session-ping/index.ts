@@ -34,11 +34,12 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // Delta minimum de health_score pour compter comme "variation significative"
 const SCORE_CHANGE_THRESHOLD = 5
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('session-ping', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -150,4 +151,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
       new_score_changes_count: newScoreChangesCount,
     },
   })
-})
+}))

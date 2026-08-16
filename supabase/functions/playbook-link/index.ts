@@ -16,12 +16,13 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse } from '../_shared/supabase-client.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const DEFAULT_REDIRECT_URL = 'https://app.sentioapp.io'
 
 // ── Entrypoint ──────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('playbook-link', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -44,7 +45,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return handleLinkVisit(supabase, executionId)
-})
+}))
 
 // ── Visite du lien ──────────────────────────────────────────
 

@@ -25,6 +25,7 @@ import {
   buildSegmentCsv,
   type SegmentAccountRow,
 } from '../_shared/segment-export-helpers.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // ── Error response helper (includes CORS) ──
 
@@ -39,7 +40,7 @@ function jsonError(message: string, status: number): Response {
 // Main handler
 // ============================================================
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('export-segment-csv', async (req: Request): Promise<Response> => {
   // 1. CORS preflight
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
@@ -171,4 +172,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
       ...corsHeaders,
     },
   })
-})
+}))

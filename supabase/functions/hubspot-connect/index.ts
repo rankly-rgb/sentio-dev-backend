@@ -20,12 +20,13 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 export function validateHubSpotKeyFormat(key: string): boolean {
   return typeof key === 'string' && key.startsWith('pat-')
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('hubspot-connect', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -143,4 +144,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }))
 
   return jsonResponse({ success: true })
-})
+}))

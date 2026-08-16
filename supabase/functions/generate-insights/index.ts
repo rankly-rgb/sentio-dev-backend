@@ -20,6 +20,7 @@ import {
   type InsightCandidate,
   evaluateInsightRules,
 } from '../_shared/insight-rules.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // ── Constants ────────────────────────────────────────────────
 const LOCK_TTL_SECONDS = 300
@@ -254,7 +255,7 @@ async function syncInsights(
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('generate-insights', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -463,4 +464,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     return errorResponse(`Insight generation failed: ${msg}`, 500)
   }
-})
+}))

@@ -37,6 +37,7 @@ import {
   HUBSPOT_SCOPES,
   type OAuthProvider,
 } from '../_shared/oauth-helpers.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // ── Route parsing ─────────────────────────────────────────────
 
@@ -49,7 +50,7 @@ function getRouteParts(req: Request): { segments: string[]; raw: string } {
 
 // ── Main handler ──────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('integration-oauth', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -557,7 +558,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return errorResponse(`Route inconnue : /integration-oauth/${raw}`, 404)
-})
+}))
 
 // ── Callback handler (pas de JWT, protege par state CSRF) ─────
 

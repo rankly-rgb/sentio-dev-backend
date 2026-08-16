@@ -10,6 +10,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { SupabaseClient } from 'jsr:@supabase/supabase-js@2'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 interface DetectPayload {
   organization_id: string
@@ -18,7 +19,7 @@ interface DetectPayload {
 
 // ── Entrypoint ──────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('playbook-outcome-detector', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -45,7 +46,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return handleDetect(supabase, body.organization_id, body.stripe_customer_id)
-})
+}))
 
 // ── Detection ───────────────────────────────────────────────
 

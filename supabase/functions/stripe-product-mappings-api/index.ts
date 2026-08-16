@@ -50,6 +50,7 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const STRIPE_API_BASE = 'https://api.stripe.com/v1'
 const STRIPE_TIMEOUT_MS = 15000
@@ -89,7 +90,7 @@ interface PutBody {
 
 // ── Entrypoint ────────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('stripe-product-mappings-api', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -126,7 +127,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     default:
       return errorResponse('Method not allowed', 405)
   }
-})
+}))
 
 // ── GET liste des mappings ────────────────────────────────────
 

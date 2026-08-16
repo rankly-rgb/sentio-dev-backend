@@ -22,6 +22,7 @@ import { createServiceClient, errorResponse, jsonResponse } from '../_shared/sup
 import { alertSlack } from '../_shared/slack-alert.ts'
 import { verifyStripeSignature } from '../_shared/stripe-signature.ts'
 import { findTierByStripePriceId, isSubscriptionTierKey, type SubscriptionTierKey } from '../_shared/subscription-tiers.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 interface StripeEvent {
   id: string
@@ -127,7 +128,7 @@ async function handleSubscriptionDeleted(supabase: SupabaseClient, obj: Record<s
   await updatePlanType(supabase, organizationId, 'free', eventCreatedIso)
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('stripe-billing-webhook', async (req: Request): Promise<Response> => {
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
@@ -202,4 +203,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return jsonResponse({ received: true })
-})
+}))

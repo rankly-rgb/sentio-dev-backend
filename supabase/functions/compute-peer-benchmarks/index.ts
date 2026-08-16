@@ -22,6 +22,7 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { acquireCronLock, releaseCronLock } from '../_shared/cron-lock.ts'
 import { alertSlack } from '../_shared/slack-alert.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const LOCK_KEY = 'compute-peer-benchmarks'
 const MIN_ORGS = 3
@@ -109,7 +110,7 @@ export function buildPeerSnapshot(metrics: OrgMetrics[]): PeerSnapshot {
 
 // ── Entrypoint ───────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('compute-peer-benchmarks', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -220,4 +221,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   } finally {
     await releaseCronLock(supabase, LOCK_KEY)
   }
-})
+}))

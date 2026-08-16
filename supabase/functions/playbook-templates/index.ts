@@ -9,8 +9,9 @@ import { handleCors } from '../_shared/cors.ts'
 import { errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { PLAYBOOK_TEMPLATES_V1 } from '../_shared/playbook-engine.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('playbook-templates', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -41,4 +42,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
       total: templates.length,
     },
   })
-})
+}))

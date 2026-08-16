@@ -30,8 +30,9 @@ import { createServiceClient, errorResponse, jsonResponse } from '../_shared/sup
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { getTier } from '../_shared/subscription-tiers.ts'
 import { computeTrialStatus } from '../_shared/trial-status.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('trial-status', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -64,4 +65,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const status = computeTrialStatus(tier.key, org?.trial_ends_at ?? null, Date.now())
 
   return jsonResponse({ data: status })
-})
+}))

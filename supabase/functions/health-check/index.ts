@@ -8,6 +8,7 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse, errorResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth } from '../_shared/auth.ts'
 import { computeSyncFreshness, computeWebhookFreshness } from '../_shared/sync-freshness.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 interface HealthCheck {
   name: string
@@ -19,7 +20,7 @@ interface HealthCheck {
 // réutilisée par dashboard-api/portfolio-metrics (stripe_stale), même
 // principe que _shared/mrr-engine.ts : une seule implémentation du calcul.
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('health-check', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -141,4 +142,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const statusCode = overallStatus === 'unhealthy' ? 503 : 200
   return jsonResponse({ status: overallStatus, checks, timestamp: new Date().toISOString(), ...freshnessFields }, statusCode)
-})
+}))

@@ -27,8 +27,9 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { sendEmail } from '../_shared/resend.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('on-user-signup', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -102,7 +103,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       trial_ends_at: org.trial_ends_at,
     },
   })
-})
+}))
 
 // ── Helpers exportés pour les tests ──────────────────────────
 

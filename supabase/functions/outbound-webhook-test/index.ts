@@ -24,10 +24,11 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth } from '../_shared/auth.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const TEST_TIMEOUT_MS = 10000
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('outbound-webhook-test', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -135,4 +136,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return jsonResponse({ success, status, response })
-})
+}))

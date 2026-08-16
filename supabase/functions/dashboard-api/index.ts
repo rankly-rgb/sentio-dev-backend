@@ -122,6 +122,7 @@ import { createServiceClient, errorResponse, jsonResponse } from '../_shared/sup
 import { verifyUserAuth, AuthError, assertTrialActive } from '../_shared/auth.ts'
 import { calcNrrPercentage, calcChurnRate30d, calcMrrGrowthMetrics, type MrrMovementForNrr } from '../_shared/mrr-engine.ts'
 import { computeSyncFreshness } from '../_shared/sync-freshness.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 // Seuil minimum pour qualifier un "win" (en points de health_score)
 const WIN_THRESHOLD = 10
@@ -161,7 +162,7 @@ function dominantDimension(
 
 // ── Entrypoint ───────────────────────────────────────────────
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('dashboard-api', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -201,7 +202,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (path === 'portfolio-metrics') return handlePortfolioMetrics(supabase, orgId)
 
   return errorResponse('Not found. Use /dashboard-api/briefing, /dashboard-api/wins, /dashboard-api/benchmarks or /dashboard-api/portfolio-metrics', 404)
-})
+}))
 
 // ── GET /dashboard-api/briefing ──────────────────────────────
 

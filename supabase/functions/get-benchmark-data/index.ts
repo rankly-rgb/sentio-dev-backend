@@ -56,8 +56,9 @@ import {
   type OrgMetrics,
 } from '../_shared/benchmark-helpers.ts'
 import { MIN_PEER_ORG_COUNT } from './benchmark-constants.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
-Deno.serve(async (req: Request) => {
+Deno.serve(withSentry('get-benchmark-data', async (req: Request) => {
   // CORS
   const corsResp = handleCors(req)
   if (corsResp) return corsResp
@@ -273,4 +274,4 @@ Deno.serve(async (req: Request) => {
     logger.error('Benchmark error', { error: message, status })
     return errorResponse(message, status)
   }
-})
+}))

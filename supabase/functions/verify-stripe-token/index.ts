@@ -20,6 +20,7 @@ import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
+import { withSentry } from '../_shared/sentry.ts'
 
 const VALID_PREFIXES = ['rk_live_', 'rk_test_', 'sk_live_', 'sk_test_'] as const
 const MIN_SUFFIX_LENGTH = 20
@@ -34,7 +35,7 @@ export function validateStripeKeyFormat(key: string): { valid: boolean; mode: 'l
   return { valid: false, mode: 'test' }
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+Deno.serve(withSentry('verify-stripe-token', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -161,4 +162,4 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }))
 
   return jsonResponse({ success: true, mode })
-})
+}))
