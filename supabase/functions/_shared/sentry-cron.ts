@@ -119,9 +119,25 @@ async function openCheckin(monitorSlug: string): Promise<CronCheckin> {
       CHECKIN_TIMEOUT_MS,
     )
     if (resp.ok) {
-      const payload = await resp.json().catch(() => null)
+      const raw = await resp.text().catch(() => '')
+      let payload: unknown = null
+      try { payload = JSON.parse(raw) } catch { /* corps non-JSON : tracé ci-dessous */ }
       const id = (payload as { id?: unknown } | null)?.id
-      if (typeof id === 'string' && id.length > 0) checkinId = id
+      if (typeof id === 'string' && id.length > 0) {
+        checkinId = id
+      } else {
+        // Sans id, aucun pointage terminal n'est possible et le check-in
+        // restera « in progress » jusqu'au timeout du monitor. Ne jamais
+        // laisser ce cas muet : c'est indiscernable d'un PUT rejeté sinon.
+        console.warn(JSON.stringify({
+          level: 'warn',
+          function_name: 'sentry-cron',
+          message: 'check-in ouvert mais aucun id exploitable — le pointage terminal ne partira pas',
+          monitor: monitorSlug,
+          status: resp.status,
+          body: raw.slice(0, 200),
+        }))
+      }
     } else {
       console.warn(JSON.stringify({
         level: 'warn',
@@ -151,7 +167,7 @@ async function openCheckin(monitorSlug: string): Promise<CronCheckin> {
       if (done) return
       done = true
       try {
-        await fetchWithTimeout(
+        const resp = await fetchWithTimeout(
           `${baseUrl}${checkinId}/`,
           {
             method: 'PUT',
@@ -160,6 +176,21 @@ async function openCheckin(monitorSlug: string): Promise<CronCheckin> {
           },
           CHECKIN_TIMEOUT_MS,
         )
+        // Un pointage terminal rejeté laisse le check-in ouvert jusqu'au
+        // timeout du monitor — donc une fausse alerte sur une exécution
+        // pourtant réussie. Ignorer `resp.ok` ici rendait ce cas
+        // indiscernable d'un pointage jamais envoyé.
+        if (!resp.ok) {
+          console.warn(JSON.stringify({
+            level: 'warn',
+            function_name: 'sentry-cron',
+            message: 'check-in terminal rejeté',
+            monitor: monitorSlug,
+            checkin_id: checkinId,
+            status: resp.status,
+            body: (await resp.text().catch(() => '')).slice(0, 200),
+          }))
+        }
       } catch (err) {
         console.warn(JSON.stringify({
           level: 'warn',

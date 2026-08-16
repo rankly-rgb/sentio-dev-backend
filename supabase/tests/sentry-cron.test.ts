@@ -140,6 +140,38 @@ describe('startCronCheckin ne laisse jamais rien s’échapper', () => {
     expect(JSON.parse(calls[1].body)).toEqual({ status: 'ok' })
   })
 
+  // Les deux cas qui laissent un check-in ouvert côté Sentry. Ils étaient
+  // silencieux, donc indiscernables l'un de l'autre depuis les logs — c'est
+  // ce qui a bloqué le diagnostic du 2026-08-16 au soir.
+  it('signale un check-in ouvert sans id exploitable', async () => {
+    denoEnv.SENTRY_DSN = DSN
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 202 }))
+
+    const checkin = await startCronCheckin('nightly-sync')
+    await checkin.finish('ok')
+
+    const logged = JSON.parse(warn.mock.calls[0][0] as string)
+    expect(logged.message).toContain('aucun id exploitable')
+    expect(logged.status).toBe(202)
+  })
+
+  it('signale un pointage terminal rejeté', async () => {
+    denoEnv.SENTRY_DSN = DSN
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'checkin-abc' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response('bad request', { status: 400 }))
+
+    const checkin = await startCronCheckin('nightly-sync')
+    await checkin.finish('ok')
+
+    const logged = JSON.parse(warn.mock.calls[0][0] as string)
+    expect(logged.message).toBe('check-in terminal rejeté')
+    expect(logged.status).toBe(400)
+    expect(logged.checkin_id).toBe('checkin-abc')
+  })
+
   it('ne clôture qu’une fois, même appelé deux fois', async () => {
     denoEnv.SENTRY_DSN = DSN
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
