@@ -81,6 +81,29 @@ const NOOP_CHECKIN: CronCheckin = { finish: () => Promise.resolve() }
  * parce que sa surveillance est en panne.
  */
 export async function startCronCheckin(monitorSlug: string): Promise<CronCheckin> {
+  // Try/catch englobant, volontairement redondant avec celui du fetch plus bas.
+  // L'invariant annoncé par ce module — « rien ici ne peut faire échouer un
+  // cron » — était garanti seulement pour l'appel réseau, pas pour la
+  // résolution d'URL ni pour ce que l'environnement d'exécution peut faire
+  // remonter d'inattendu. Un 500 sur sync-stripe le 2026-08-16 a montré que
+  // l'invariant se prouve mal par relecture : il est désormais posé à la
+  // frontière du module, où il ne dépend plus du détail de ce qu'il enveloppe.
+  try {
+    return await openCheckin(monitorSlug)
+  } catch (err) {
+    console.error(JSON.stringify({
+      level: 'error',
+      function_name: 'sentry-cron',
+      message: 'startCronCheckin a levé — pointage abandonné, le cron continue',
+      monitor: monitorSlug,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    }))
+    return NOOP_CHECKIN
+  }
+}
+
+async function openCheckin(monitorSlug: string): Promise<CronCheckin> {
   const baseUrl = resolveCheckinUrl(monitorSlug)
   if (!baseUrl) return NOOP_CHECKIN
 
