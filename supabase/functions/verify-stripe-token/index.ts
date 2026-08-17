@@ -97,7 +97,9 @@ Deno.serve(withSentry('verify-stripe-token', async (req: Request): Promise<Respo
     return jsonResponse({ success: false, error: 'Could not reach Stripe. Please try again shortly.' })
   }
 
-  // Stocker la clé dans Vault
+  // Stocker la clé dans Vault (best-effort — voir commentaire ci-dessous,
+  // cette écriture échoue systématiquement aujourd'hui et n'est pas ce que
+  // sync-stripe lit).
   const vaultName = `stripe_key_org_${orgId}`
   const { error: vaultErr } = await supabase.rpc('vault_create_secret', {
     secret: stripe_api_key,
@@ -113,10 +115,29 @@ Deno.serve(withSentry('verify-stripe-token', async (req: Request): Promise<Respo
     }))
   }
 
+  // 2026-08-17 : `stripe_api_key` ajouté à cet UPDATE — c'est la colonne que
+  // `sync-stripe` lit réellement (`orgsToSync[0].stripe_api_key`), jamais le
+  // Vault ci-dessus. Root cause d'un signup neuf resté bloqué indéfiniment
+  // sur « Building cohorts » : `vault_create_secret` n'existe pas en base
+  // (confirmé en direct, `pg_proc` — seul `vault_store_secret` existe, nom
+  // et signature différents ; le commentaire de la migration
+  // `20260802000008` avait supposé son existence par erreur, sur la seule
+  // preuve d'une collision de nom sur une AUTRE fonction Vault). L'échec
+  // Vault était déjà non bloquant par design — mais rien ne prenait le
+  // relais : cette colonne n'était encore écrite nulle part sur ce chemin.
+  // `update-stripe-connection` (Settings, chemin de reconnexion) écrit déjà
+  // cette même colonne avec succès — même pattern, repris ici tel quel.
+  // Le nom de RPC Vault erroné existe aussi côté `update-stripe-connection`
+  // (`upsertVaultSecret`, branche première connexion) : bug distinct,
+  // signalé mais non corrigé ici — ce chemin traite déjà l'échec Vault
+  // comme bloquant (500), donc pas de faux positif silencieux comme ici,
+  // hors du périmètre de ce correctif.
+  //
   // Mettre à jour l'organisation + avancer onboarding_step si encore à 'promise' ou 'stripe'
   const { error: updateErr } = await supabase
     .from('organizations')
     .update({
+      stripe_api_key,
       stripe_connected: true,
       stripe_connection_method: 'api_key',
     })
