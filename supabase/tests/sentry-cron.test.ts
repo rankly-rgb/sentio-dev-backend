@@ -56,7 +56,7 @@ describe('startCronCheckin sans DSN', () => {
   it('n’émet aucune requête et rend un finish inoffensif', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
 
-    const checkin = await startCronCheckin('nightly-sync')
+    const checkin = startCronCheckin('nightly-sync')
     await expect(checkin.finish('ok')).resolves.toBeUndefined()
     await expect(checkin.finish('error')).resolves.toBeUndefined()
 
@@ -64,124 +64,116 @@ describe('startCronCheckin sans DSN', () => {
   })
 })
 
-// L'invariant central de ce module : un cron ne doit jamais échouer parce que
-// sa surveillance échoue. Il était affirmé par relecture ; un 500 sur
-// sync-stripe le 2026-08-16 a montré que ça ne suffit pas. Ces tests
-// l'exercent au lieu de le supposer.
-describe('startCronCheckin ne laisse jamais rien s’échapper', () => {
+// Le protocole : UN SEUL pointage, à la fin. Sentry répond 202 sans corps et
+// ne rend aucun id (vérifié en direct le 2026-08-17), donc un pointage
+// d'ouverture créerait un check-in impossible à refermer — il resterait
+// ouvert jusqu'au timeout du monitor, soit une fausse alerte sur chaque
+// exécution pourtant réussie.
+describe('startCronCheckin — protocole à un seul pointage', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     delete denoEnv.SENTRY_DSN
     delete denoEnv.SENTRY_CRON_URL_NIGHTLY_SYNC
   })
 
+  it('n’émet rien avant finish, puis exactement une requête', async () => {
+    denoEnv.SENTRY_DSN = DSN
+    const calls: Array<{ url: string; method: string; body: string }> = []
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
+      calls.push({ url: String(url), method: String(init?.method), body: String(init?.body) })
+      return Promise.resolve(new Response('', { status: 202 }))
+    })
+
+    const checkin = startCronCheckin('nightly-sync')
+    expect(fetchSpy).not.toHaveBeenCalled()
+
+    await checkin.finish('ok')
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].method).toBe('POST')
+    expect(JSON.parse(calls[0].body)).toEqual({ status: 'ok' })
+    // Pas d'id dans l'URL : le pointage vise le monitor, pas un check-in.
+    expect(calls[0].url).toBe(
+      'https://o4511921139089408.ingest.de.sentry.io/api/4511921266688080/cron/nightly-sync/74b089d54017f6ad6bcfb4da6122f687/',
+    )
+  })
+
+  it('transmet le statut error tel quel', async () => {
+    denoEnv.SENTRY_DSN = DSN
+    let body = ''
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_u, init) => {
+      body = String(init?.body)
+      return Promise.resolve(new Response('', { status: 202 }))
+    })
+
+    await startCronCheckin('nightly-sync').finish('error')
+
+    expect(JSON.parse(body)).toEqual({ status: 'error' })
+  })
+
+  // 202 sans corps est la réponse NORMALE de Sentry — surtout pas un warn.
+  it('accepte un 202 au corps vide sans rien signaler', async () => {
+    denoEnv.SENTRY_DSN = DSN
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 202 }))
+
+    await startCronCheckin('nightly-sync').finish('ok')
+
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('signale un pointage rejeté', async () => {
+    denoEnv.SENTRY_DSN = DSN
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('monitor not found', { status: 404 }))
+
+    await startCronCheckin('nightly-sync').finish('ok')
+
+    const logged = JSON.parse(warn.mock.calls[0][0] as string)
+    expect(logged.message).toBe('pointage rejeté par Sentry')
+    expect(logged.status).toBe(404)
+    expect(logged.body).toBe('monitor not found')
+  })
+
   it('survit à un fetch qui rejette', async () => {
     denoEnv.SENTRY_DSN = DSN
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('connexion refusée'))
 
-    const checkin = await startCronCheckin('nightly-sync')
-    await expect(checkin.finish('ok')).resolves.toBeUndefined()
+    await expect(startCronCheckin('nightly-sync').finish('ok')).resolves.toBeUndefined()
   })
 
   it('survit à un fetch qui lève de façon synchrone', async () => {
     denoEnv.SENTRY_DSN = DSN
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
     vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
       throw new TypeError('échec synchrone inattendu')
     })
 
-    await expect(startCronCheckin('nightly-sync')).resolves.toBeDefined()
-  })
-
-  it('survit à une réponse 404 (monitor absent côté Sentry)', async () => {
-    denoEnv.SENTRY_DSN = DSN
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('not found', { status: 404 }))
-
-    const checkin = await startCronCheckin('nightly-sync')
-    // Pas d'id → pas de pointage terminal, plutôt qu'un second check-in orphelin.
-    await expect(checkin.finish('ok')).resolves.toBeUndefined()
-  })
-
-  it('survit à un corps de réponse illisible', async () => {
-    denoEnv.SENTRY_DSN = DSN
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('pas du json', { status: 200 }))
-
-    const checkin = await startCronCheckin('nightly-sync')
-    await expect(checkin.finish('ok')).resolves.toBeUndefined()
+    await expect(startCronCheckin('nightly-sync').finish('ok')).resolves.toBeUndefined()
   })
 
   it('survit à un environnement qui lève sur env.get', async () => {
     const denoRef = (globalThis as unknown as { Deno: { env: { get: (k: string) => string | undefined } } }).Deno
     const original = denoRef.env.get
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     denoRef.env.get = () => { throw new Error('accès environnement refusé') }
     try {
-      await expect(startCronCheckin('nightly-sync')).resolves.toBeDefined()
+      const checkin = startCronCheckin('nightly-sync')
+      await expect(checkin.finish('ok')).resolves.toBeUndefined()
     } finally {
       denoRef.env.get = original
     }
   })
 
-  it('boucle complète quand tout se passe bien : POST puis PUT sur le même id', async () => {
+  it('ne pointe qu’une fois, même appelé deux fois', async () => {
     denoEnv.SENTRY_DSN = DSN
-    const calls: Array<{ url: string; method: string; body: string }> = []
-    vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
-      calls.push({ url: String(url), method: String(init?.method), body: String(init?.body) })
-      return Promise.resolve(new Response(JSON.stringify({ id: 'checkin-abc' }), { status: 200 }))
-    })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 202 }))
 
-    const checkin = await startCronCheckin('nightly-sync')
-    await checkin.finish('ok')
-
-    expect(calls).toHaveLength(2)
-    expect(calls[0].method).toBe('POST')
-    expect(JSON.parse(calls[0].body)).toEqual({ status: 'in_progress' })
-    expect(calls[1].method).toBe('PUT')
-    // Le pointage terminal cible le check-in ouvert, jamais une nouvelle URL.
-    expect(calls[1].url).toBe(`${calls[0].url}checkin-abc/`)
-    expect(JSON.parse(calls[1].body)).toEqual({ status: 'ok' })
-  })
-
-  // Les deux cas qui laissent un check-in ouvert côté Sentry. Ils étaient
-  // silencieux, donc indiscernables l'un de l'autre depuis les logs — c'est
-  // ce qui a bloqué le diagnostic du 2026-08-16 au soir.
-  it('signale un check-in ouvert sans id exploitable', async () => {
-    denoEnv.SENTRY_DSN = DSN
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 202 }))
-
-    const checkin = await startCronCheckin('nightly-sync')
-    await checkin.finish('ok')
-
-    const logged = JSON.parse(warn.mock.calls[0][0] as string)
-    expect(logged.message).toContain('aucun id exploitable')
-    expect(logged.status).toBe(202)
-  })
-
-  it('signale un pointage terminal rejeté', async () => {
-    denoEnv.SENTRY_DSN = DSN
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'checkin-abc' }), { status: 200 }))
-      .mockResolvedValueOnce(new Response('bad request', { status: 400 }))
-
-    const checkin = await startCronCheckin('nightly-sync')
-    await checkin.finish('ok')
-
-    const logged = JSON.parse(warn.mock.calls[0][0] as string)
-    expect(logged.message).toBe('check-in terminal rejeté')
-    expect(logged.status).toBe(400)
-    expect(logged.checkin_id).toBe('checkin-abc')
-  })
-
-  it('ne clôture qu’une fois, même appelé deux fois', async () => {
-    denoEnv.SENTRY_DSN = DSN
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ id: 'checkin-abc' }), { status: 200 }),
-    )
-
-    const checkin = await startCronCheckin('nightly-sync')
+    const checkin = startCronCheckin('nightly-sync')
     await checkin.finish('ok')
     await checkin.finish('error')
 
-    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 })

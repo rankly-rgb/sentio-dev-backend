@@ -1024,7 +1024,7 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
   // oubli se traduit par une alerte, jamais par un silence rassurant.
   const checkin = body.organization_id
     ? { finish: () => Promise.resolve() }
-    : await startCronCheckin('nightly-sync')
+    : startCronCheckin('nightly-sync')
   let cronOutcome: 'ok' | 'error' = 'error'
 
   // ── Si plusieurs orgs → traitement séquentiel (fire-and-return) ─
