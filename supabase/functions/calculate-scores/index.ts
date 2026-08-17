@@ -723,7 +723,7 @@ Deno.serve(withSentry('calculate-scores', async (req: Request): Promise<Response
   // manquant pour un run réussi.
   const checkin = body.organization_id
     ? { finish: () => Promise.resolve() }
-    : await startCronCheckin('nightly-scoring')
+    : startCronCheckin('nightly-scoring')
 
   const results: Array<{ organization_id: string; accounts_scored: number; segments_assigned: number; errors: number; status: 'succeeded' | 'failed' | 'timed_out'; duration_ms: number }> = []
 
