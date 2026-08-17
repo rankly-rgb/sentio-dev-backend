@@ -4,6 +4,14 @@
 //
 // Snapshot complet de l'état d'onboarding comportemental.
 // Appelée au chargement de chaque page protégée.
+//
+// 2026-08-17 : `has_demo_data` retiré — la requête `accounts.is_demo`
+// ciblait une colonne qui n'a jamais existé (vérifié en direct), donc
+// échouait silencieusement à chaque appel (demoCountRes.error jamais
+// vérifié, `.count` retombait à `null` → `has_demo_data` toujours
+// `false`). Voir create-organization-with-invitation, même chantier :
+// le seed qui aurait pu un jour rendre ce champ vrai n'a jamais
+// fonctionné non plus.
 // ============================================================
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
@@ -37,30 +45,20 @@ Deno.serve(withSentry('get-onboarding-status-v2', async (req: Request): Promise<
 
   const orgId = auth.organizationId
 
-  const [orgRes, demoCountRes] = await Promise.all([
-    supabase
-      .from('organizations')
-      .select('id, onboarding_step, onboarding_completed, promise_seen_at, first_revelation_at')
-      .eq('id', orgId)
-      .maybeSingle(),
-    supabase
-      .from('accounts')
-      .select('id', { count: 'exact', head: true })
-      .eq('organization_id', orgId)
-      .eq('is_demo', true),
-  ])
+  const { data: org, error: orgError } = await supabase
+    .from('organizations')
+    .select('id, onboarding_step, onboarding_completed, promise_seen_at, first_revelation_at')
+    .eq('id', orgId)
+    .maybeSingle()
 
-  if (orgRes.error || !orgRes.data) {
+  if (orgError || !org) {
     return errorResponse('Organization not found', 404)
   }
-
-  const org = orgRes.data
 
   return jsonResponse({
     organization_id: org.id,
     onboarding_step: org.onboarding_step ?? 'promise',
     onboarding_completed: org.onboarding_completed ?? false,
-    has_demo_data: (demoCountRes.count ?? 0) > 0,
     promise_seen: org.promise_seen_at !== null,
     first_revelation_done: org.first_revelation_at !== null,
   })

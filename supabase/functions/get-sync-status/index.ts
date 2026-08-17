@@ -78,11 +78,17 @@ Deno.serve(withSentry('get-sync-status', async (req: Request): Promise<Response>
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle(),
+    // 2026-08-17 : `.eq('is_demo', false)` retiré — `accounts.is_demo`
+    // n'a jamais existé (même chantier que create-organization-with-
+    // invitation/get-onboarding-status-v2), donc cette requête échouait
+    // silencieusement à chaque appel (count jamais vérifié en erreur,
+    // retombait à `null` → `accountsCount` toujours 0 → `steps.cohorts`
+    // toujours `false`). Le concept de compte démo est retiré du chemin
+    // V1 au même chantier — plus aucune raison de filtrer dessus.
     supabase
       .from('accounts')
       .select('id', { count: 'exact', head: true })
-      .eq('organization_id', orgId)
-      .eq('is_demo', false),
+      .eq('organization_id', orgId),
     supabase
       .from('score_history')
       .select('id', { count: 'exact', head: true })
