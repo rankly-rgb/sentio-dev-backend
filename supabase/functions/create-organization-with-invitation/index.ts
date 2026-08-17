@@ -3,25 +3,27 @@
 // POST /create-organization-with-invitation
 //
 // Déclenchée par le frontend immédiatement après signUp().
-// Crée l'organisation, le profil owner, les préférences par défaut
-// et 4 comptes démo pour la révélation progressive.
+// Crée l'organisation, le profil owner et les préférences par défaut.
 //
 // Zero-PII : l'email reçu en transit n'est JAMAIS persisté.
-// ============================================================
+//
+// 2026-08-17 : le seed de 4 comptes démo ("révélation progressive")
+// retiré — code écrit pour le flux V2 en pause (CreateOrganizationResponse
+// matche onboarding-v2.ts), câblé par erreur sur ce chemin V1 réel
+// (Signup.tsx → useCreateOrganization). Il ciblait des colonnes qui
+// n'ont jamais existé sur le schéma V1 (`accounts.company_name`,
+// `accounts.is_demo`, `score_history.segment` — vérifié en direct,
+// aucune des trois sur le projet dev) : l'insert échouait silencieusement
+// à chaque inscription depuis toujours (erreur loguée, non bloquante),
+// zéro compte démo n'a jamais atteint une org réelle. Voir aussi
+// get-onboarding-status-v2 (même cause, `has_demo_data` retiré au même
+// chantier) et Dashboard.tsx (bandeau démo jamais affiché, retiré aussi).
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { handleCors } from '../_shared/cors.ts'
 import { createServiceClient, errorResponse, jsonResponse } from '../_shared/supabase-client.ts'
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { withSentry } from '../_shared/sentry.ts'
-
-// Comptes démo représentatifs pour la révélation progressive
-const DEMO_ACCOUNTS = [
-  { company_name: 'Acme SaaS',  mrr_cents: 240000, health_score: 82, churn_risk_score: 18, segment: 'Champions'         },
-  { company_name: 'Nexio',      mrr_cents: 110000, health_score: 31, churn_risk_score: 72, segment: 'At Risk'           },
-  { company_name: 'TechFlow',   mrr_cents:  89000, health_score: 54, churn_risk_score: 48, segment: 'Slightly at Risk'  },
-  { company_name: 'Strio',      mrr_cents:  99000, health_score: 67, churn_risk_score: 35, segment: 'Stable'            },
-]
 
 Deno.serve(withSentry('create-organization-with-invitation', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
@@ -81,7 +83,6 @@ Deno.serve(withSentry('create-organization-with-invitation', async (req: Request
     .eq('auth_user_id', user_id)
     .maybeSingle()
 
-  const today = new Date().toISOString().split('T')[0]
   const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()
 
   let orgId: string
@@ -139,53 +140,14 @@ Deno.serve(withSentry('create-organization-with-invitation', async (req: Request
   // 4. Créer les préférences par défaut (idempotent — ignore conflict)
   await supabase.from('org_preferences').upsert({ organization_id: orgId }, { onConflict: 'organization_id', ignoreDuplicates: true })
 
-  // 5. Insérer les 4 comptes démo
-  const { data: demoAccounts, error: demoErr } = await supabase
-    .from('accounts')
-    .insert(
-      DEMO_ACCOUNTS.map(({ company_name: cn, mrr_cents }) => ({
-        organization_id: orgId,
-        company_name: cn,
-        mrr_cents,
-        is_demo: true,
-      }))
-    )
-    .select('id, company_name')
-
-  if (demoErr || !demoAccounts?.length) {
-    console.error(JSON.stringify({ level: 'error', function_name: 'create-organization-with-invitation', message: demoErr?.message ?? 'demo insert failed' }))
-    // Non bloquant — l'org est créée
-  }
-
-  // 6. Insérer les score_history des comptes démo
-  if (demoAccounts?.length) {
-    const scoreRows = demoAccounts.map((acc) => {
-      const demo = DEMO_ACCOUNTS.find(d => d.company_name === acc.company_name)!
-      return {
-        organization_id: orgId,
-        account_id: acc.id,
-        snapshot_date: today,
-        health_score: demo.health_score,
-        churn_risk_score: demo.churn_risk_score,
-        segment: demo.segment,
-      }
-    })
-
-    await supabase
-      .from('score_history')
-      .upsert(scoreRows, { onConflict: 'organization_id,account_id,snapshot_date' })
-  }
-
   console.log(JSON.stringify({
     level: 'info',
     function_name: 'create-organization-with-invitation',
     organization_id: orgId,
-    demo_accounts: demoAccounts?.length ?? 0,
   }))
 
   return jsonResponse({
     organization_id: orgId,
     onboarding_step: 'promise',
-    has_demo_data: (demoAccounts?.length ?? 0) > 0,
   })
 }))
