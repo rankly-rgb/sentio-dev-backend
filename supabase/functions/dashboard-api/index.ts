@@ -501,6 +501,33 @@ async function handlePortfolioMetrics(
   const nrrPercentage = calcNrrPercentage(mrrCents, allMovements, hasThreeMonthsHistory)
   const churnRate = calcChurnRate30d(mrrCents, last30dMovements, hasThreeMonthsHistory)
 
+  // Instrumentation (2026-08-19, mission "Stripe not connected" banner) :
+  // deux bandeaux Overview distincts peuvent se déclencher à partir de ce
+  // seul payload (Dashboard.tsx: StripeStaleBanner sur stripe_stale,
+  // BillingProfileNeedsReviewBanner sur billing_profile), et un rapport
+  // bêta ("Stripe Not connected" vu juste après un sync réussi) n'a pas pu
+  // être tranché entre les deux faute de preuve — le bandeau réellement
+  // affiché n'a laissé aucune trace côté serveur. Ce log rend la prochaine
+  // occurrence auto-diagnosticable via query_logs, sans reproduction live :
+  // grep sur organization_id/horodatage, lire quel(s) bandeau(x) le serveur
+  // a réellement renvoyés à cet instant précis, plus la fraîcheur exacte du
+  // sync (lastSyncHoursAgo, jusqu'ici calculée puis jetée — seul `.stale`
+  // était gardé). Aucun changement de comportement, lecture seule.
+  console.log(JSON.stringify({
+    level: 'info',
+    function_name: 'dashboard-api',
+    route: 'portfolio-metrics',
+    event: 'portfolio_metrics_banner_state',
+    organization_id: orgId,
+    billing_profile: orgRes.data?.billing_profile ?? null,
+    stripe_stale: stripeFreshness.stale,
+    stripe_last_sync_hours_ago: stripeFreshness.lastSyncHoursAgo,
+    banner_stripe_stale_would_render: stripeFreshness.stale,
+    banner_billing_profile_needs_review_would_render: orgRes.data?.billing_profile === 'needs_review',
+    accounts_count: accounts.length,
+    mrr_unavailable_accounts: mrrUnavailableAccounts,
+  }))
+
   return jsonResponse({
     data: {
       mrr_cents: mrrCents,
