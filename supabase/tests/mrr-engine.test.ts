@@ -156,6 +156,24 @@ describe('calcSubscriptionMrrCents — golden dataset', () => {
     expect(result.mrr_status).toBe(EXPECTED_NULL_UNIT_AMOUNT_STATUS)
     expect(result.mrr_cents).toBe(EXPECTED_NULL_UNIT_AMOUNT_MRR_CENTS)
   })
+
+  // ── mrr_unavailable_reason — mission réconciliation Stripe, point 2 (2026-08-20) ──
+
+  it('metered subscription carries reason=unsupported_pricing', () => {
+    expect(calcSubscriptionMrrCents(FIXTURE_METERED).mrr_unavailable_reason).toBe('unsupported_pricing')
+  })
+
+  it('null unit_amount subscription carries reason=unsupported_pricing', () => {
+    expect(calcSubscriptionMrrCents(FIXTURE_NULL_UNIT_AMOUNT).mrr_unavailable_reason).toBe('unsupported_pricing')
+  })
+
+  it('a priceable subscription (mrr_status=ok) carries reason=null', () => {
+    expect(calcSubscriptionMrrCents(FIXTURE_MONTHLY_SIMPLE).mrr_unavailable_reason).toBeNull()
+  })
+
+  it('a canceled subscription (mrr_status=ok) carries reason=null', () => {
+    expect(calcSubscriptionMrrCents(FIXTURE_CANCELED).mrr_unavailable_reason).toBeNull()
+  })
 })
 
 // ============================================================
@@ -179,6 +197,25 @@ describe('aggregateAccountMrr', () => {
     const agg = aggregateAccountMrr([])
     expect(agg.churned).toBe(false)
     expect(agg.mrr_status).toBe('unavailable')
+    expect(agg.mrr_unavailable_reason).toBe('no_subscription_data')
+  })
+
+  it('(12c) toutes les subscriptions canceled → reason=null (mrr_status=ok, pas unavailable)', () => {
+    const agg = aggregateAccountMrr([{ status: 'canceled', result: calcSubscriptionMrrCents(FIXTURE_CANCELED) }])
+    expect(agg.mrr_status).toBe('ok')
+    expect(agg.mrr_unavailable_reason).toBeNull()
+  })
+
+  it('a metered subscription propagates reason=unsupported_pricing to the account aggregate', () => {
+    const agg = aggregateAccountMrr([{ status: 'active', result: calcSubscriptionMrrCents(FIXTURE_METERED) }])
+    expect(agg.mrr_status).toBe('unavailable')
+    expect(agg.mrr_unavailable_reason).toBe('unsupported_pricing')
+  })
+
+  it('a fully priceable account (mrr_status=ok) carries reason=null', () => {
+    const agg = aggregateAccountMrr([{ status: 'active', result: calcSubscriptionMrrCents(FIXTURE_MONTHLY_SIMPLE) }])
+    expect(agg.mrr_status).toBe('ok')
+    expect(agg.mrr_unavailable_reason).toBeNull()
   })
 
   it('(14) deux subscriptions même compte → somme correcte (mensuel + annuel/12)', () => {
@@ -204,6 +241,7 @@ describe('aggregateAccountMrr', () => {
     )
     expect(agg.mrr_status).toBe(EXPECTED_MULTI_CURRENCY_MINORITY_STATUS)
     expect(agg.mrr_cents).toBe(0) // exclue, jamais sommée
+    expect(agg.mrr_unavailable_reason).toBe('currency_mismatch')
 
     const aggUsd = aggregateAccountMrr(
       [{ status: 'active', result: usdResult }],

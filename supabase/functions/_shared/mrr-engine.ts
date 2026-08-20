@@ -73,6 +73,20 @@ export type MrrStatus = 'ok' | 'unavailable'
 export type BillingModel = 'subscription' | 'invoice_only'
 export type MovementType = 'new' | 'expansion' | 'contraction' | 'churn' | 'reactivation' | 'correction'
 
+// Mission réconciliation Stripe, point 2 (2026-08-20) : `mrr_status=
+// 'unavailable'` recouvrait jusqu'ici 3 causes distinctes sans qu'aucune ne
+// soit exposée — le frontend affichait un unique texte générique ("Not
+// billable (known billing limitation)") quelle que soit la raison réelle.
+// Un compte churné (`aggregateAccountMrr`, `churned: true`) N'EST PAS
+// concerné : il retourne `mrr_status='ok'`/`mrr_cents=0`, déjà affiché
+// correctement comme "$0.00" — pas de 4e valeur "legitimately zero after
+// churn" nécessaire ici, cette hypothèse de l'audit ne tenait pas au niveau
+// de ce champ.
+export type MrrUnavailableReason =
+  | 'no_subscription_data' // aucune subscription Stripe connue (invoice-only ou jamais synchronisé)
+  | 'unsupported_pricing' // subscription existante mais non-chiffrable (metered, unit_amount null)
+  | 'currency_mismatch' // subscription dans une devise minoritaire exclue du total de l'org
+
 // Statuts Stripe considérés "délinquents" (compte à risque, jamais churned).
 const DELINQUENT_STATUSES = new Set(['past_due', 'unpaid'])
 // Statuts qui contribuent au MRR confirmé (hors trial).
@@ -82,6 +96,7 @@ export interface SubscriptionMrrResult {
   mrr_cents: number
   trial_mrr_cents: number
   mrr_status: MrrStatus
+  mrr_unavailable_reason: MrrUnavailableReason | null
   currency: string | null
   is_delinquent: boolean
   pending_cancellation: boolean
@@ -188,6 +203,7 @@ export function calcSubscriptionMrrCents(sub: StripeSubscriptionLike): Subscript
         mrr_cents: isTrial || !isBillable ? 0 : monthly,
         trial_mrr_cents: isTrial ? monthly : 0,
         mrr_status: 'ok',
+        mrr_unavailable_reason: null,
         currency,
         is_delinquent: isDelinquent,
         pending_cancellation: pendingCancellation,
@@ -199,6 +215,7 @@ export function calcSubscriptionMrrCents(sub: StripeSubscriptionLike): Subscript
       mrr_cents: 0,
       trial_mrr_cents: 0,
       mrr_status: 'unavailable',
+      mrr_unavailable_reason: 'unsupported_pricing',
       currency,
       is_delinquent: isDelinquent,
       pending_cancellation: pendingCancellation,
@@ -215,6 +232,7 @@ export function calcSubscriptionMrrCents(sub: StripeSubscriptionLike): Subscript
       mrr_cents: 0,
       trial_mrr_cents: 0,
       mrr_status: 'unavailable',
+      mrr_unavailable_reason: 'unsupported_pricing',
       currency,
       is_delinquent: isDelinquent,
       pending_cancellation: pendingCancellation,
@@ -248,6 +266,7 @@ export function calcSubscriptionMrrCents(sub: StripeSubscriptionLike): Subscript
       mrr_cents: 0,
       trial_mrr_cents: 0,
       mrr_status: 'ok',
+      mrr_unavailable_reason: null,
       currency,
       is_delinquent: isDelinquent,
       pending_cancellation: pendingCancellation,
@@ -260,6 +279,7 @@ export function calcSubscriptionMrrCents(sub: StripeSubscriptionLike): Subscript
     mrr_cents: isTrial ? 0 : monthly,
     trial_mrr_cents: isTrial ? monthly : 0,
     mrr_status: 'ok',
+    mrr_unavailable_reason: null,
     currency,
     is_delinquent: isDelinquent,
     pending_cancellation: pendingCancellation,
@@ -279,6 +299,7 @@ export interface AccountMrrAggregate {
   mrr_cents: number
   trial_mrr_cents: number
   mrr_status: MrrStatus
+  mrr_unavailable_reason: MrrUnavailableReason | null
   is_delinquent: boolean
   pending_cancellation: boolean
   is_zero_dollar_active: boolean
@@ -305,6 +326,7 @@ export function aggregateAccountMrr(
       mrr_cents: 0,
       trial_mrr_cents: 0,
       mrr_status: 'unavailable',
+      mrr_unavailable_reason: 'no_subscription_data',
       is_delinquent: false,
       pending_cancellation: false,
       is_zero_dollar_active: false,
@@ -322,6 +344,7 @@ export function aggregateAccountMrr(
       mrr_cents: 0,
       trial_mrr_cents: 0,
       mrr_status: 'ok',
+      mrr_unavailable_reason: null,
       is_delinquent: false,
       pending_cancellation: false,
       is_zero_dollar_active: false,
@@ -335,6 +358,11 @@ export function aggregateAccountMrr(
   let isDelinquent = false
   let pendingCancellation = false
   let hasUnavailable = false
+  // Premier motif rencontré, dans l'ordre des subscriptions retournées par
+  // Stripe — un compte avec plusieurs subscriptions non-chiffrables pour des
+  // raisons différentes n'affiche qu'un seul motif (S1 n'exige pas un tableau
+  // ici, juste de ne jamais fabriquer une raison qui n'a pas été observée).
+  let unavailableReason: MrrUnavailableReason | null = null
   let currency: string | null = null
 
   for (const { result } of nonCanceled) {
@@ -342,6 +370,9 @@ export function aggregateAccountMrr(
 
     if (result.mrr_status === 'unavailable' || currencyMismatch) {
       hasUnavailable = true
+      if (unavailableReason === null) {
+        unavailableReason = currencyMismatch && result.mrr_status !== 'unavailable' ? 'currency_mismatch' : result.mrr_unavailable_reason
+      }
       isDelinquent = isDelinquent || result.is_delinquent
       pendingCancellation = pendingCancellation || result.pending_cancellation
       continue
@@ -360,6 +391,7 @@ export function aggregateAccountMrr(
     mrr_cents: mrrCents,
     trial_mrr_cents: trialMrrCents,
     mrr_status: hasUnavailable ? 'unavailable' : 'ok',
+    mrr_unavailable_reason: hasUnavailable ? unavailableReason : null,
     is_delinquent: isDelinquent,
     pending_cancellation: pendingCancellation,
     is_zero_dollar_active: isZeroDollarActive,

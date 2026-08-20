@@ -40,6 +40,8 @@ const baseAccountFields = {
   billing_interval: 'annual',
   mrr_cents: 149900,
   mrr_status: 'ok' as const,
+  mrr_unavailable_reason: null,
+  billing_model: 'subscription' as const,
   is_delinquent: false,
   delinquent_since: null,
   arr_cents: 1798800,
@@ -250,6 +252,38 @@ describe('accounts-api handleGetOne — payload shape by health_score_status', (
     const unavailableAccount = { ...completeAccount, mrr_status: 'unavailable' as const, mrr_cents: 0 }
     const json = await runHandleGetOne(unavailableAccount, 'champions')
     expect(json.data.mrr_status).toBe('unavailable')
+  })
+
+  // ── mrr_unavailable_reason/billing_model — mission réconciliation Stripe,
+  // point 2 (2026-08-20) : le frontend a besoin de la raison structurée
+  // (pas juste mrr_status='unavailable') pour distinguer les 3 causes réelles
+  // au lieu d'un texte générique unique.
+
+  it('mrr_unavailable_reason passes through unchanged for each of the 3 real causes', async () => {
+    for (const reason of ['no_subscription_data', 'unsupported_pricing', 'currency_mismatch'] as const) {
+      const account = { ...completeAccount, mrr_status: 'unavailable' as const, mrr_cents: 0, mrr_unavailable_reason: reason }
+      const json = await runHandleGetOne(account, 'champions')
+      expect(json.data.mrr_unavailable_reason).toBe(reason)
+    }
+  })
+
+  it('mrr_unavailable_reason stays null when mrr_status=ok, never a fabricated reason (S1)', async () => {
+    const json = await runHandleGetOne(completeAccount, 'champions')
+    expect(json.data.mrr_status).toBe('ok')
+    expect(json.data.mrr_unavailable_reason).toBeNull()
+  })
+
+  it('billing_model passes through unchanged — distinguishes invoice_only from never-synced within no_subscription_data', async () => {
+    const invoiceOnlyAccount = {
+      ...completeAccount,
+      mrr_status: 'unavailable' as const,
+      mrr_cents: 0,
+      mrr_unavailable_reason: 'no_subscription_data' as const,
+      billing_model: 'invoice_only' as const,
+    }
+    const json = await runHandleGetOne(invoiceOnlyAccount, 'champions')
+    expect(json.data.billing_model).toBe('invoice_only')
+    expect(json.data.mrr_unavailable_reason).toBe('no_subscription_data')
   })
 
   it('is_delinquent=true passes through unchanged (audit délinquence 2026-08-06, feeds the frontend Past Due badge)', async () => {
