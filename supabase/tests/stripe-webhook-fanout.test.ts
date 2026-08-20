@@ -209,7 +209,7 @@ describe('stripe-webhook fan-out — structural invariants (source inspection)',
     expect(catchIdx).toBeGreaterThan(-1)
     const catchBody = loopBody.slice(catchIdx)
     expect(catchBody).not.toMatch(/\breturn\b/)
-    expect(catchBody).toContain('logger.fail(msg)')
+    expect(catchBody).toContain('logger?.fail(msg)')
     expect(catchBody).toContain('writeToDLQ(')
     expect(catchBody).toContain('alertSlack(')
   })
