@@ -411,6 +411,78 @@ export function isAccountChurned(subscriptionStatuses: string[]): boolean {
   return subscriptionStatuses.length > 0 && subscriptionStatuses.every((s) => s === 'canceled')
 }
 
+// ── MRR de repli invoice-only (mission réconciliation Stripe, point 4, 2026-08-20) ──
+//
+// Un compte `billing_model='invoice_only'` (facturé manuellement via
+// send_invoice, aucun objet Subscription Stripe) recevait jusqu'ici
+// systématiquement mrr_status='unavailable'/mrr_unavailable_reason=
+// 'no_subscription_data' — même un compte payant depuis 17 mois
+// consécutifs (cas réel App'Ines, PARKING_LOT.md 2026-08-17,
+// cus_Rn6M1Tvnr0tOxS, $299/mois). Ce module dérive un MRR de repli à
+// partir de l'historique de factures PAYÉES, uniquement quand deux
+// factures payées récentes permettent d'observer une cadence réelle —
+// jamais une cadence supposée (S1 : no data ≠ neutral data appliqué à la
+// méthode d'estimation elle-même, pas seulement à sa présence/absence).
+export interface InvoiceOnlyMrrInput {
+  amountCents: number
+  currency: string | null
+  paidAt: string // ISO
+}
+
+export interface InvoiceOnlyMrrEstimate {
+  mrr_cents: number
+  currency: string | null
+  estimated_from_invoice_count: number
+  cadence_days: number
+}
+
+// Compte inactif au-delà de cette fenêtre depuis le dernier paiement connu
+// → pas d'estimation (ne pas ressusciter une relation invoice-only
+// réellement abandonnée). ~2x un cycle mensuel typique, marge de retard.
+const INVOICE_ONLY_RECENCY_WINDOW_DAYS = 60
+
+/**
+ * Estime le MRR d'un compte invoice-only à partir de ses factures payées.
+ * Retourne `null` — jamais un MRR fabriqué — si :
+ *   - moins de 2 factures payées (aucune cadence observable, un seul point
+ *     ne permet de déduire ni un intervalle mensuel, ni annuel, ni autre) ;
+ *   - la facture payée la plus récente date de plus de
+ *     `INVOICE_ONLY_RECENCY_WINDOW_DAYS` (compte probablement inactif) ;
+ *   - l'intervalle observé entre les deux factures les plus récentes est
+ *     nul ou négatif (données incohérentes — doublon, horodatage invalide).
+ *
+ * La cadence est dérivée de l'écart RÉEL entre les deux factures payées les
+ * plus récentes (jamais une hypothèse "mensuel par défaut" — un compte
+ * facturé annuellement via invoice_only ne doit pas se voir attribuer 12x
+ * son MRR réel). `mrr_cents` = montant de la facture la plus récente,
+ * normalisé au mois selon cette cadence observée.
+ */
+export function estimateInvoiceOnlyMrr(
+  paidInvoices: InvoiceOnlyMrrInput[],
+  now: number = Date.now(),
+): InvoiceOnlyMrrEstimate | null {
+  if (paidInvoices.length < 2) return null
+
+  const sorted = [...paidInvoices].sort((a, b) => new Date(b.paidAt).getTime() - new Date(a.paidAt).getTime())
+  const [mostRecent, secondMostRecent] = sorted
+
+  const daysSinceLastPayment = (now - new Date(mostRecent.paidAt).getTime()) / (1000 * 60 * 60 * 24)
+  if (daysSinceLastPayment > INVOICE_ONLY_RECENCY_WINDOW_DAYS) return null
+
+  const cadenceDays = (new Date(mostRecent.paidAt).getTime() - new Date(secondMostRecent.paidAt).getTime()) / (1000 * 60 * 60 * 24)
+  if (cadenceDays <= 0) return null
+
+  const cadenceMonths = cadenceDays / DAYS_PER_MONTH
+  const mrrCents = Math.max(0, Math.round(mostRecent.amountCents / cadenceMonths))
+
+  return {
+    mrr_cents: mrrCents,
+    currency: mostRecent.currency,
+    estimated_from_invoice_count: sorted.length,
+    cadence_days: Math.round(cadenceDays),
+  }
+}
+
 export interface DelinquentSubscriptionInput {
   status: string
   contractStart: string | null

@@ -26,7 +26,9 @@ import {
   calcNrrPercentage,
   calcChurnRate30d,
   calcMrrGrowthMetrics,
+  estimateInvoiceOnlyMrr,
   type StripeSubscriptionLike,
+  type InvoiceOnlyMrrInput,
 } from '../functions/_shared/mrr-engine'
 import {
   FIXTURE_MONTHLY_SIMPLE, EXPECTED_MONTHLY_SIMPLE_CENTS,
@@ -735,5 +737,110 @@ describe('calcMrrGrowthMetrics', () => {
     const result = calcMrrGrowthMetrics(95000, [{ movement_type: 'contraction', amount_cents: -5000 }], true)
     expect(result.mrr_growth_percentage).toBe(-5.0)
     expect(result.churn_rate_percentage).toBe(0)
+  })
+})
+
+// ============================================================
+// estimateInvoiceOnlyMrr — mission réconciliation Stripe, point 4 (2026-08-20)
+// ============================================================
+describe('estimateInvoiceOnlyMrr', () => {
+  const NOW = new Date('2026-08-17T12:00:00Z').getTime()
+
+  function paidInvoice(amountCents: number, paidAt: string, currency = 'usd'): InvoiceOnlyMrrInput {
+    return { amountCents, currency, paidAt }
+  }
+
+  it('golden fixture: App’Ines-like account ($299/mo via invoice_only, last payment 35 days ago) → ~$299 MRR', () => {
+    // Real case from PARKING_LOT.md (2026-08-17): cus_Rn6M1Tvnr0tOxS, $299/month,
+    // 15/17 monthly invoices paid, last payment 2026-07-13 (~35 days before the
+    // audit's "now"). Reproduced here with a representative recent slice.
+    const invoices = [
+      paidInvoice(29900, '2026-07-13T00:00:00Z'),
+      paidInvoice(29900, '2026-06-13T00:00:00Z'),
+      paidInvoice(29900, '2026-05-13T00:00:00Z'),
+      paidInvoice(29900, '2026-04-13T00:00:00Z'),
+    ]
+
+    const result = estimateInvoiceOnlyMrr(invoices, NOW)
+
+    expect(result).not.toBeNull()
+    expect(result?.mrr_cents).toBeGreaterThanOrEqual(29500)
+    expect(result?.mrr_cents).toBeLessThanOrEqual(30500)
+    expect(result?.currency).toBe('usd')
+    expect(result?.estimated_from_invoice_count).toBe(4)
+  })
+
+  it('returns null with a single paid invoice — no cadence observable, never a fabricated estimate (S1)', () => {
+    const result = estimateInvoiceOnlyMrr([paidInvoice(29900, '2026-07-13T00:00:00Z')], NOW)
+    expect(result).toBeNull()
+  })
+
+  it('returns null with zero paid invoices', () => {
+    expect(estimateInvoiceOnlyMrr([], NOW)).toBeNull()
+  })
+
+  it('returns null when the most recent paid invoice is older than the 60-day recency window — does not resurrect an abandoned account', () => {
+    const invoices = [
+      paidInvoice(29900, '2026-05-01T00:00:00Z'), // 108 days before NOW
+      paidInvoice(29900, '2026-04-01T00:00:00Z'),
+    ]
+    expect(estimateInvoiceOnlyMrr(invoices, NOW)).toBeNull()
+  })
+
+  it('derives an annual cadence correctly — never assumes monthly by default', () => {
+    // $3600/year invoice-only account — assuming monthly would wrongly report $3600 MRR (12x over).
+    const invoices = [
+      paidInvoice(360000, '2026-07-01T00:00:00Z'),
+      paidInvoice(360000, '2025-07-01T00:00:00Z'),
+    ]
+    const result = estimateInvoiceOnlyMrr(invoices, NOW)
+    expect(result).not.toBeNull()
+    // ~360000 / 12 = 30000
+    expect(result?.mrr_cents).toBeGreaterThanOrEqual(29500)
+    expect(result?.mrr_cents).toBeLessThanOrEqual(30500)
+  })
+
+  it('derives a quarterly cadence correctly', () => {
+    const invoices = [
+      paidInvoice(90000, '2026-07-15T00:00:00Z'),
+      paidInvoice(90000, '2026-04-15T00:00:00Z'),
+    ]
+    const result = estimateInvoiceOnlyMrr(invoices, NOW)
+    expect(result).not.toBeNull()
+    // ~90000 / 3 = 30000
+    expect(result?.mrr_cents).toBeGreaterThanOrEqual(29000)
+    expect(result?.mrr_cents).toBeLessThanOrEqual(31000)
+  })
+
+  it('returns null when the two most recent paid invoices share the same paid_at (zero cadence, bad/duplicate data)', () => {
+    const invoices = [
+      paidInvoice(29900, '2026-07-13T00:00:00Z'),
+      paidInvoice(29900, '2026-07-13T00:00:00Z'),
+    ]
+    expect(estimateInvoiceOnlyMrr(invoices, NOW)).toBeNull()
+  })
+
+  it('uses only the two most recent paid invoices for cadence — ignores older irregular history', () => {
+    // Irregular older history (a big gap), but the two most recent are ~30 days apart.
+    const invoices = [
+      paidInvoice(29900, '2026-07-13T00:00:00Z'),
+      paidInvoice(29900, '2026-06-13T00:00:00Z'),
+      paidInvoice(29900, '2026-01-01T00:00:00Z'), // big gap, irrelevant to the estimate
+    ]
+    const result = estimateInvoiceOnlyMrr(invoices, NOW)
+    expect(result?.mrr_cents).toBeGreaterThanOrEqual(29500)
+    expect(result?.mrr_cents).toBeLessThanOrEqual(30500)
+    expect(result?.estimated_from_invoice_count).toBe(3)
+  })
+
+  it('is not sensitive to input order — sorts by paid_at internally', () => {
+    const invoices = [
+      paidInvoice(29900, '2026-05-13T00:00:00Z'),
+      paidInvoice(29900, '2026-07-13T00:00:00Z'),
+      paidInvoice(29900, '2026-06-13T00:00:00Z'),
+    ]
+    const result = estimateInvoiceOnlyMrr(invoices, NOW)
+    expect(result).not.toBeNull()
+    expect(result?.mrr_cents).toBeGreaterThanOrEqual(29500)
   })
 })
