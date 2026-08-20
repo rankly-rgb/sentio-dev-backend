@@ -68,52 +68,74 @@ describe('computeDaysToRenewal', () => {
 })
 
 describe('computePriority', () => {
-  it('is P0 for churn_risk_score >= 70 with no insights', () => {
-    expect(computePriority(75, null, [], false)).toBe('P0')
+  it('is P0 for primary_segment en_danger_critique with no insights', () => {
+    expect(computePriority('en_danger_critique', null, [], false)).toBe('P0')
   })
 
-  it('is P1 for churn_risk_score >= 50', () => {
-    expect(computePriority(55, null, [], false)).toBe('P1')
+  it('is P1 for primary_segment a_risque_leger', () => {
+    expect(computePriority('a_risque_leger', null, [], false)).toBe('P1')
   })
 
-  it('is P1 when renewal is within 60 days regardless of churn score', () => {
-    expect(computePriority(10, 45, [], false)).toBe('P1')
+  it('is P1 when renewal is within 60 days regardless of segment', () => {
+    expect(computePriority('stables', 45, [], false)).toBe('P1')
   })
 
   it('is P2 by default', () => {
-    expect(computePriority(10, null, [], false)).toBe('P2')
+    expect(computePriority('stables', null, [], false)).toBe('P2')
+  })
+
+  it('is P2 when primary_segment is null (not yet scored/segmented)', () => {
+    expect(computePriority(null, null, [], false)).toBe('P2')
   })
 
   it('a critical insight elevates a low-risk account to P0', () => {
-    expect(computePriority(10, null, ['critical'], false)).toBe('P0')
+    expect(computePriority('stables', null, ['critical'], false)).toBe('P0')
   })
 
   it('a high insight elevates a P2 account to P1 but not P0', () => {
-    expect(computePriority(10, null, ['high'], false)).toBe('P1')
+    expect(computePriority('stables', null, ['high'], false)).toBe('P1')
   })
 
   it('never downgrades priority — a P0 account stays P0 even with a low insight', () => {
-    expect(computePriority(80, null, ['low'], false)).toBe('P0')
+    expect(computePriority('en_danger_critique', null, ['low'], false)).toBe('P0')
   })
 
   it('takes the worst (most urgent) priority across multiple insights', () => {
-    expect(computePriority(10, null, ['low', 'critical', 'medium'], false)).toBe('P0')
+    expect(computePriority('stables', null, ['low', 'critical', 'medium'], false)).toBe('P0')
   })
 
   // ── is_delinquent forces P0 directly (audit 2026-08-06, décision 3) ──
-  // Never via the churn_risk_score >= 70 threshold — a delinquent-only
-  // account (payment_delinquent, 35/150) never crosses it alone.
+  // Never via the segment/score threshold — a delinquent-only account
+  // (payment_delinquent, 35/150, segmented `impayes` not `en_danger_critique`)
+  // never crosses it alone.
 
-  it('is_delinquent alone forces P0 even with a low churn score and no insights', () => {
-    expect(computePriority(10, null, [], true)).toBe('P0')
+  it('is_delinquent alone forces P0 even with a low-risk segment and no insights', () => {
+    expect(computePriority('stables', null, [], true)).toBe('P0')
   })
 
   it('is_delinquent forces P0 even when renewal/insights would only justify P1', () => {
-    expect(computePriority(10, 45, ['high'], true)).toBe('P0')
+    expect(computePriority('a_risque_leger', 45, ['high'], true)).toBe('P0')
   })
 
   it('is_delinquent=false does not itself force P0 (baseline unchanged)', () => {
-    expect(computePriority(10, null, [], false)).toBe('P2')
+    expect(computePriority('stables', null, [], false)).toBe('P2')
+  })
+
+  // ── Régression — mission réconciliation Stripe 2026-08-20, point 1 ──
+  // Avant ce correctif, `computePriority` re-seuillait `churn_risk_score`
+  // localement (`>= 70`/`>= 50`) au lieu de consommer `primary_segment` —
+  // un compte à score 55-69 était déjà segmenté `en_danger_critique`
+  // (churn_risk_band='high', seuil réel >= 50, `_shared/scoring.ts`) et
+  // affichait donc "Critical danger" sur Segments/Dashboard, tout en
+  // restant P1 ("High"), jamais P0 ("Critical"), sur Today — même compte,
+  // deux niveaux de gravité contradictoires selon l'écran.
+
+  it('REGRESSION: an account segmented en_danger_critique on Segments is now P0 (Critical) on Today too, not P1', () => {
+    // Un tel compte a nécessairement churn_risk_band='high' côté backend
+    // (seul déclencheur possible du segment), quel que soit le score exact
+    // (50-100) — le point de test est que le segment, pas un re-seuillage
+    // du score, pilote désormais la priorité.
+    expect(computePriority('en_danger_critique', null, [], false)).toBe('P0')
   })
 })
 
@@ -194,7 +216,7 @@ describe('computeTodayActions', () => {
 describe('buildTodayActionsSummary', () => {
   it('counts by priority and sums MRR at risk for P0/P1 only', () => {
     const actions = computeTodayActions(
-      [account({ id: 'a1', churn_risk_score: 80, mrr_cents: 5000 }), account({ id: 'a2', churn_risk_score: 10, mrr_cents: 3000 })],
+      [account({ id: 'a1', churn_risk_score: 80, primary_segment: 'en_danger_critique', mrr_cents: 5000 }), account({ id: 'a2', churn_risk_score: 10, mrr_cents: 3000 })],
       [playbook({ eligibility_criteria: { operator: 'AND', conditions: [], match_all: true } })],
       new Map(),
     )
