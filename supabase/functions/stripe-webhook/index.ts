@@ -674,6 +674,21 @@ Deno.serve(withSentry('stripe-webhook', async (req: Request): Promise<Response> 
     return jsonResponse({ received: true, handled: false, type: event.type })
   }
 
+  // LIMITATION CONNUE (2026-08-20, mission clé Stripe partagée en test) :
+  // quand la même clé/compte Stripe est connecté à plusieurs orgs
+  // (ALLOW_SHARED_STRIPE_KEY, voir _shared/stripe-shared-key-testing.ts),
+  // ce routage ne fan-out PAS vers toutes les orgs concernées. `event.
+  // account` n'est de toute façon jamais renseigné pour ces intégrations
+  // (clé API directe, pas Stripe Connect) — la résolution passe donc
+  // systématiquement par le fallback ci-dessous, dont le lookup
+  // `accounts.stripe_customer_id` devient ambigu (.maybeSingle() sur 2+
+  // lignes → error → data null) si le même client Stripe a été synchronisé
+  // dans plusieurs orgs. Résultat observé : tous les events temps réel de
+  // ce compte partagé atterrissent sur l'org active la plus ancienne
+  // (dernier fallback ci-dessous), l'autre org ne reçoit ses données que
+  // via le sync périodique `sync-stripe`. Corriger proprement (fan-out
+  // multi-org) est un chantier à part entière, hors scope ici — non
+  // traité volontairement (effort non trivial, cf. mission).
   // Résoudre l'organisation via le compte Stripe connecté
   const stripeAccountId = event.account
   if (!stripeAccountId) {

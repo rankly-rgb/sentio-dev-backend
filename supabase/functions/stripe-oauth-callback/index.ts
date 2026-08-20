@@ -26,6 +26,7 @@ import {
   STRIPE_ACCOUNT_CONFLICT_STATUS,
 } from '../_shared/stripe-account-claim.ts'
 import { withSentry } from '../_shared/sentry.ts'
+import { isSharedStripeKeyTestingAllowed } from '../_shared/stripe-shared-key-testing.ts'
 
 Deno.serve(withSentry('stripe-oauth-callback', async (req: Request): Promise<Response> => {
   const corsResponse = handleCors(req)
@@ -128,16 +129,34 @@ Deno.serve(withSentry('stripe-oauth-callback', async (req: Request): Promise<Res
   // stripe_account_id` est UNIQUE globalement, et une collision remontait
   // ici aussi en 500 générique. Vérifié avant l'écriture Vault pour qu'un
   // refus ne laisse aucun état partiel derrière lui.
+  // TEMPORAIRE / TESTS UNIQUEMENT (2026-08-20, voir
+  // _shared/stripe-shared-key-testing.ts) — writeAccountId contrôle si
+  // stripe_account_id est écrit plus bas ; la contrainte UNIQUE elle-même
+  // n'est jamais touchée.
+  let writeAccountId = true
   const { conflictingOrgId, lookupFailed } = await findConflictingOrganization(supabase, stripeUserId, orgId)
   if (conflictingOrgId) {
-    console.warn(JSON.stringify({
-      level: 'warn',
-      function_name: 'stripe-oauth-callback',
-      organization_id: orgId,
-      message: 'stripe_account_id already claimed by another organization',
-      conflicting_organization_id: conflictingOrgId,
-    }))
-    return errorResponse(STRIPE_ACCOUNT_CONFLICT_MESSAGE, STRIPE_ACCOUNT_CONFLICT_STATUS)
+    if (isSharedStripeKeyTestingAllowed()) {
+      writeAccountId = false
+      console.warn(JSON.stringify({
+        level: 'warn',
+        function_name: 'stripe-oauth-callback',
+        event: 'shared_stripe_key_testing_bypass',
+        test_mode_only: true,
+        organization_id: orgId,
+        conflicting_organization_id: conflictingOrgId,
+        message: 'stripe_account_id conflict bypassed under ALLOW_SHARED_STRIPE_KEY — stripe_account_id left unset for this org.',
+      }))
+    } else {
+      console.warn(JSON.stringify({
+        level: 'warn',
+        function_name: 'stripe-oauth-callback',
+        organization_id: orgId,
+        message: 'stripe_account_id already claimed by another organization',
+        conflicting_organization_id: conflictingOrgId,
+      }))
+      return errorResponse(STRIPE_ACCOUNT_CONFLICT_MESSAGE, STRIPE_ACCOUNT_CONFLICT_STATUS)
+    }
   }
   if (lookupFailed) {
     // Lecture impossible ≠ pas de conflit : on laisse la contrainte DB trancher.
@@ -164,13 +183,15 @@ Deno.serve(withSentry('stripe-oauth-callback', async (req: Request): Promise<Res
   }
 
   // Mettre à jour l'organisation
+  const orgUpdate: Record<string, unknown> = {
+    stripe_connected: true,
+    stripe_connection_method: 'oauth',
+  }
+  if (writeAccountId) orgUpdate.stripe_account_id = stripeUserId
+
   const { error: updateErr } = await supabase
     .from('organizations')
-    .update({
-      stripe_connected: true,
-      stripe_account_id: stripeUserId,
-      stripe_connection_method: 'oauth',
-    })
+    .update(orgUpdate)
     .eq('id', orgId)
 
   if (updateErr) {

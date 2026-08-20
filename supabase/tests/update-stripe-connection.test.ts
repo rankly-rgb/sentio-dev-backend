@@ -4,6 +4,7 @@ import {
   findConflictingOrganization,
   STRIPE_ACCOUNT_CONFLICT_STATUS,
 } from '../functions/_shared/stripe-account-claim.ts'
+import { isSharedStripeKeyTestingAllowed } from '../functions/_shared/stripe-shared-key-testing.ts'
 
 // ── Fonction pure miroir (update-stripe-connection/index.ts) ──
 // Restreinte (rk_) ET secrète complète (sk_) toutes deux acceptées —
@@ -167,5 +168,45 @@ describe('findConflictingOrganization', () => {
     const { client } = stubClient({ data: null, error: { message: 'connection reset' } })
     expect(await findConflictingOrganization(client, 'acct_123', 'my-org'))
       .toEqual({ conflictingOrgId: null, lookupFailed: true })
+  })
+})
+
+// ── Bypass TEMPORAIRE / TESTS UNIQUEMENT — clé Stripe partagée (2026-08-20) ──
+// Mirror de la décision inline dans update-stripe-connection/index.ts (et
+// stripe-oauth-callback/index.ts, identique) : sur conflit détecté,
+// ALLOW_SHARED_STRIPE_KEY décide entre 409 (défaut) et bypass avec
+// stripe_account_id laissé non écrit. Décision volontairement simple
+// (une négation), pas extraite en fonction dédiée — testée ici via le
+// même mirror pattern que validateStripeKeyFormat ci-dessus plutôt que
+// d'ajouter une abstraction pour trois lignes.
+function resolveConflictOutcome(
+  conflictingOrgId: string | null,
+  sharedKeyTestingAllowed: boolean,
+): { blocked: boolean; writeAccountId: boolean } {
+  if (!conflictingOrgId) return { blocked: false, writeAccountId: true }
+  if (sharedKeyTestingAllowed) return { blocked: false, writeAccountId: false }
+  return { blocked: true, writeAccountId: false }
+}
+
+describe('resolveConflictOutcome — shared Stripe key testing bypass', () => {
+  it('never blocks and always writes stripe_account_id when there is no conflict, flag on or off', () => {
+    expect(resolveConflictOutcome(null, false)).toEqual({ blocked: false, writeAccountId: true })
+    expect(resolveConflictOutcome(null, true)).toEqual({ blocked: false, writeAccountId: true })
+  })
+
+  it('blocks with 409 and never writes stripe_account_id on conflict when the flag is off (real beta cohort default)', () => {
+    expect(resolveConflictOutcome('other-org', false)).toEqual({ blocked: true, writeAccountId: false })
+  })
+
+  it('bypasses the 409 but still never writes stripe_account_id on conflict when the flag is on', () => {
+    // La contrainte UNIQUE reste intacte : on ne l'atteint jamais parce
+    // qu'on n'écrit simplement pas la colonne pour cette org.
+    expect(resolveConflictOutcome('other-org', true)).toEqual({ blocked: false, writeAccountId: false })
+  })
+})
+
+describe('isSharedStripeKeyTestingAllowed — re-exported from stripe-shared-key-testing.ts', () => {
+  it('is importable from the shared module used by both connection paths', () => {
+    expect(typeof isSharedStripeKeyTestingAllowed).toBe('function')
   })
 })

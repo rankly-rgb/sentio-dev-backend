@@ -21,6 +21,7 @@ import { createServiceClient, jsonResponse } from '../_shared/supabase-client.ts
 import { verifyUserAuth, AuthError } from '../_shared/auth.ts'
 import { fetchWithTimeout } from '../_shared/fetch-with-timeout.ts'
 import { withSentry } from '../_shared/sentry.ts'
+import { logSharedStripeKeyIfDetected } from '../_shared/stripe-shared-key-testing.ts'
 
 const VALID_PREFIXES = ['rk_live_', 'rk_test_', 'sk_live_', 'sk_test_'] as const
 const MIN_SUFFIX_LENGTH = 20
@@ -147,6 +148,11 @@ Deno.serve(withSentry('verify-stripe-token', async (req: Request): Promise<Respo
     console.error(JSON.stringify({ level: 'error', function_name: 'verify-stripe-token', message: updateErr.message }))
     return jsonResponse({ success: false, error: 'Failed to update organization' })
   }
+
+  // Non-bloquant — voir _shared/stripe-shared-key-testing.ts. Ce chemin
+  // (onboarding) n'a jamais eu de garde d'unicité sur la clé : ce trace
+  // est le seul filet qui rend un partage visible ici.
+  void logSharedStripeKeyIfDetected(supabase, orgId, stripe_api_key, 'verify-stripe-token')
 
   // Avancer l'étape seulement si on n'est pas déjà plus loin (idempotent)
   await supabase
