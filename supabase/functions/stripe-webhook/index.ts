@@ -640,7 +640,12 @@ const ROUTED_EVENTS = new Set([
 ])
 
 // ── Entrypoint ───────────────────────────────────────────────
-Deno.serve(withSentry('stripe-webhook', async (req: Request): Promise<Response> => {
+// Exportée (plutôt qu'inline dans Deno.serve) pour permettre l'invocation
+// directe du handler HTTP réel depuis les tests d'intégration — même
+// convention que accounts-api::handleGetOne / update-stripe-connection::
+// handleUpdateStripeConnection. Comportement identique, aucun changement
+// de logique : extraction mécanique.
+export async function handleStripeWebhook(req: Request): Promise<Response> {
   // CORS preflight handling
   if (req.method === 'OPTIONS') {
     return new Response(null, {
@@ -769,33 +774,44 @@ Deno.serve(withSentry('stripe-webhook', async (req: Request): Promise<Response> 
   // doit jamais empêcher le traitement des autres.
   let handledCount = 0
   for (const organizationId of organizationIds) {
-    // Idempotency check: skip if this event was already processed for THIS org
-    // (scopé par organization_id — indispensable pour le fan-out : sans ce
-    // filtre, un event déjà complété pour une org ferait sauter son
-    // traitement pour toutes les autres orgs partageant la même clé).
-    const { data: existingSync } = await supabase
-      .from('data_syncs')
-      .select('id')
-      .eq('webhook_event_id', event.id)
-      .eq('organization_id', organizationId)
-      .eq('sync_status', 'completed')
-      .maybeSingle()
-
-    if (existingSync) continue
-
-    const logger = new DataSyncLogger({
-      supabase,
-      organizationId,
-      syncSource: 'stripe',
-      syncType: 'webhook',
-      triggeredBy: 'stripe',
-      webhookEventId: event.id,
-      isManual: false,
-    })
-
-    await logger.start()
-
+    // TOUT le corps par-org (idempotence, construction/start du logger,
+    // switch) vit désormais DANS le try — une exception à n'importe quelle
+    // étape (y compris logger.start(), qui peut réellement rejeter sur un
+    // aléa réseau même si les erreurs Supabase {error} qu'il reçoit sont
+    // déjà avalées en interne) ne doit jamais faire sortir de la boucle
+    // et couper le traitement des orgs suivantes. Trouvé en écrivant un
+    // vrai test comportemental d'isolation (2026-08-20 suite) — la
+    // relecture par inspection du source ne l'avait pas détecté : le catch
+    // par-org ne contenait déjà aucun `return`, mais deux appels vivaient
+    // hors de sa portée.
+    let logger: DataSyncLogger | undefined
     try {
+      // Idempotency check: skip if this event was already processed for THIS org
+      // (scopé par organization_id — indispensable pour le fan-out : sans ce
+      // filtre, un event déjà complété pour une org ferait sauter son
+      // traitement pour toutes les autres orgs partageant la même clé).
+      const { data: existingSync } = await supabase
+        .from('data_syncs')
+        .select('id')
+        .eq('webhook_event_id', event.id)
+        .eq('organization_id', organizationId)
+        .eq('sync_status', 'completed')
+        .maybeSingle()
+
+      if (existingSync) continue
+
+      logger = new DataSyncLogger({
+        supabase,
+        organizationId,
+        syncSource: 'stripe',
+        syncType: 'webhook',
+        triggeredBy: 'stripe',
+        webhookEventId: event.id,
+        isManual: false,
+      })
+
+      await logger.start()
+
       switch (event.type) {
         case 'customer.created':
           await handleCustomerCreated(supabase, organizationId, event, logger)
@@ -896,7 +912,7 @@ Deno.serve(withSentry('stripe-webhook', async (req: Request): Promise<Response> 
         organization_id: organizationId,
         message: msg,
       }))
-      await logger.fail(msg)
+      await logger?.fail(msg)
 
       // Write to dead letter queue for later retry/investigation
       await writeToDLQ(supabase, {
@@ -922,4 +938,6 @@ Deno.serve(withSentry('stripe-webhook', async (req: Request): Promise<Response> 
     type: event.type,
     organizations_processed: organizationIds.length,
   })
-}))
+}
+
+Deno.serve(withSentry('stripe-webhook', handleStripeWebhook))
