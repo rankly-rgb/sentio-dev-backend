@@ -413,6 +413,13 @@ Response 200 : `{ "data": { "id": "uuid", "display_name": "string | null" } }`
 
 `mrr_status` (Phase 5.5, `AUDIT_LOGIQUE_METIER_STRIPE.md` point 22) : `'ok' | 'unavailable'`, exposé sur `mrr_cents`/`account_fields` de la liste ET du détail — copie directe de `accounts.mrr_status` (`docs/openspec.md` §1/§8, "no data ≠ neutral data"). `'unavailable'` = compte non-chiffrable (metered, prix sans `unit_amount`, devise minoritaire) ou jamais eu de subscription connue (invoice-only, pas encore synchronisé) ; `mrr_cents` peut alors être un total partiel plutôt qu'un vrai `0` — le frontend doit afficher "Not billable" plutôt que le montant brut pour ces comptes.
 
+`mrr_unavailable_reason` (mission réconciliation Stripe, point 2, 2026-08-20) : `'no_subscription_data' | 'unsupported_pricing' | 'currency_mismatch' | null`, exposé sur la liste ET le détail — copie directe de `accounts.mrr_unavailable_reason`. Remplace le texte générique unique ("Not billable (known billing limitation)") par une cause structurée : `null` quand `mrr_status='ok'` (y compris un compte churné à `$0` confirmé — ce n'est PAS une 4e valeur de ce champ, un compte churné est déjà correctement `mrr_status='ok'`/`mrr_cents=0`, affiché tel quel). Les 3 valeurs non-null :
+- `'no_subscription_data'` — aucune subscription Stripe connue. Croiser avec `billing_model` (`'subscription' | 'invoice_only'`, également exposé) pour distinguer un compte `invoice_only` réel (facturé manuellement, factures visibles côté Stripe) d'un compte jamais synchronisé (`billing_model` reste à sa valeur par défaut `'subscription'` tant qu'aucune Subscription ni aucune invoice n'a été vue).
+- `'unsupported_pricing'` — une Subscription Stripe existe mais son pricing n'est pas chiffrable automatiquement (usage-based/metered, `unit_amount` null sur un item tiered).
+- `'currency_mismatch'` — la Subscription est dans une devise minoritaire exclue du total agrégé de l'org (vote majoritaire, `docs/openspec.md` §9).
+
+Voir `_shared/mrr-engine.ts::MrrUnavailableReason` pour l'implémentation, `supabase/tests/mrr-engine.test.ts`/`accounts-api.test.ts` pour la couverture.
+
 ---
 
 ### account-summary (GET)

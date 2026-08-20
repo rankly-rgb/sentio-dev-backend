@@ -93,7 +93,7 @@ Deno.serve(withSentry('get-today-actions', async (req: Request): Promise<Respons
     // droper par accident un compte pas encore scoré (churn_risk_band NULL).
     supabase
       .from('accounts')
-      .select('id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, mrr_cents, mrr_status, plan_tier, contract_end_date, billing_interval, created_at, is_delinquent')
+      .select('id, stripe_customer_id, hubspot_company_id, display_name, health_score, churn_risk_score, expansion_score, mrr_cents, mrr_status, mrr_unavailable_reason, billing_model, plan_tier, contract_end_date, billing_interval, created_at, is_delinquent')
       .eq('organization_id', orgId)
       .or('churn_risk_band.neq.churned,churn_risk_band.is.null')
       .limit(ACCOUNTS_LIMIT),

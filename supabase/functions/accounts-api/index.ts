@@ -147,7 +147,7 @@ async function handleList(
   let query = supabase
     .from('accounts_with_priority')
     .select(
-      'id, stripe_customer_id, display_name, plan_tier, billing_interval, mrr_cents, mrr_status, is_delinquent, delinquent_since, ' +
+      'id, stripe_customer_id, display_name, plan_tier, billing_interval, mrr_cents, mrr_status, mrr_unavailable_reason, billing_model, is_delinquent, delinquent_since, ' +
       'seat_count, seat_limit, ' +
       'health_score, health_score_status, health_score_band, trend_30d, ' +
       'churn_risk_score, churn_risk_band, ' +
@@ -357,6 +357,8 @@ export async function handleGetOne(
       billing_interval: account.billing_interval,
       mrr_cents: account.mrr_cents,
       mrr_status: account.mrr_status,
+      mrr_unavailable_reason: account.mrr_unavailable_reason,
+      billing_model: account.billing_model,
       is_delinquent: account.is_delinquent,
       // Lot 5 (2026-08-13, #35) : DATE brute, jamais une durée précalculée —
       // le frontend calcule l'affichage ("since MMM D" / durée) côté client,

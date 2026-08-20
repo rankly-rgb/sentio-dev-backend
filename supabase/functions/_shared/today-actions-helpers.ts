@@ -45,6 +45,11 @@ export interface TodayAccountInput {
   // jamais eu de subscription connue — mrr_cents peut être un total partiel,
   // pas un vrai $0 (docs/openspec.md §1/§8, même convention que accounts-api).
   mrr_status: 'ok' | 'unavailable'
+  // Mission réconciliation Stripe, point 2 (2026-08-20) : cause structurée de
+  // mrr_status='unavailable', null quand mrr_status='ok'. Voir
+  // _shared/mrr-engine.ts::MrrUnavailableReason.
+  mrr_unavailable_reason: 'no_subscription_data' | 'unsupported_pricing' | 'currency_mismatch' | null
+  billing_model: 'subscription' | 'invoice_only'
   plan_tier: string | null
   contract_end_date: string | null
   billing_interval: string | null
@@ -88,6 +93,8 @@ export interface TodayAction {
   expansion_score: number | null
   mrr_cents: number
   mrr_status: 'ok' | 'unavailable'
+  mrr_unavailable_reason: 'no_subscription_data' | 'unsupported_pricing' | 'currency_mismatch' | null
+  billing_model: 'subscription' | 'invoice_only'
   plan_tier: string | null
   days_to_renewal: number | null
   trigger_reasons: string[]
@@ -219,6 +226,8 @@ export function computeTodayActions(
       expansion_score: account.expansion_score,
       mrr_cents: account.mrr_cents ?? 0,
       mrr_status: account.mrr_status,
+      mrr_unavailable_reason: account.mrr_unavailable_reason,
+      billing_model: account.billing_model,
       plan_tier: account.plan_tier,
       days_to_renewal: dtr,
       trigger_reasons: computeTriggerReasons(account, insights.map((i) => i.title)),

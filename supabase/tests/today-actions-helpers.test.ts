@@ -22,6 +22,8 @@ function account(overrides: Partial<TodayAccountInput> = {}): TodayAccountInput 
     expansion_score: 0,
     mrr_cents: 10000,
     mrr_status: 'ok',
+    mrr_unavailable_reason: null,
+    billing_model: 'subscription',
     plan_tier: 'growth',
     contract_end_date: null,
     billing_interval: null,
@@ -171,6 +173,16 @@ describe('computeTodayActions', () => {
   it('propagates mrr_status through to the action so the frontend never renders a disguised $0 (issue #29)', () => {
     const actions = computeTodayActions([account({ mrr_status: 'unavailable' })], [playbook()], new Map())
     expect(actions[0].mrr_status).toBe('unavailable')
+  })
+
+  it('propagates mrr_unavailable_reason/billing_model through to the action (mission réconciliation Stripe, point 2)', () => {
+    const actions = computeTodayActions(
+      [account({ mrr_status: 'unavailable', mrr_unavailable_reason: 'no_subscription_data', billing_model: 'invoice_only' })],
+      [playbook()],
+      new Map(),
+    )
+    expect(actions[0].mrr_unavailable_reason).toBe('no_subscription_data')
+    expect(actions[0].billing_model).toBe('invoice_only')
   })
 
   it('includes an account with an active insight even when no playbook matches it', () => {
