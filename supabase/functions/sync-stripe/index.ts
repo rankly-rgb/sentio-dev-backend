@@ -23,8 +23,10 @@ import {
   detectOrgMajorityCurrency,
   computeDelinquentSinceCandidate,
   resolveDelinquentSince,
+  estimateInvoiceOnlyMrr,
   type SubscriptionMrrResult,
   type StripeSubscriptionLike,
+  type InvoiceOnlyMrrInput,
 } from '../_shared/mrr-engine.ts'
 import { dedupeMovementRows, writeMrrMovementsSync, resolveMovementDateAndProvenance, type MrrMovementSyncRow } from '../_shared/mrr-movements-writer.ts'
 import { getTier } from '../_shared/subscription-tiers.ts'
@@ -333,7 +335,7 @@ async function syncSubscriptions(
   logger: DataSyncLogger,
   writeErrors: WriteError[],
   restatementMode = false,
-): Promise<{ anomalyDetected: boolean; billingProfile?: BillingProfileCounts; restatementAccountsCount?: number; subscriptionsOrphaned?: number }> {
+): Promise<{ anomalyDetected: boolean; billingProfile?: BillingProfileCounts; restatementAccountsCount?: number; subscriptionsOrphaned?: number; orgMajorityCurrency?: string | null }> {
   const extraParams: Record<string, string> = { status: 'all' }
 
   // Détection du profil de facturation (Phase 3, docs/openspec.md §11) —
@@ -686,7 +688,7 @@ async function syncSubscriptions(
       `sync-stripe: anomalie MRR détectée sur l'org ${organizationId} — ${anomaly.affectedCount}/${anomaly.totalCount} comptes (${pct}%) passeraient à 0€ dans ce run. Écriture accounts bloquée, subscriptions déjà synchronisées (auto-corrective au prochain run).`,
       { level: 'critical' },
     )
-    return { anomalyDetected: true }
+    return { anomalyDetected: true, orgMajorityCurrency }
   }
   if (anomaly.isAnomaly && restatementMode) {
     console.warn(JSON.stringify({
@@ -750,7 +752,7 @@ async function syncSubscriptions(
       message: `restatement_mode: ${restatementRows.length}/${customerToAccount.size} comptes restated, 0 mrr_movements générés`,
     }))
 
-    return { anomalyDetected: false, billingProfile: billingProfileCounts, restatementAccountsCount: restatementRows.length, subscriptionsOrphaned }
+    return { anomalyDetected: false, billingProfile: billingProfileCounts, restatementAccountsCount: restatementRows.length, subscriptionsOrphaned, orgMajorityCurrency }
   }
 
   const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id', writeErrors)
@@ -821,7 +823,7 @@ async function syncSubscriptions(
     writeErrors.push(mvtWriteError)
   }
 
-  return { anomalyDetected: false, billingProfile: billingProfileCounts, subscriptionsOrphaned }
+  return { anomalyDetected: false, billingProfile: billingProfileCounts, subscriptionsOrphaned, orgMajorityCurrency }
 }
 
 // ── Sync invoices ─────────────────────────────────────────────
@@ -832,7 +834,8 @@ async function syncInvoices(
   logger: DataSyncLogger,
   writeErrors: WriteError[],
   createdAfter?: number,
-): Promise<{ invoiceOnlyAccountsCount: number; invoicesOrphaned: number }> {
+  orgMajorityCurrency: string | null = null,
+): Promise<{ invoiceOnlyAccountsCount: number; invoicesOrphaned: number; invoiceOnlyMrrEstimated: number }> {
   const extraParams: Record<string, string> = {}
   if (createdAfter) extraParams['created[gt]'] = String(createdAfter)
 
@@ -892,12 +895,9 @@ async function syncInvoices(
 
   // Détection billing_model='invoice_only' (docs/openspec.md §8.2) : un
   // customer avec ≥1 invoice mais 0 subscription connue est facturé
-  // manuellement (send_invoice). mrr_status='unavailable' déjà écrit par
-  // syncSubscriptions pour ces comptes (aggregateAccountMrr sur une liste
-  // vide) — ce correctif ajoute uniquement la classification explicite,
-  // jamais un MRR de repli dans cette itération (hors périmètre, voir
-  // docs/openspec.md §11).
+  // manuellement (send_invoice).
   const invoiceOnlyAccountIds = [...accountsWithInvoices].filter((id) => !accountsWithSubscriptions.has(id))
+  let invoiceOnlyMrrEstimated = 0
   if (invoiceOnlyAccountIds.length > 0) {
     const { error: invoiceOnlyError } = await supabase
       .from('accounts')
@@ -914,6 +914,68 @@ async function syncInvoices(
         message: `${invoiceOnlyAccountIds.length} comptes classés billing_model='invoice_only'`,
       }))
     }
+
+    // MRR de repli invoice-only (mission réconciliation Stripe, point 4,
+    // 2026-08-20 — voir estimateInvoiceOnlyMrr, _shared/mrr-engine.ts).
+    // Lit depuis la table `invoices` (pas `invoiceRows` en mémoire) : sur un
+    // sync incrémental, `invoiceRows` de ce run peut ne contenir qu'une
+    // seule facture nouvelle, insuffisant pour observer une cadence —
+    // l'historique complet déjà persisté (upsert ci-dessus, même run) est
+    // la seule source fiable dans les deux modes (full/incrémental).
+    const { data: paidInvoiceRows, error: paidInvoicesError } = await supabase
+      .from('invoices')
+      .select('account_id, amount_cents, currency, paid_at')
+      .in('account_id', invoiceOnlyAccountIds)
+      .eq('status', 'paid')
+      .not('paid_at', 'is', null)
+
+    if (paidInvoicesError) {
+      console.error(JSON.stringify({
+        level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
+        message: `Failed to fetch paid invoices for invoice-only MRR estimate: ${paidInvoicesError.message}`,
+      }))
+    } else {
+      const paidByAccount = new Map<string, InvoiceOnlyMrrInput[]>()
+      for (const row of (paidInvoiceRows ?? []) as { account_id: string; amount_cents: number; currency: string | null; paid_at: string | null }[]) {
+        if (!row.paid_at) continue
+        const list = paidByAccount.get(row.account_id) ?? []
+        list.push({ amountCents: row.amount_cents, currency: row.currency, paidAt: row.paid_at })
+        paidByAccount.set(row.account_id, list)
+      }
+
+      const mrrEstimateRows: Record<string, unknown>[] = []
+      let currencyMismatchCount = 0
+      for (const accountId of invoiceOnlyAccountIds) {
+        const estimate = estimateInvoiceOnlyMrr(paidByAccount.get(accountId) ?? [])
+        if (!estimate) continue // pas assez de données/cadence observable — reste mrr_status='unavailable' (S1)
+        if (orgMajorityCurrency !== null && estimate.currency !== null && estimate.currency !== orgMajorityCurrency) {
+          currencyMismatchCount++
+          mrrEstimateRows.push({
+            id: accountId,
+            mrr_status: 'unavailable',
+            mrr_unavailable_reason: 'currency_mismatch',
+          })
+          continue
+        }
+        mrrEstimateRows.push({
+          id: accountId,
+          mrr_cents: estimate.mrr_cents,
+          arr_cents: estimate.mrr_cents * 12,
+          mrr_status: 'ok',
+          mrr_unavailable_reason: null,
+        })
+      }
+
+      if (mrrEstimateRows.length > 0) {
+        const { failed: estimateFailed } = await batchUpsert(supabase, 'accounts', mrrEstimateRows, 'id', writeErrors)
+        logger.increment('records_failed', estimateFailed)
+        invoiceOnlyMrrEstimated = mrrEstimateRows.length - currencyMismatchCount
+        console.log(JSON.stringify({
+          level: 'info', function_name: 'sync-stripe', organization_id: organizationId,
+          message: `${invoiceOnlyMrrEstimated} comptes invoice-only ont reçu un MRR de repli estimé depuis leurs factures payées${currencyMismatchCount > 0 ? ` (${currencyMismatchCount} exclus pour devise minoritaire)` : ''}`,
+        }))
+      }
+    }
   }
 
   if (orphaned > 0) {
@@ -923,7 +985,7 @@ async function syncInvoices(
     }))
   }
 
-  return { invoiceOnlyAccountsCount: invoiceOnlyAccountIds.length, invoicesOrphaned: orphaned }
+  return { invoiceOnlyAccountsCount: invoiceOnlyAccountIds.length, invoicesOrphaned: orphaned, invoiceOnlyMrrEstimated }
 }
 
 // ── Entrypoint ───────────────────────────────────────────────
@@ -1183,9 +1245,9 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
   })
   const syncWorkPromise = (async () => {
     const { newAccountsSkippedByQuota } = await syncCustomers(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
-    const { anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned } = await syncSubscriptions(supabase, organizationId, apiKey, logger, writeErrors, restatementMode)
-    const { invoiceOnlyAccountsCount, invoicesOrphaned } = await syncInvoices(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
-    return { newAccountsSkippedByQuota, anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned, invoiceOnlyAccountsCount, invoicesOrphaned, outcome: 'done' as const }
+    const { anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned, orgMajorityCurrency } = await syncSubscriptions(supabase, organizationId, apiKey, logger, writeErrors, restatementMode)
+    const { invoiceOnlyAccountsCount, invoicesOrphaned, invoiceOnlyMrrEstimated } = await syncInvoices(supabase, organizationId, apiKey, logger, writeErrors, createdAfter, orgMajorityCurrency ?? null)
+    return { newAccountsSkippedByQuota, anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned, invoiceOnlyAccountsCount, invoicesOrphaned, invoiceOnlyMrrEstimated, outcome: 'done' as const }
   })()
 
   try {
@@ -1196,7 +1258,7 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
       console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', organization_id: organizationId, message: `org timed out after ${SYNC_STEPS_TIMEOUT_MS}ms — marked failed/timeout, releasing lock` }))
       return errorResponse(`Sync timed out after ${SYNC_STEPS_TIMEOUT_MS}ms for this organization`, 504)
     }
-    const { newAccountsSkippedByQuota, anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned, invoiceOnlyAccountsCount, invoicesOrphaned } = syncRaceResult
+    const { newAccountsSkippedByQuota, anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned, invoiceOnlyAccountsCount, invoicesOrphaned, invoiceOnlyMrrEstimated } = syncRaceResult
 
     if (anomalyDetected) {
       // 'validation_error' — CHECK data_syncs_error_type_check n'inclut pas de valeur
@@ -1255,6 +1317,7 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
         ...(newAccountsSkippedByQuota > 0 ? { new_accounts_skipped_by_quota: newAccountsSkippedByQuota } : {}),
         ...((subscriptionsOrphaned ?? 0) > 0 ? { subscriptions_orphaned: subscriptionsOrphaned } : {}),
         ...(invoicesOrphaned > 0 ? { invoices_orphaned: invoicesOrphaned } : {}),
+        ...(invoiceOnlyMrrEstimated > 0 ? { invoice_only_mrr_estimated: invoiceOnlyMrrEstimated } : {}),
       },
       writeErrors,
     )
@@ -1287,6 +1350,7 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
       ...(newAccountsSkippedByQuota > 0 ? { new_accounts_skipped_by_quota: newAccountsSkippedByQuota } : {}),
       ...((subscriptionsOrphaned ?? 0) > 0 ? { subscriptions_orphaned: subscriptionsOrphaned } : {}),
         ...(invoicesOrphaned > 0 ? { invoices_orphaned: invoicesOrphaned } : {}),
+        ...(invoiceOnlyMrrEstimated > 0 ? { invoice_only_mrr_estimated: invoiceOnlyMrrEstimated } : {}),
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
