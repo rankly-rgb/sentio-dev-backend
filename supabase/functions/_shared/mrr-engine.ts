@@ -441,6 +441,12 @@ export interface InvoiceOnlyMrrEstimate {
 // réellement abandonnée). ~2x un cycle mensuel typique, marge de retard.
 const INVOICE_ONLY_RECENCY_WINDOW_DAYS = 60
 
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
+}
+
 /**
  * Estime le MRR d'un compte invoice-only à partir de ses factures payées.
  * Retourne `null` — jamais un MRR fabriqué — si :
@@ -448,14 +454,20 @@ const INVOICE_ONLY_RECENCY_WINDOW_DAYS = 60
  *     ne permet de déduire ni un intervalle mensuel, ni annuel, ni autre) ;
  *   - la facture payée la plus récente date de plus de
  *     `INVOICE_ONLY_RECENCY_WINDOW_DAYS` (compte probablement inactif) ;
- *   - l'intervalle observé entre les deux factures les plus récentes est
- *     nul ou négatif (données incohérentes — doublon, horodatage invalide).
+ *   - aucun écart consécutif positif n'est observable (données
+ *     incohérentes — doublons, horodatages invalides/identiques).
  *
- * La cadence est dérivée de l'écart RÉEL entre les deux factures payées les
- * plus récentes (jamais une hypothèse "mensuel par défaut" — un compte
- * facturé annuellement via invoice_only ne doit pas se voir attribuer 12x
- * son MRR réel). `mrr_cents` = montant de la facture la plus récente,
- * normalisé au mois selon cette cadence observée.
+ * La cadence est dérivée de la MÉDIANE des écarts entre factures payées
+ * consécutives (pas seulement l'écart entre les deux plus récentes) —
+ * corrigé 2026-08-20 suite à une vérification live sur le cas réel
+ * App'Ines (cus_Rn6M1Tvnr0tOxS, PARKING_LOT.md) : un unique paiement en
+ * retard (facture jamais payée) élargit l'écart entre les deux factures
+ * payées les plus récentes à ~90 jours sur un compte facturé mensuellement
+ * (~30 jours), sous-estimant le MRR réel d'un facteur ~3 avec la version
+ * last-2-gap. La médiane sur l'ensemble de l'historique reste robuste à un
+ * seul écart irrégulier tant que la majorité des paiements sont réguliers.
+ * `mrr_cents` = montant de la facture la plus récente, normalisé au mois
+ * selon cette cadence médiane.
  */
 export function estimateInvoiceOnlyMrr(
   paidInvoices: InvoiceOnlyMrrInput[],
@@ -463,15 +475,20 @@ export function estimateInvoiceOnlyMrr(
 ): InvoiceOnlyMrrEstimate | null {
   if (paidInvoices.length < 2) return null
 
-  const sorted = [...paidInvoices].sort((a, b) => new Date(b.paidAt).getTime() - new Date(a.paidAt).getTime())
-  const [mostRecent, secondMostRecent] = sorted
+  const sorted = [...paidInvoices].sort((a, b) => new Date(a.paidAt).getTime() - new Date(b.paidAt).getTime())
+  const mostRecent = sorted[sorted.length - 1]
 
   const daysSinceLastPayment = (now - new Date(mostRecent.paidAt).getTime()) / (1000 * 60 * 60 * 24)
   if (daysSinceLastPayment > INVOICE_ONLY_RECENCY_WINDOW_DAYS) return null
 
-  const cadenceDays = (new Date(mostRecent.paidAt).getTime() - new Date(secondMostRecent.paidAt).getTime()) / (1000 * 60 * 60 * 24)
-  if (cadenceDays <= 0) return null
+  const gapDays: number[] = []
+  for (let i = 1; i < sorted.length; i++) {
+    const gap = (new Date(sorted[i].paidAt).getTime() - new Date(sorted[i - 1].paidAt).getTime()) / (1000 * 60 * 60 * 24)
+    if (gap > 0) gapDays.push(gap)
+  }
+  if (gapDays.length === 0) return null
 
+  const cadenceDays = median(gapDays)
   const cadenceMonths = cadenceDays / DAYS_PER_MONTH
   const mrrCents = Math.max(0, Math.round(mostRecent.amountCents / cadenceMonths))
 

@@ -820,17 +820,53 @@ describe('estimateInvoiceOnlyMrr', () => {
     expect(estimateInvoiceOnlyMrr(invoices, NOW)).toBeNull()
   })
 
-  it('uses only the two most recent paid invoices for cadence — ignores older irregular history', () => {
-    // Irregular older history (a big gap), but the two most recent are ~30 days apart.
+  it('uses the median gap across all consecutive paid invoices — robust to a single irregular gap anywhere in the history (2026-08-20 fix)', () => {
+    // Corrected design: the original last-2-gap version used ONLY the gap between
+    // the two most recent paid invoices. Live verification against the real
+    // App'Ines account (cus_Rn6M1Tvnr0tOxS, PARKING_LOT.md) found this fragile —
+    // a single missed/late payment widens exactly that one gap to ~90 days on an
+    // otherwise-monthly account, tripling the apparent cadence and cutting the
+    // estimated MRR to ~1/3 of the true value. The median of ALL consecutive gaps
+    // absorbs one outlier gap as long as the majority of history is regular — even
+    // when the irregular gap is NOT adjacent to the most recent invoice (unlike
+    // the App'Ines shape below, where it happens to be).
     const invoices = [
       paidInvoice(29900, '2026-07-13T00:00:00Z'),
       paidInvoice(29900, '2026-06-13T00:00:00Z'),
-      paidInvoice(29900, '2026-01-01T00:00:00Z'), // big gap, irrelevant to the estimate
+      paidInvoice(29900, '2026-05-13T00:00:00Z'),
+      paidInvoice(29900, '2026-04-13T00:00:00Z'),
+      paidInvoice(29900, '2026-01-13T00:00:00Z'), // the irregular ~91-day gap, buried in older history
+      paidInvoice(29900, '2025-12-13T00:00:00Z'),
+      paidInvoice(29900, '2025-11-13T00:00:00Z'),
     ]
     const result = estimateInvoiceOnlyMrr(invoices, NOW)
-    expect(result?.mrr_cents).toBeGreaterThanOrEqual(29500)
-    expect(result?.mrr_cents).toBeLessThanOrEqual(30500)
-    expect(result?.estimated_from_invoice_count).toBe(3)
+    expect(result).not.toBeNull()
+    // Regular gaps (~28-31 days) dominate the median — the estimate stays close
+    // to the true $299/mo cadence instead of being dragged by the one outlier.
+    expect(result?.mrr_cents).toBeGreaterThanOrEqual(29000)
+    expect(result?.mrr_cents).toBeLessThanOrEqual(31000)
+    expect(result?.estimated_from_invoice_count).toBe(7)
+  })
+
+  it('REGRESSION: real App’Ines-shaped gap (one missed payment cycle) no longer produces a ~3x-under estimate', () => {
+    // Reproduces the exact live-data shape found 2026-08-20: mostly-monthly paid
+    // invoices with one wider gap from a missed payment immediately before the
+    // most recent paid invoice. Under the old last-2-gap design this account
+    // computed mrr_cents=10132 (~$101, a ~3x underestimate of the true $299/mo).
+    const invoices = [
+      paidInvoice(29900, '2026-01-13T00:00:00Z'),
+      paidInvoice(29900, '2026-02-13T00:00:00Z'),
+      paidInvoice(29900, '2026-03-13T00:00:00Z'),
+      paidInvoice(29900, '2026-04-13T00:00:00Z'),
+      // missed cycle here — no paid invoice around 2026-05-13/06-13
+      paidInvoice(29900, '2026-07-13T00:00:00Z'), // most recent, ~91 days after the prior one
+    ]
+    const result = estimateInvoiceOnlyMrr(invoices, NOW)
+    expect(result).not.toBeNull()
+    // Old buggy design would have produced ~10132 here (91-day last-2 gap).
+    expect(result?.mrr_cents).not.toBeLessThan(20000)
+    expect(result?.mrr_cents).toBeGreaterThanOrEqual(27000)
+    expect(result?.mrr_cents).toBeLessThanOrEqual(31500)
   })
 
   it('is not sensitive to input order — sorts by paid_at internally', () => {
