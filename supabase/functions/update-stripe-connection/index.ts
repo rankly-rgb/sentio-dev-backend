@@ -43,6 +43,7 @@ import {
   STRIPE_ACCOUNT_CONFLICT_STATUS,
 } from '../_shared/stripe-account-claim.ts'
 import { withSentry } from '../_shared/sentry.ts'
+import { isSharedStripeKeyTestingAllowed, logSharedStripeKeyIfDetected } from '../_shared/stripe-shared-key-testing.ts'
 
 // Restreintes (rk_) ET secrètes complètes (sk_) toutes deux acceptées —
 // aligné avec verify-stripe-token/integrations-config, qui acceptent déjà
@@ -195,7 +196,11 @@ async function upsertVaultSecret(
   return { error: null }
 }
 
-Deno.serve(withSentry('update-stripe-connection', async (req: Request): Promise<Response> => {
+// Exportée (plutôt qu'inline dans Deno.serve) pour permettre l'invocation
+// directe du handler HTTP réel depuis les tests d'intégration — même
+// convention que accounts-api/index.ts::handleGetOne. Comportement
+// identique, aucun changement de logique : extraction mécanique.
+export async function handleUpdateStripeConnection(req: Request): Promise<Response> {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -302,17 +307,39 @@ Deno.serve(withSentry('update-stripe-connection', async (req: Request): Promise<
   // Un refus doit ne rien avoir écrit du tout.
   const accountId = await tryFetchAccountId(apiKey)
 
+  // TEMPORAIRE / TESTS UNIQUEMENT (2026-08-20, voir
+  // _shared/stripe-shared-key-testing.ts) — un conflit détecté ici ne
+  // bloque plus en 409 quand ALLOW_SHARED_STRIPE_KEY=true. La contrainte
+  // UNIQUE `organizations_stripe_account_id_key` elle-même n'est jamais
+  // touchée : on contourne simplement en n'écrivant pas stripe_account_id
+  // pour cette org (voir writeAccountId plus bas), donc le conflit ne
+  // peut de toute façon jamais atteindre la contrainte DB.
+  let writeAccountId = Boolean(accountId)
+
   if (accountId) {
     const { conflictingOrgId, lookupFailed } = await findConflictingOrganization(supabase, accountId, orgId)
     if (conflictingOrgId) {
-      console.warn(JSON.stringify({
-        level: 'warn',
-        function_name: 'update-stripe-connection',
-        organization_id: orgId,
-        message: 'stripe_account_id already claimed by another organization',
-        conflicting_organization_id: conflictingOrgId,
-      }))
-      return errorResponse(STRIPE_ACCOUNT_CONFLICT_MESSAGE, STRIPE_ACCOUNT_CONFLICT_STATUS)
+      if (isSharedStripeKeyTestingAllowed()) {
+        writeAccountId = false
+        console.warn(JSON.stringify({
+          level: 'warn',
+          function_name: 'update-stripe-connection',
+          event: 'shared_stripe_key_testing_bypass',
+          test_mode_only: true,
+          organization_id: orgId,
+          conflicting_organization_id: conflictingOrgId,
+          message: 'stripe_account_id conflict bypassed under ALLOW_SHARED_STRIPE_KEY — stripe_account_id left unset for this org.',
+        }))
+      } else {
+        console.warn(JSON.stringify({
+          level: 'warn',
+          function_name: 'update-stripe-connection',
+          organization_id: orgId,
+          message: 'stripe_account_id already claimed by another organization',
+          conflicting_organization_id: conflictingOrgId,
+        }))
+        return errorResponse(STRIPE_ACCOUNT_CONFLICT_MESSAGE, STRIPE_ACCOUNT_CONFLICT_STATUS)
+      }
     }
     if (lookupFailed) {
       // Lecture impossible ≠ pas de conflit : on continue et on laisse la
@@ -338,7 +365,7 @@ Deno.serve(withSentry('update-stripe-connection', async (req: Request): Promise<
     stripe_connected: true,
     stripe_connection_method: 'api_key',
   }
-  if (accountId) orgUpdate.stripe_account_id = accountId
+  if (writeAccountId && accountId) orgUpdate.stripe_account_id = accountId
 
   const { error: orgErr } = await supabase
     .from('organizations')
@@ -355,6 +382,9 @@ Deno.serve(withSentry('update-stripe-connection', async (req: Request): Promise<
     }
     return errorResponse('Failed to update the organization record', 500)
   }
+
+  // Non-bloquant — voir _shared/stripe-shared-key-testing.ts.
+  void logSharedStripeKeyIfDetected(supabase, orgId, apiKey, 'update-stripe-connection')
 
   // Fire-and-forget : la nouvelle clé ne sert à rien tant qu'une sync n'a pas
   // tourné avec elle.
@@ -379,4 +409,6 @@ Deno.serve(withSentry('update-stripe-connection', async (req: Request): Promise<
 
   console.log(JSON.stringify({ level: 'info', function_name: 'update-stripe-connection', organization_id: orgId, action: 'update', mode }))
   return jsonResponse({ success: true, mode, account_id: accountId })
-}))
+}
+
+Deno.serve(withSentry('update-stripe-connection', handleUpdateStripeConnection))
