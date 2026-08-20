@@ -36,7 +36,11 @@ export function validateStripeKeyFormat(key: string): { valid: boolean; mode: 'l
   return { valid: false, mode: 'test' }
 }
 
-Deno.serve(withSentry('verify-stripe-token', async (req: Request): Promise<Response> => {
+// Exportée (plutôt qu'inline dans Deno.serve) pour permettre l'invocation
+// directe du handler HTTP réel depuis les tests d'intégration — même
+// convention que accounts-api/index.ts::handleGetOne. Comportement
+// identique, aucun changement de logique : extraction mécanique.
+export async function handleVerifyStripeToken(req: Request): Promise<Response> {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -189,4 +193,6 @@ Deno.serve(withSentry('verify-stripe-token', async (req: Request): Promise<Respo
   }))
 
   return jsonResponse({ success: true, mode })
-}))
+}
+
+Deno.serve(withSentry('verify-stripe-token', handleVerifyStripeToken))

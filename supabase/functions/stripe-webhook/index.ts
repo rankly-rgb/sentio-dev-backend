@@ -28,6 +28,55 @@ async function resolveOrganization(
   return data?.id ?? null
 }
 
+// ── Fan-out multi-org (2026-08-20, mission clé Stripe partagée) ──
+// `event.account` n'est renseigné que pour Stripe Connect — aucune des
+// intégrations Sentio ne l'utilise (clé API directe), donc ce chemin ne
+// peut de toute façon jamais matcher plus d'un org (stripe_account_id
+// reste UNIQUE ; sous ALLOW_SHARED_STRIPE_KEY, la 2e+ org partageant une
+// clé n'écrit jamais cette colonne — voir _shared/stripe-shared-key-
+// testing.ts). Le fan-out réel se joue donc uniquement sur le fallback
+// stripe_customer_id : si le même client Stripe a été synchronisé dans
+// plusieurs orgs (clé partagée), TOUTES les orgs correspondantes sont
+// retournées — chacune reçoit et traite l'event indépendamment (voir la
+// boucle dans l'entrypoint). Sans ça, une seule org (la plus ancienne,
+// via le fallback ultime) recevait le temps réel et les autres
+// dépendaient uniquement du sync périodique.
+async function resolveOrganizationIds(
+  supabase: SupabaseClient,
+  event: StripeEvent,
+): Promise<string[]> {
+  const stripeAccountId = event.account
+  if (stripeAccountId) {
+    const orgId = await resolveOrganization(supabase, stripeAccountId)
+    return orgId ? [orgId] : []
+  }
+
+  const obj = event.data.object as { customer?: string }
+  if (obj.customer) {
+    const { data } = await supabase
+      .from('accounts')
+      .select('organization_id')
+      .eq('stripe_customer_id', obj.customer)
+    const ids = Array.from(new Set(
+      (data ?? [])
+        .map((row: { organization_id: string | null }) => row.organization_id)
+        .filter((id: string | null): id is string => Boolean(id)),
+    ))
+    if (ids.length > 0) return ids
+  }
+
+  // Fallback ultime : première org active (environnement single-tenant/dev,
+  // ou un event dont le customer n'est encore synchronisé nulle part).
+  const { data } = await supabase
+    .from('organizations')
+    .select('id')
+    .eq('is_active', true)
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+  return data?.id ? [data.id] : []
+}
+
 // ── Upsert account depuis un objet customer Stripe ──────────
 async function upsertAccount(
   supabase: SupabaseClient,
@@ -674,211 +723,203 @@ Deno.serve(withSentry('stripe-webhook', async (req: Request): Promise<Response> 
     return jsonResponse({ received: true, handled: false, type: event.type })
   }
 
-  // LIMITATION CONNUE (2026-08-20, mission clé Stripe partagée en test) :
-  // quand la même clé/compte Stripe est connecté à plusieurs orgs
-  // (ALLOW_SHARED_STRIPE_KEY, voir _shared/stripe-shared-key-testing.ts),
-  // ce routage ne fan-out PAS vers toutes les orgs concernées. `event.
-  // account` n'est de toute façon jamais renseigné pour ces intégrations
-  // (clé API directe, pas Stripe Connect) — la résolution passe donc
-  // systématiquement par le fallback ci-dessous, dont le lookup
-  // `accounts.stripe_customer_id` devient ambigu (.maybeSingle() sur 2+
-  // lignes → error → data null) si le même client Stripe a été synchronisé
-  // dans plusieurs orgs. Résultat observé : tous les events temps réel de
-  // ce compte partagé atterrissent sur l'org active la plus ancienne
-  // (dernier fallback ci-dessous), l'autre org ne reçoit ses données que
-  // via le sync périodique `sync-stripe`. Corriger proprement (fan-out
-  // multi-org) est un chantier à part entière, hors scope ici — non
-  // traité volontairement (effort non trivial, cf. mission).
-  // Résoudre l'organisation via le compte Stripe connecté
-  const stripeAccountId = event.account
-  if (!stripeAccountId) {
+  // Résoudre l'organisation (ou les organisations, voir
+  // resolveOrganizationIds) via le compte Stripe connecté / stripe_customer_id.
+  if (!event.account) {
     // Event depuis le compte Stripe principal — utiliser le premier org disponible
     // (cas webhooks directs sans Connect)
     console.warn('[stripe-webhook] No account in event, trying direct org lookup')
   }
 
-  let organizationId: string | null = null
+  const organizationIds = await resolveOrganizationIds(supabase, event)
 
-  if (stripeAccountId) {
-    organizationId = await resolveOrganization(supabase, stripeAccountId)
-  } else {
-    // Fallback : chercher via stripe_customer_id si disponible dans l'objet
-    const obj = event.data.object as { customer?: string }
-    if (obj.customer) {
-      const { data } = await supabase
-        .from('accounts')
-        .select('organization_id')
-        .eq('stripe_customer_id', obj.customer)
-        .maybeSingle()
-      organizationId = data?.organization_id ?? null
-    }
-    // Fallback ultime : prendre la première org active (environnement single-tenant ou dev)
-    if (!organizationId) {
-      const { data } = await supabase
-        .from('organizations')
-        .select('id')
-        .eq('is_active', true)
-        .order('created_at', { ascending: true })
-        .limit(1)
-        .maybeSingle()
-      organizationId = data?.id ?? null
-    }
-  }
-
-  if (!organizationId) {
+  if (organizationIds.length === 0) {
     console.error('[stripe-webhook] Cannot resolve organization for event', event.id)
     // Retourner 200 pour éviter que Stripe ne retry indéfiniment
     return jsonResponse({ received: true, error: 'organization_not_found' })
   }
 
-  // Complète le receipt (Lot 3) avec l'org maintenant résolue — fire and
+  if (organizationIds.length > 1) {
+    console.warn(JSON.stringify({
+      level: 'warn',
+      function_name: 'stripe-webhook',
+      event: 'webhook_fan_out',
+      test_mode_only: true,
+      stripe_event_id: event.id,
+      organization_ids: organizationIds,
+      message: 'Same Stripe customer matched multiple organizations — fanning out this event to all of them (expected only under a shared test-mode Stripe key, see _shared/stripe-shared-key-testing.ts).',
+    }))
+  }
+
+  // Complète le receipt (Lot 3) avec la première org résolue — fire and
   // forget, ne doit jamais bloquer/faire échouer le traitement de l'event.
+  // `webhook_receipts.organization_id` reste une colonne scalaire (pas de
+  // changement de schéma pour ce fan-out) : sur un event multi-org, seule
+  // la première org est tracée ici — table de diagnostic uniquement, la
+  // preuve de traitement de chaque org vit dans `data_syncs` (une ligne
+  // par org, cf. boucle ci-dessous).
   if (webhookReceiptId) {
-    supabase.from('webhook_receipts').update({ organization_id: organizationId }).eq('id', webhookReceiptId).then(
+    supabase.from('webhook_receipts').update({ organization_id: organizationIds[0] }).eq('id', webhookReceiptId).then(
       () => {},
       (err: unknown) => console.error('[stripe-webhook] webhook_receipts org backfill failed:', err),
     )
   }
 
-  // Idempotency check: skip if this event was already processed
-  const { data: existingSync } = await supabase
-    .from('data_syncs')
-    .select('id')
-    .eq('webhook_event_id', event.id)
-    .eq('sync_status', 'completed')
-    .maybeSingle()
+  // Chaque org matchée est traitée indépendamment : l'échec de l'une ne
+  // doit jamais empêcher le traitement des autres.
+  let handledCount = 0
+  for (const organizationId of organizationIds) {
+    // Idempotency check: skip if this event was already processed for THIS org
+    // (scopé par organization_id — indispensable pour le fan-out : sans ce
+    // filtre, un event déjà complété pour une org ferait sauter son
+    // traitement pour toutes les autres orgs partageant la même clé).
+    const { data: existingSync } = await supabase
+      .from('data_syncs')
+      .select('id')
+      .eq('webhook_event_id', event.id)
+      .eq('organization_id', organizationId)
+      .eq('sync_status', 'completed')
+      .maybeSingle()
 
-  if (existingSync) {
-    return jsonResponse({ received: true, handled: false, reason: 'duplicate_event' })
-  }
+    if (existingSync) continue
 
-  const logger = new DataSyncLogger({
-    supabase,
-    organizationId,
-    syncSource: 'stripe',
-    syncType: 'webhook',
-    triggeredBy: 'stripe',
-    webhookEventId: event.id,
-    isManual: false,
-  })
-
-  await logger.start()
-
-  try {
-    switch (event.type) {
-      case 'customer.created':
-        await handleCustomerCreated(supabase, organizationId, event, logger)
-        break
-      case 'customer.updated':
-        await handleCustomerUpdated(supabase, organizationId, event, logger)
-        break
-      case 'customer.subscription.created':
-      case 'customer.subscription.updated':
-      case 'customer.subscription.deleted':
-        await handleSubscriptionEvent(supabase, organizationId, event, logger)
-        break
-      case 'invoice.created':
-      case 'invoice.voided':
-        await handleInvoiceEvent(supabase, organizationId, event, logger)
-        break
-      case 'invoice.paid':
-        await handleInvoiceEvent(supabase, organizationId, event, logger)
-        // Fire-and-forget playbook-outcome-detector — ne jamais bloquer le webhook
-        // (chantier C — cf. specs/002-playbook-outcome-tracking/contracts/)
-        {
-          const paidInvoice = event.data.object as { customer?: string }
-          if (paidInvoice.customer) {
-            const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
-            const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-            fetch(`${supabaseUrl}/functions/v1/playbook-outcome-detector`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${supabaseKey}`,
-              },
-              body: JSON.stringify({
-                organization_id: organizationId,
-                stripe_customer_id: paidInvoice.customer,
-              }),
-            }).catch((err) => {
-              console.warn(JSON.stringify({
-                level: 'warn',
-                function_name: 'stripe-webhook',
-                organization_id: organizationId,
-                message: `playbook-outcome-detector fire-and-forget failed: ${err instanceof Error ? err.message : String(err)}`,
-              }))
-            })
-          }
-        }
-        break
-      case 'invoice.payment_failed':
-        await handleInvoiceEvent(supabase, organizationId, event, logger)
-        // Fire-and-forget playbook-executor — ne jamais bloquer le webhook
-        {
-          const failedInvoice = event.data.object as { customer?: string }
-          if (failedInvoice.customer) {
-            const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
-            const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-            fetch(`${supabaseUrl}/functions/v1/playbook-executor`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${supabaseKey}`,
-              },
-              body: JSON.stringify({
-                organization_id: organizationId,
-                stripe_customer_id: failedInvoice.customer,
-                trigger_reason: 'invoice_past_due',
-              }),
-            }).catch((err) => {
-              console.warn(JSON.stringify({
-                level: 'warn',
-                function_name: 'stripe-webhook',
-                organization_id: organizationId,
-                message: `playbook-executor invoice_past_due fire-and-forget failed: ${err instanceof Error ? err.message : String(err)}`,
-              }))
-            })
-          }
-        }
-        break
-      case 'customer.subscription.trial_will_end':
-        handleTrialWillEnd(event, logger)
-        break
-      case 'charge.refunded':
-      case 'credit_note.created':
-        await handleRefundEvent(supabase, organizationId, event, logger)
-        break
-    }
-
-    await logger.complete({ event_type: event.type, event_id: event.id })
-    return jsonResponse({ received: true, handled: true, type: event.type })
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    console.error(JSON.stringify({
-      level: 'error',
-      function_name: 'stripe-webhook',
-      event_id: event.id,
-      event_type: event.type,
-      organization_id: organizationId,
-      message: msg,
-    }))
-    await logger.fail(msg)
-
-    // Write to dead letter queue for later retry/investigation
-    await writeToDLQ(supabase, {
-      organization_id: organizationId,
-      provider: 'stripe',
-      event_type: event.type,
-      payload: event,
-      error_message: msg,
+    const logger = new DataSyncLogger({
+      supabase,
+      organizationId,
+      syncSource: 'stripe',
+      syncType: 'webhook',
+      triggeredBy: 'stripe',
+      webhookEventId: event.id,
+      isManual: false,
     })
 
-    await alertSlack(
-      `stripe-webhook handler failed for ${event.type} (event ${event.id}): ${msg}`,
-      { level: 'warning' },
-    )
+    await logger.start()
 
-    // Toujours 200 pour éviter les retries Stripe sur des erreurs internes
-    return jsonResponse({ received: true, error: 'internal_error' })
+    try {
+      switch (event.type) {
+        case 'customer.created':
+          await handleCustomerCreated(supabase, organizationId, event, logger)
+          break
+        case 'customer.updated':
+          await handleCustomerUpdated(supabase, organizationId, event, logger)
+          break
+        case 'customer.subscription.created':
+        case 'customer.subscription.updated':
+        case 'customer.subscription.deleted':
+          await handleSubscriptionEvent(supabase, organizationId, event, logger)
+          break
+        case 'invoice.created':
+        case 'invoice.voided':
+          await handleInvoiceEvent(supabase, organizationId, event, logger)
+          break
+        case 'invoice.paid':
+          await handleInvoiceEvent(supabase, organizationId, event, logger)
+          // Fire-and-forget playbook-outcome-detector — ne jamais bloquer le webhook
+          // (chantier C — cf. specs/002-playbook-outcome-tracking/contracts/)
+          {
+            const paidInvoice = event.data.object as { customer?: string }
+            if (paidInvoice.customer) {
+              const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+              const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+              fetch(`${supabaseUrl}/functions/v1/playbook-outcome-detector`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${supabaseKey}`,
+                },
+                body: JSON.stringify({
+                  organization_id: organizationId,
+                  stripe_customer_id: paidInvoice.customer,
+                }),
+              }).catch((err) => {
+                console.warn(JSON.stringify({
+                  level: 'warn',
+                  function_name: 'stripe-webhook',
+                  organization_id: organizationId,
+                  message: `playbook-outcome-detector fire-and-forget failed: ${err instanceof Error ? err.message : String(err)}`,
+                }))
+              })
+            }
+          }
+          break
+        case 'invoice.payment_failed':
+          await handleInvoiceEvent(supabase, organizationId, event, logger)
+          // Fire-and-forget playbook-executor — ne jamais bloquer le webhook
+          {
+            const failedInvoice = event.data.object as { customer?: string }
+            if (failedInvoice.customer) {
+              const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+              const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+              fetch(`${supabaseUrl}/functions/v1/playbook-executor`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${supabaseKey}`,
+                },
+                body: JSON.stringify({
+                  organization_id: organizationId,
+                  stripe_customer_id: failedInvoice.customer,
+                  trigger_reason: 'invoice_past_due',
+                }),
+              }).catch((err) => {
+                console.warn(JSON.stringify({
+                  level: 'warn',
+                  function_name: 'stripe-webhook',
+                  organization_id: organizationId,
+                  message: `playbook-executor invoice_past_due fire-and-forget failed: ${err instanceof Error ? err.message : String(err)}`,
+                }))
+              })
+            }
+          }
+          break
+        case 'customer.subscription.trial_will_end':
+          handleTrialWillEnd(event, logger)
+          break
+        case 'charge.refunded':
+        case 'credit_note.created':
+          await handleRefundEvent(supabase, organizationId, event, logger)
+          break
+      }
+
+      await logger.complete({ event_type: event.type, event_id: event.id })
+      handledCount++
+    } catch (err) {
+      // Une org qui échoue ne doit jamais empêcher le traitement des autres
+      // orgs partagées (fan-out) — on logue/DLQ/alerte pour CETTE org et on
+      // continue la boucle, jamais un retour anticipé.
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(JSON.stringify({
+        level: 'error',
+        function_name: 'stripe-webhook',
+        event_id: event.id,
+        event_type: event.type,
+        organization_id: organizationId,
+        message: msg,
+      }))
+      await logger.fail(msg)
+
+      // Write to dead letter queue for later retry/investigation
+      await writeToDLQ(supabase, {
+        organization_id: organizationId,
+        provider: 'stripe',
+        event_type: event.type,
+        payload: event,
+        error_message: msg,
+      })
+
+      await alertSlack(
+        `stripe-webhook handler failed for ${event.type} (event ${event.id}, org ${organizationId}): ${msg}`,
+        { level: 'warning' },
+      )
+    }
   }
+
+  // Toujours 200 pour éviter les retries Stripe — y compris si une org a
+  // échoué : son erreur est déjà tracée (logger.fail/DLQ/Slack) ci-dessus.
+  return jsonResponse({
+    received: true,
+    handled: handledCount > 0,
+    type: event.type,
+    organizations_processed: organizationIds.length,
+  })
 }))

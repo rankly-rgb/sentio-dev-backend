@@ -196,7 +196,11 @@ async function upsertVaultSecret(
   return { error: null }
 }
 
-Deno.serve(withSentry('update-stripe-connection', async (req: Request): Promise<Response> => {
+// Exportée (plutôt qu'inline dans Deno.serve) pour permettre l'invocation
+// directe du handler HTTP réel depuis les tests d'intégration — même
+// convention que accounts-api/index.ts::handleGetOne. Comportement
+// identique, aucun changement de logique : extraction mécanique.
+export async function handleUpdateStripeConnection(req: Request): Promise<Response> {
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
@@ -405,4 +409,6 @@ Deno.serve(withSentry('update-stripe-connection', async (req: Request): Promise<
 
   console.log(JSON.stringify({ level: 'info', function_name: 'update-stripe-connection', organization_id: orgId, action: 'update', mode }))
   return jsonResponse({ success: true, mode, account_id: accountId })
-}))
+}
+
+Deno.serve(withSentry('update-stripe-connection', handleUpdateStripeConnection))
