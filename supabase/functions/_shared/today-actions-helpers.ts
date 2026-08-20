@@ -114,25 +114,38 @@ export function computeDaysToRenewal(
   return Math.ceil((end - now) / (1000 * 60 * 60 * 24))
 }
 
-// Priorité de base (churn/renewal), puis élevée si un insight actif est plus
-// urgent — un compte avec un insight 'critical' ne peut jamais retomber en
-// dessous de P0, quels que soient ses scores.
+// Priorité de base (segment/renewal), puis élevée si un insight actif est
+// plus urgent — un compte avec un insight 'critical' ne peut jamais retomber
+// en dessous de P0, quels que soient ses scores.
+//
+// Corrigé 2026-08-20 (mission réconciliation Stripe, point 1) : basé sur
+// `primary_segment` — le même champ déjà consommé par Segments/Dashboard
+// (`en_danger_critique`/`a_risque_leger`) — plutôt que sur un re-seuillage
+// local de `churn_risk_score` (`>= 70`/`>= 50`). Avant ce correctif, ce
+// re-seuillage divergeait silencieusement du seuil réel de `churn_risk_band`
+// (`>= 50` pour 'high', `_shared/scoring.ts`) : un compte à score 55-69
+// atterrissait déjà dans le segment "Critical danger" (`en_danger_critique`,
+// band='high') sur Segments/Dashboard, mais restait P1 ("High"), jamais P0
+// ("Critical"), sur Today — le même compte affichant deux niveaux de gravité
+// contradictoires selon l'écran, sans qu'aucune décision produit ne
+// justifie ces deux seuils distincts (contrairement à `is_delinquent`
+// ci-dessous, qui reste un OR direct volontaire et documenté).
 //
 // Audit délinquence 2026-08-06, décision 3 : is_delinquent force P0 en
-// condition OR directe — jamais via le seuil numérique `risk >= 70`, qu'un
-// compte uniquement délinquent (payment_delinquent, 35/150) ne franchirait
-// jamais seul. « Actionnable le jour même » est la raison d'être de ce
-// chantier — un impayé est P0, pas P1.
+// condition OR directe — jamais via le seuil segment, qu'un compte
+// uniquement délinquent avec un churn_risk_band pas encore 'high' (donc
+// segmenté `impayes`, pas `en_danger_critique`) ne franchirait jamais seul.
+// « Actionnable le jour même » est la raison d'être de ce chantier — un
+// impayé est P0, pas P1.
 export function computePriority(
-  churnRiskScore: number | null,
+  primarySegment: string | null,
   daysToRenewal: number | null,
   insightPriorities: string[],
   isDelinquent: boolean,
 ): PriorityCode {
-  const risk = churnRiskScore ?? 0
   let priority: PriorityCode = 'P2'
-  if (risk >= 70 || isDelinquent) priority = 'P0'
-  else if (risk >= 50 || (daysToRenewal !== null && daysToRenewal < 60)) priority = 'P1'
+  if (primarySegment === 'en_danger_critique' || isDelinquent) priority = 'P0'
+  else if (primarySegment === 'a_risque_leger' || (daysToRenewal !== null && daysToRenewal < 60)) priority = 'P1'
 
   for (const p of insightPriorities) {
     const mapped = INSIGHT_PRIORITY_TO_CODE[p] ?? 'P2'
@@ -200,7 +213,7 @@ export function computeTodayActions(
       stripe_customer_id: account.stripe_customer_id,
       display_name: account.display_name,
       hubspot_company_id: account.hubspot_company_id,
-      priority: computePriority(account.churn_risk_score, dtr, insights.map((i) => i.priority), account.is_delinquent),
+      priority: computePriority(account.primary_segment, dtr, insights.map((i) => i.priority), account.is_delinquent),
       health_score: account.health_score,
       churn_risk_score: account.churn_risk_score,
       expansion_score: account.expansion_score,
