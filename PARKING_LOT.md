@@ -1,5 +1,9 @@
 # Parking lot
 
+## sync-stripe partage le même timeout passif potentiellement affamé qu'issue #65 (2026-08-23)
+
+- 2026-08-23 — En corrigeant le timeout par-org de `calculate-scores`/`generate-insights` (issue #65, PARKING_LOT du 23/08 → PR fix/nightly-scoring-insights-timeout-65), `sync-stripe/index.ts` (`SYNC_STEPS_TIMEOUT_MS=240_000`, même construction `Promise.race([syncWorkPromise, syncTimeoutPromise])`) n'a volontairement PAS été touché — hors périmètre de cette étape précise. C'est exactement la faiblesse que l'issue #65 elle-même signale dans son "Ask" point 3 : "sync-stripe's equivalent... uses the identical Promise.race pattern and is presumed to have the same weakness — not yet independently verified live against a heavy org". Si un org lourd bloque un run `sync-stripe` sans que son timeout ne se déclenche, le symptôme serait identique (row `running` jusqu'au balayage self-monitor 15 min) — mais indépendant du blocage actuel de l'org "test" sur `sync-anomaly-guard` (déblocage explicite, échec immédiat avec statut terminal, pas un hang). À vérifier et corriger séparément avec le même correctif coopératif si confirmé.
+
 ## Écrit demandé par Naima — comptes 100%-canceled : DEUX bugs distincts, l'un remet en cause la validation D-NEXT du 05/08 (2026-08-20)
 
 Préparé sur demande explicite de Naima ("ne la corrige pas maintenant, prépare un écrit précis que je transformerai en prompt dédié"), suite à la découverte initiale (section ci-dessous, "Bug trouvé en vérifiant Point 2"). **Corrigé/complété par rapport à cette découverte initiale** : en creusant la question "est-ce que ça remet en cause la validation D-NEXT du 05/08 ?", un **second bug, distinct et plus grave**, a été trouvé — la réponse à sa question 3 n'est plus "non, indépendant", c'est "oui, potentiellement, pour l'un des deux".
