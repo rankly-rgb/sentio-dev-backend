@@ -82,7 +82,7 @@ Deno.serve(withSentry('webhook-config', async (req: Request): Promise<Response> 
       .maybeSingle()
 
     if (cfgError || !config || !config.endpoint_url) {
-      return errorResponse('Aucune configuration webhook trouvée', 404)
+      return errorResponse('No webhook configuration found', 404)
     }
 
     const secret = await getWebhookSecret(supabase, config)
@@ -159,7 +159,7 @@ Deno.serve(withSentry('webhook-config', async (req: Request): Promise<Response> 
       .maybeSingle()
 
     if (!existing) {
-      return errorResponse('Aucune configuration webhook trouvée', 404)
+      return errorResponse('No webhook configuration found', 404)
     }
 
     const newSecret = Array.from(crypto.getRandomValues(new Uint8Array(32)))
@@ -184,7 +184,7 @@ Deno.serve(withSentry('webhook-config', async (req: Request): Promise<Response> 
       .eq('id', existing.id)
 
     if (updateError) {
-      return errorResponse('Erreur lors de la régénération du secret', 500)
+      return errorResponse('Error regenerating secret', 500)
     }
 
     try {
@@ -205,7 +205,7 @@ Deno.serve(withSentry('webhook-config', async (req: Request): Promise<Response> 
 
     return jsonResponse({
       success: true,
-      message: 'Secret régénéré avec succès',
+      message: 'Secret regenerated successfully',
       secret: newSecret,
     })
   }
@@ -218,9 +218,9 @@ Deno.serve(withSentry('webhook-config', async (req: Request): Promise<Response> 
       .eq('organization_id', orgId)
       .eq('provider', 'webhook')
 
-    if (error) return errorResponse('Erreur lors de la désactivation', 500)
+    if (error) return errorResponse('Error deactivating webhook', 500)
 
-    return jsonResponse({ success: true, message: 'Webhook désactivé' })
+    return jsonResponse({ success: true, message: 'Webhook deactivated' })
   }
 
   // ── Reject unknown sub-paths ──────────────────────────────
@@ -237,7 +237,7 @@ Deno.serve(withSentry('webhook-config', async (req: Request): Promise<Response> 
       .eq('provider', 'webhook')
       .maybeSingle()
 
-    if (error) return errorResponse('Erreur lors de la récupération de la configuration', 500)
+    if (error) return errorResponse('Error fetching configuration', 500)
     if (!config) return jsonResponse({ configured: false })
 
     // Lire le secret pour afficher un apercu masque
@@ -268,18 +268,18 @@ Deno.serve(withSentry('webhook-config', async (req: Request): Promise<Response> 
     }
 
     if (!body.endpoint_url || !isValidHttpsUrl(body.endpoint_url)) {
-      return errorResponse('endpoint_url doit être une URL HTTPS valide', 400)
+      return errorResponse('endpoint_url must be a valid HTTPS URL', 400)
     }
 
     if (body.active_events) {
       if (!Array.isArray(body.active_events)) {
-        return errorResponse('active_events doit être un tableau', 400)
+        return errorResponse('active_events must be an array', 400)
       }
       const invalidEvents = body.active_events.filter(
         (e: string) => !VALID_EVENTS.includes(e as typeof VALID_EVENTS[number]),
       )
       if (invalidEvents.length > 0) {
-        return errorResponse(`Événements invalides : ${invalidEvents.join(', ')}`, 400)
+        return errorResponse(`Invalid events: ${invalidEvents.join(', ')}`, 400)
       }
     }
 
@@ -305,14 +305,14 @@ Deno.serve(withSentry('webhook-config', async (req: Request): Promise<Response> 
         .update(updateData)
         .eq('id', existing.id)
 
-      if (updateError) return errorResponse('Erreur lors de la mise à jour', 500)
+      if (updateError) return errorResponse('Error updating configuration', 500)
 
       const secret = await getWebhookSecret(supabase, existing)
       const secretPreview = secret ? maskSecret(secret) : '(non disponible)'
 
       return jsonResponse({
         success: true,
-        message: 'Configuration webhook mise à jour',
+        message: 'Webhook configuration updated',
         id: existing.id,
         secret_preview: secretPreview,
       })
@@ -339,7 +339,7 @@ Deno.serve(withSentry('webhook-config', async (req: Request): Promise<Response> 
       .single()
 
     if (createError || !created) {
-      return errorResponse('Erreur lors de la création de la configuration', 500)
+      return errorResponse('Error creating configuration', 500)
     }
 
     // Stocker le secret dans Vault et lier a la config
@@ -359,7 +359,7 @@ Deno.serve(withSentry('webhook-config', async (req: Request): Promise<Response> 
 
     return jsonResponse({
       success: true,
-      message: 'Configuration webhook créée',
+      message: 'Webhook configuration created',
       id: created.id,
       secret: newSecret,
     }, 201)

@@ -251,8 +251,14 @@ verify_jwt = false
 verify_jwt = false
 
 # export-segment-csv : verify_jwt=true en place sur le projet (reproduit tel quel)
+# export-segment-csv : JWT vérifié dans le code (ES256) — corrigé 2026-08-23,
+# verify_jwt=true (Supabase platform-level, HS256 only) rejette silencieusement
+# tout appel authentifié ES256 réel avant que verifyUserAuth() ne soit atteint,
+# rendant cette fonction probablement inutilisable depuis le navigateur
+# (PARKING_LOT.md, Lot 8, 2026-08-15). Même pattern que les autres fonctions
+# JWT-vérifiées-dans-le-code de ce fichier (accounts-api, export-playbook-accounts…).
 [functions.export-segment-csv]
-verify_jwt = true
+verify_jwt = false
 
 # get-benchmark-data : JWT vérifié dans le code (ES256)
 [functions.get-benchmark-data]

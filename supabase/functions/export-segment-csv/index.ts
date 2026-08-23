@@ -21,7 +21,6 @@ import { createServiceClient } from '../_shared/supabase-client.ts'
 import { createLogger } from '../_shared/structured-logger.ts'
 import { isValidSegment, VALID_SEGMENTS } from '../_shared/validators.ts'
 import {
-  SEGMENT_FILTERS,
   buildSegmentCsv,
   type SegmentAccountRow,
 } from '../_shared/segment-export-helpers.ts'
@@ -62,12 +61,12 @@ Deno.serve(withSentry('export-segment-csv', async (req: Request): Promise<Respon
     auth = await verifyUserAuth(req)
   } catch (err) {
     if (err instanceof AuthError) {
-      const msg = err.status === 401 ? 'Non authentifié'
-        : err.status === 403 ? 'Organisation non configurée'
+      const msg = err.status === 401 ? 'Not authenticated'
+        : err.status === 403 ? 'Organization not configured'
         : err.message
       return jsonError(msg, err.status)
     }
-    return jsonError('Non authentifié', 401)
+    return jsonError('Not authenticated', 401)
   }
 
   const orgId = auth.organizationId
@@ -78,7 +77,7 @@ Deno.serve(withSentry('export-segment-csv', async (req: Request): Promise<Respon
 
   if (!segmentParam || !isValidSegment(segmentParam)) {
     return jsonError(
-      `Segment invalide. Valeurs acceptées : ${VALID_SEGMENTS.join(', ')}`,
+      `Invalid segment. Accepted values: ${VALID_SEGMENTS.join(', ')}`,
       400,
     )
   }
@@ -92,73 +91,96 @@ Deno.serve(withSentry('export-segment-csv', async (req: Request): Promise<Respon
     supabase = createServiceClient()
   } catch {
     logger.error('Service client creation failed')
-    return jsonError('Erreur serveur lors de l\'export', 500)
+    return jsonError('Server error during export', 500)
   }
 
-  // 5. QUERY accounts (all accounts for org, no LIMIT — export complet)
   const startMs = Date.now()
-  const { data: allAccounts, error: dbError } = await supabase
-    .from('accounts')
-    .select(
-      'stripe_customer_id, hubspot_company_id, plan_tier, billing_interval, ' +
-      'mrr_cents, seat_count, seat_limit, contract_end_date, ' +
-      'health_score, churn_risk_score, expansion_score, product_usage_score, created_at, data_source'
-    )
+
+  // 5. RESOLVE segment membership — reads the already-computed segment
+  // (account_segments/segment_memberships), the same source of truth every
+  // other segment view in the product reads from. Replaces a local
+  // re-derivation of segment rules from raw scores (SEGMENT_FILTERS,
+  // removed 2026-08-23) that had regressed on decision C2.5 (an empty
+  // eligibility_criteria group is supposed to match nothing, not
+  // everything) and had silently drifted off the V3 scoring engine — see
+  // PARKING_LOT.md. Joined manually (not via the get_segment_accounts RPC)
+  // because that RPC resolves the org via user_organization_id(), which
+  // only works against the caller's own JWT context — this function runs
+  // as service_role and already resolves organization_id itself via
+  // verifyUserAuth(), the same explicit-org-scoping pattern used
+  // everywhere else in this file.
+  const { data: segmentRow, error: segmentError } = await supabase
+    .from('account_segments')
+    .select('id')
     .eq('organization_id', orgId)
-    .order('mrr_cents', { ascending: false })
+    .eq('segment_type', segment)
+    .eq('is_active', true)
+    .maybeSingle()
+
+  if (segmentError) {
+    logger.error('Segment lookup failed', { error: segmentError.message })
+    return jsonError('Server error during export', 500)
+  }
+
+  let accountIds: string[] = []
+  if (segmentRow) {
+    const { data: memberships, error: membershipError } = await supabase
+      .from('segment_memberships')
+      .select('account_id')
+      .eq('organization_id', orgId)
+      .eq('segment_id', segmentRow.id)
+      .eq('status', 'active')
+
+    if (membershipError) {
+      logger.error('Segment membership query failed', { error: membershipError.message })
+      return jsonError('Server error during export', 500)
+    }
+    accountIds = (memberships ?? []).map((m: { account_id: string }) => m.account_id)
+  }
+
+  // 6. QUERY the accounts belonging to that segment (no LIMIT — export complet)
+  const { data: segmentAccounts, error: dbError } = accountIds.length === 0
+    ? { data: [] as Record<string, unknown>[], error: null }
+    : await supabase
+        .from('accounts')
+        .select(
+          'stripe_customer_id, hubspot_company_id, plan_tier, billing_interval, ' +
+          'mrr_cents, seat_count, seat_limit, contract_end_date, ' +
+          'health_score, churn_risk_score, expansion_score, product_usage_score'
+        )
+        .eq('organization_id', orgId)
+        .in('id', accountIds)
+        .order('mrr_cents', { ascending: false })
 
   if (dbError) {
     logger.error('Accounts query failed', { error: dbError.message })
-    return jsonError('Erreur serveur lors de l\'export', 500)
+    return jsonError('Server error during export', 500)
   }
 
-  // 6. FILTER in-memory by segment (mirrors frontend segment-queries.ts)
-  const filterFn = SEGMENT_FILTERS[segment]
-  const rows: SegmentAccountRow[] = (allAccounts ?? [])
-    .filter((a: Record<string, unknown>) => {
-      const row: SegmentAccountRow = {
-        stripe_customer_id: a.stripe_customer_id as string | null,
-        hubspot_company_id: a.hubspot_company_id as string | null,
-        plan_tier: a.plan_tier as string | null,
-        billing_interval: a.billing_interval as string | null,
-        mrr_cents: a.mrr_cents as number | null,
-        seat_count: a.seat_count as number | null,
-        seat_limit: a.seat_limit as number | null,
-        contract_end_date: a.contract_end_date as string | null,
-        health_score: a.health_score as number | null,
-        churn_risk_score: a.churn_risk_score as number | null,
-        expansion_score: a.expansion_score as number | null,
-        product_usage_score: a.product_usage_score as number | null,
-        created_at: a.created_at as string | null,
-      }
-      return filterFn(row)
-    })
-    .map((a: Record<string, unknown>): SegmentAccountRow => ({
-      stripe_customer_id: a.stripe_customer_id as string | null,
-      hubspot_company_id: a.hubspot_company_id as string | null,
-      plan_tier: a.plan_tier as string | null,
-      billing_interval: a.billing_interval as string | null,
-      mrr_cents: a.mrr_cents as number | null,
-      seat_count: a.seat_count as number | null,
-      seat_limit: a.seat_limit as number | null,
-      contract_end_date: a.contract_end_date as string | null,
-      health_score: a.health_score as number | null,
-      churn_risk_score: a.churn_risk_score as number | null,
-      expansion_score: a.expansion_score as number | null,
-      product_usage_score: a.product_usage_score as number | null,
-      created_at: a.created_at as string | null,
-    }))
+  const rows: SegmentAccountRow[] = (segmentAccounts ?? []).map((a: Record<string, unknown>): SegmentAccountRow => ({
+    stripe_customer_id: a.stripe_customer_id as string | null,
+    hubspot_company_id: a.hubspot_company_id as string | null,
+    plan_tier: a.plan_tier as string | null,
+    billing_interval: a.billing_interval as string | null,
+    mrr_cents: a.mrr_cents as number | null,
+    seat_count: a.seat_count as number | null,
+    seat_limit: a.seat_limit as number | null,
+    contract_end_date: a.contract_end_date as string | null,
+    health_score: a.health_score as number | null,
+    churn_risk_score: a.churn_risk_score as number | null,
+    expansion_score: a.expansion_score as number | null,
+    product_usage_score: a.product_usage_score as number | null,
+  }))
 
   const durationMs = Date.now() - startMs
 
-  // 7. BUILD CSV (with BOM for Excel FR)
+  // 7. BUILD CSV (with BOM for Excel compatibility)
   const csv = buildSegmentCsv(rows)
 
   logger.info('Segment export completed', {
     organization_id: orgId,
     segment,
-    total_accounts: (allAccounts ?? []).length,
-    filtered_accounts: rows.length,
+    segment_accounts_found: rows.length,
     duration_ms: durationMs,
   })
 
