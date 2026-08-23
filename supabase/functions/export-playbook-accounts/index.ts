@@ -304,7 +304,7 @@ Deno.serve(withSentry('export-playbook-accounts', async (req: Request): Promise<
   const firstAction = playbookActions.length > 0 ? playbookActions[0] : null
   const defaultSuggestedAction = firstAction
     ? formatActionType(firstAction.type, firstAction.config)
-    : 'Revue manuelle recommandee'
+    : 'Manual review recommended'
 
   // 7. BUILD ACCOUNT ROWS
   const accountRows: AccountRow[] = []
@@ -338,7 +338,7 @@ Deno.serve(withSentry('export-playbook-accounts', async (req: Request): Promise<
       stripe_customer_id: acc.stripe_customer_id,
       hubspot_company_id: acc.hubspot_company_id,
       plan_tier: acc.plan_tier,
-      mrr_euros: acc.mrr_cents / 100,
+      mrr_usd: acc.mrr_cents / 100,
       health_score: acc.health_score !== null ? Number(acc.health_score) : null,
       churn_risk_score: acc.churn_risk_score !== null ? Number(acc.churn_risk_score) : null,
       expansion_score: acc.expansion_score !== null ? Number(acc.expansion_score) : null,
@@ -375,7 +375,7 @@ Deno.serve(withSentry('export-playbook-accounts', async (req: Request): Promise<
   for (const row of sortedRows) {
     byPriority[row.priority]++
     if (row.priority === 'P0' || row.priority === 'P1') {
-      mrrAtRiskCents += Math.round(row.mrr_euros * 100)
+      mrrAtRiskCents += Math.round(row.mrr_usd * 100)
     }
   }
 
@@ -401,10 +401,10 @@ Deno.serve(withSentry('export-playbook-accounts', async (req: Request): Promise<
 
   // 11. SLACK NOTIFICATION (fire-and-forget)
   const slackMessage = [
-    `Export Playbook — ${playbook.title}`,
-    `${sortedRows.length} comptes exportes · MRR a risque : ${Math.round(mrrAtRiskCents / 100)}E`,
-    `Priorites : ${byPriority.P0} P0 · ${byPriority.P1} P1 · ${byPriority.P2} P2`,
-    `Declenche par : ${auth.userId}`,
+    `Playbook export — ${playbook.title}`,
+    `${sortedRows.length} accounts exported · MRR at risk: $${Math.round(mrrAtRiskCents / 100)}`,
+    `Priorities: ${byPriority.P0} P0 · ${byPriority.P1} P1 · ${byPriority.P2} P2`,
+    `Triggered by: ${auth.userId}`,
   ].join('\n')
 
   // Fire-and-forget — never block response on Slack

@@ -7,7 +7,7 @@ export interface AccountRow {
   stripe_customer_id: string
   hubspot_company_id: string | null
   plan_tier: string | null
-  mrr_euros: number
+  mrr_usd: number
   health_score: number | null
   churn_risk_score: number | null
   expansion_score: number | null
@@ -57,22 +57,22 @@ export function buildTriggerReason(signals: {
   const parts: string[] = []
 
   if (signals.hasUnpaidInvoice && signals.unpaidDays !== null) {
-    parts.push(`Invoice impayee depuis ${signals.unpaidDays}j`)
+    parts.push(`Unpaid invoice for ${signals.unpaidDays}d`)
   }
   if (signals.loginDecline || (signals.lastLoginDaysAgo !== null && signals.lastLoginDaysAgo > 14)) {
-    parts.push('Logins en baisse')
+    parts.push('Login activity declining')
   }
   if (signals.daysToRenewal !== null && signals.daysToRenewal <= 30) {
-    parts.push(`Renouvellement dans ${signals.daysToRenewal}j`)
+    parts.push(`Renews in ${signals.daysToRenewal}d`)
   }
   if (signals.churnRisk !== null && signals.churnRisk >= 70) {
-    parts.push(`Risque churn critique (${Math.round(signals.churnRisk)}/100)`)
+    parts.push(`Critical churn risk (${Math.round(signals.churnRisk)}/100)`)
   }
   if (signals.healthScore !== null && signals.healthScore < 40) {
-    parts.push(`Score sante faible (${Math.round(signals.healthScore)}/100)`)
+    parts.push(`Low health score (${Math.round(signals.healthScore)}/100)`)
   }
 
-  return parts.length > 0 ? parts.join(' · ') : 'Aucun signal actif'
+  return parts.length > 0 ? parts.join(' · ') : 'No active signal'
 }
 
 export function buildHubspotImportNote(
@@ -84,12 +84,12 @@ export function buildHubspotImportNote(
   const hs = healthScore !== null ? Math.round(healthScore) : 'N/A'
 
   if (priority === 'P0') {
-    return `Ce compte presente un risque critique de churn. Score sante : ${hs}/100. Priorite d'action : ${suggestedAction.toLowerCase()}.`
+    return `This account has a critical churn risk. Health score: ${hs}/100. Priority action: ${suggestedAction.toLowerCase()}.`
   }
   if (priority === 'P1') {
-    return `Ce compte necessite une attention rapide. Score sante : ${hs}/100. Action recommandee : ${suggestedAction.toLowerCase()}.`
+    return `This account needs prompt attention. Health score: ${hs}/100. Recommended action: ${suggestedAction.toLowerCase()}.`
   }
-  return `Compte sous surveillance. Score sante : ${hs}/100. Aucune action urgente requise.`
+  return `Account under watch. Health score: ${hs}/100. No urgent action required.`
 }
 
 export function sortAccounts(accounts: AccountRow[]): AccountRow[] {
@@ -98,13 +98,13 @@ export function sortAccounts(accounts: AccountRow[]): AccountRow[] {
     const pa = priorityOrder[a.priority] ?? 3
     const pb = priorityOrder[b.priority] ?? 3
     if (pa !== pb) return pa - pb
-    return (b.mrr_euros ?? 0) - (a.mrr_euros ?? 0)
+    return (b.mrr_usd ?? 0) - (a.mrr_usd ?? 0)
   })
 }
 
 export const CSV_COLUMNS = [
   'stripe_customer_id', 'hubspot_company_id', 'plan_tier',
-  'mrr_euros', 'health_score', 'churn_risk_score', 'expansion_score',
+  'mrr_usd', 'health_score', 'churn_risk_score', 'expansion_score',
   'segment', 'days_to_renewal', 'billing_interval',
   'trigger_reason', 'suggested_playbook', 'suggested_action', 'priority',
   'last_login_days_ago', 'open_ticket_count', 'nps_score',
@@ -129,13 +129,13 @@ export function buildCsv(accounts: AccountRow[]): string {
 
 export function formatActionType(type: string, config?: Record<string, unknown>): string {
   const labels: Record<string, string> = {
-    slack_notify: 'Notification Slack',
-    create_task: 'Creation de tache',
-    assign_owner: 'Assignation proprietaire',
-    update_tag: 'Mise a jour tag',
-    log_note: 'Ajout de note',
-    schedule_review: 'Planification revue',
-    flag_for_review: 'Signalement pour revue',
+    slack_notify: 'Slack notification',
+    create_task: 'Create task',
+    assign_owner: 'Assign owner',
+    update_tag: 'Update tag',
+    log_note: 'Add note',
+    schedule_review: 'Schedule review',
+    flag_for_review: 'Flag for review',
   }
   const label = labels[type] || type
   if (config?.title && typeof config.title === 'string') {
