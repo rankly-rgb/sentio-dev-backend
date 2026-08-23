@@ -303,6 +303,27 @@ async function prefetchScoringData(
     movements6moMap.set(row.account_id, list)
   }
 
+  // Fix (2026-08-20, cf. PARKING_LOT.md "churn_risk_band FAUX") : un échec
+  // silencieux de la requête subscriptions (timeout/contention DB — le genre
+  // de charge produite par la rafale de retries observée en logs le
+  // 2026-08-15) faisait auparavant retomber `subscriptionsMap` sur `[]` via
+  // `?? []`, indiscernable d'un compte réellement sans subscription connue.
+  // `isAccountChurned([])` retourne `false` dans les deux cas — un compte
+  // dont l'UNIQUE subscription est `canceled` se retrouvait donc silencieusement
+  // reclassé "non churné" (`churn_risk_band='low'`) au lieu de son état réel
+  // `'churned'`, sans jamais échouer visiblement. Throw explicite ici plutôt
+  // que de continuer avec des données partielles : le catch de l'appelant
+  // (workPromise) marque déjà l'org en échec via logger.fail() — aucune
+  // écriture n'a lieu sur ce batch, le prochain run réessaiera avec des
+  // données fraîches plutôt que d'écrire une classification silencieusement
+  // fausse. Les 5 requêtes sont vérifiées, pas seulement `subscriptionsResult`
+  // — même risque de fond, pas de traitement spécial pour une seule d'entre elles.
+  const fetchError =
+    invoices12moResult.error ?? movementsResult.error ?? subscriptionsResult.error ?? snapshot3moResult.error ?? snapshot30dResult.error
+  if (fetchError) {
+    throw new Error(`prefetchScoringData: query failed for batch (${accountIds.length} accounts): ${fetchError.message}`)
+  }
+
   const subscriptionsMap = new Map<string, SubscriptionInfo[]>()
   for (const row of (subscriptionsResult.data ?? [])) {
     const list = subscriptionsMap.get(row.account_id) ?? []
@@ -757,12 +778,30 @@ Deno.serve(withSentry('calculate-scores', async (req: Request): Promise<Response
       // pas de tuer une promesse en vol) — mais `logger.fail()` ci-dessous
       // écrit immédiatement un statut terminal, contrairement à l'état
       // `running` indéfini qui a rendu le hang invisible avant ce lot.
+      //
+      // Correctif (2026-08-20, cf. PARKING_LOT.md) : le commentaire original
+      // ci-dessus s'arrêtait à "logger.fail() écrit un statut terminal" sans
+      // traiter le vrai risque — le travail abandonné continue lui aussi
+      // d'ÉCRIRE (accountUpdateRows/historyRows) en arrière-plan après le
+      // timeout. Le verrou global `calculate-scores` (TTL 300s, ligne ~713)
+      // se libère dès que la boucle `for (org of orgs)` termine — ce qui
+      // peut arriver AVANT qu'un travail abandonné pour un org donné n'ait
+      // fini d'écrire, laissant une fenêtre où un run ultérieur (même org)
+      // et le travail abandonné du run précédent écrivent en parallèle, sans
+      // ordre garanti. `aborted` est vérifié à chaque frontière de batch et
+      // juste avant chaque écriture réelle — une fois positionné à `true`,
+      // le travail abandonné s'arrête d'écrire au prochain point de contrôle
+      // au lieu de continuer jusqu'à la fin de la pagination complète de l'org.
+      let aborted = false
       let timeoutHandle: number | undefined
       const timeoutPromise = new Promise<'timed_out'>((resolve) => {
-        timeoutHandle = setTimeout(() => resolve('timed_out'), ORG_SCORING_TIMEOUT_MS)
+        timeoutHandle = setTimeout(() => {
+          aborted = true
+          resolve('timed_out')
+        }, ORG_SCORING_TIMEOUT_MS)
       })
 
-      const workPromise = (async (): Promise<'done'> => {
+      const workPromise = (async (): Promise<'done' | 'aborted'> => {
       try {
         // Poids de scoring de l'org (S11) — fallback défaut produit si absent/non validé.
         // (Le modèle v3 n'a plus besoin du MRR max de l'org : aucune des 3
@@ -800,6 +839,15 @@ Deno.serve(withSentry('calculate-scores', async (req: Request): Promise<Response
         let batchCount = 0
 
         while (batchCount < MAX_BATCHES) {
+          if (aborted) {
+            console.error(JSON.stringify({
+              level: 'error',
+              function_name: 'calculate-scores',
+              organization_id: organizationId,
+              message: 'org timed out mid-run — stopping before starting another batch, no further writes for this org this run',
+            }))
+            return 'aborted'
+          }
           batchCount++
           const { data: batch, error: batchError } = await supabase
             .from('accounts')
@@ -1025,6 +1073,22 @@ Deno.serve(withSentry('calculate-scores', async (req: Request): Promise<Response
           // qu'après l'écriture réelle : sans ça, un batch rejeté serait
           // compté "scored" et déclencherait des webhooks sortants sur un
           // état jamais persisté.
+          //
+          // Garde d'abandon (2026-08-20) : vérifiée juste avant l'écriture
+          // réelle, pas seulement en tête de boucle — un batch dont le
+          // scoring (en mémoire, ci-dessus) a débordé le timeout doit encore
+          // pouvoir être abandonné avant d'écrire, plutôt que d'écrire un
+          // résultat déjà périmé par rapport à un run plus récent.
+          if (aborted) {
+            console.error(JSON.stringify({
+              level: 'error',
+              function_name: 'calculate-scores',
+              organization_id: organizationId,
+              message: `org timed out mid-batch — discarding this batch's ${accountUpdateRows.length} computed rows, no write`,
+            }))
+            return 'aborted'
+          }
+
           if (accountUpdateRows.length > 0) {
             const { error: accountsError } = await supabase
               .from('accounts')
@@ -1199,7 +1263,7 @@ Deno.serve(withSentry('calculate-scores', async (req: Request): Promise<Response
       if (raceOutcome === 'timed_out') {
         orgStatus = 'timed_out'
         errors++
-        await logger.fail(`Timed out after ${ORG_SCORING_TIMEOUT_MS}ms (P1 per-org isolation, 2026-08-13) — abandoned work may still complete in the background and its own logger.complete()/fail() call is a harmless late no-op against this already-terminal row.`)
+        await logger.fail(`Timed out after ${ORG_SCORING_TIMEOUT_MS}ms (P1 per-org isolation, 2026-08-13) — the abandoned work checks the same 'aborted' flag at its next batch/write boundary (2026-08-20 fix) and stops without writing further; its own logger.complete()/fail() call, if reached, is still a harmless late no-op against this already-terminal row.`)
         console.error(JSON.stringify({
           level: 'error',
           function_name: 'calculate-scores',

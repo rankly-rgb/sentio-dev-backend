@@ -259,6 +259,7 @@ async function syncCustomers(
   logger: DataSyncLogger,
   writeErrors: WriteError[],
   createdAfter?: number,
+  isAborted: () => boolean = () => false,
 ): Promise<{ newAccountsSkippedByQuota: number }> {
   const extraParams: Record<string, string> = {}
   if (createdAfter) extraParams['created[gt]'] = String(createdAfter)
@@ -310,6 +311,22 @@ async function syncCustomers(
     rows.push(row)
   }
 
+  // Garde d'abandon (2026-08-20, cf. PARKING_LOT.md) : même défaut de
+  // conception que calculate-scores/index.ts (commit 462bf74, 2026-08-13) —
+  // le `Promise.race`/timeout par org de l'appelant n'annule pas ce travail
+  // en vol, il continue silencieusement jusqu'à sa propre fin, écriture
+  // comprise, potentiellement en parallèle d'un run plus récent pour le même
+  // org. Vérifié juste avant l'écriture réelle, jamais avant (la pagination
+  // Stripe déjà en cours n'est pas interrompue — seul le risque d'écriture
+  // concurrente compte ici).
+  if (isAborted()) {
+    console.error(JSON.stringify({
+      level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
+      message: `org timed out — discarding ${rows.length} computed customer rows, no write`,
+    }))
+    return { newAccountsSkippedByQuota }
+  }
+
   const { processed, failed } = await batchUpsert(supabase, 'accounts', rows, 'organization_id,stripe_customer_id', writeErrors)
   logger.increment('records_processed', processed)
   logger.increment('accounts_processed', processed)
@@ -335,6 +352,7 @@ async function syncSubscriptions(
   logger: DataSyncLogger,
   writeErrors: WriteError[],
   restatementMode = false,
+  isAborted: () => boolean = () => false,
 ): Promise<{ anomalyDetected: boolean; billingProfile?: BillingProfileCounts; restatementAccountsCount?: number; subscriptionsOrphaned?: number; orgMajorityCurrency?: string | null }> {
   const extraParams: Record<string, string> = { status: 'all' }
 
@@ -541,6 +559,18 @@ async function syncSubscriptions(
     }))
   }
 
+  // Garde d'abandon (2026-08-20) — voir syncCustomers ci-dessus. Premier
+  // point d'écriture de cette fonction : un abandon ici saute aussi les
+  // écritures accounts/mrr_restatements qui suivent plus bas, cohérent avec
+  // "aucune écriture supplémentaire pour cet org sur ce run une fois abandonné".
+  if (isAborted()) {
+    console.error(JSON.stringify({
+      level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
+      message: `org timed out — discarding ${subRows.length} computed subscription rows, no write`,
+    }))
+    return { anomalyDetected: false, billingProfile: billingProfileCounts, subscriptionsOrphaned }
+  }
+
   // Phase 1 : batch upsert subscriptions
   const { processed: subOk, failed: subFail } = await batchUpsert(supabase, 'subscriptions', subRows, 'stripe_sub_id', writeErrors)
   logger.increment('records_processed', subOk)
@@ -734,6 +764,15 @@ async function syncSubscriptions(
       }
     }
 
+    // Garde d'abandon (2026-08-20) — voir syncCustomers ci-dessus.
+    if (isAborted()) {
+      console.error(JSON.stringify({
+        level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
+        message: `org timed out mid-restatement — discarding ${restatementRows.length} restatement rows and ${accountUpdateRows.length} account rows, no write`,
+      }))
+      return { anomalyDetected: false, billingProfile: billingProfileCounts, subscriptionsOrphaned, orgMajorityCurrency }
+    }
+
     if (restatementRows.length > 0) {
       const { failed: restFail } = await batchUpsert(supabase, 'mrr_restatements', restatementRows, 'account_id,reason', writeErrors)
       if (restFail > 0) {
@@ -753,6 +792,17 @@ async function syncSubscriptions(
     }))
 
     return { anomalyDetected: false, billingProfile: billingProfileCounts, restatementAccountsCount: restatementRows.length, subscriptionsOrphaned, orgMajorityCurrency }
+  }
+
+  // Garde d'abandon (2026-08-20) — voir syncCustomers ci-dessus pour le
+  // raisonnement complet. mrr_cents/mrr_status/is_delinquent sont exactement
+  // les champs dont l'écriture concurrente a motivé ce correctif.
+  if (isAborted()) {
+    console.error(JSON.stringify({
+      level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
+      message: `org timed out — discarding ${accountUpdateRows.length} computed account MRR rows, no write`,
+    }))
+    return { anomalyDetected: false, billingProfile: billingProfileCounts, subscriptionsOrphaned, orgMajorityCurrency }
   }
 
   const { failed: acctFail } = await batchUpsert(supabase, 'accounts', accountUpdateRows, 'id', writeErrors)
@@ -835,6 +885,7 @@ async function syncInvoices(
   writeErrors: WriteError[],
   createdAfter?: number,
   orgMajorityCurrency: string | null = null,
+  isAborted: () => boolean = () => false,
 ): Promise<{ invoiceOnlyAccountsCount: number; invoicesOrphaned: number; invoiceOnlyMrrEstimated: number }> {
   const extraParams: Record<string, string> = {}
   if (createdAfter) extraParams['created[gt]'] = String(createdAfter)
@@ -886,6 +937,15 @@ async function syncInvoices(
       due_date: invoice.due_date ? new Date(invoice.due_date * 1000).toISOString().split('T')[0] : null,
       paid_at: paidAt,
     })
+  }
+
+  // Garde d'abandon (2026-08-20) — voir syncCustomers ci-dessus.
+  if (isAborted()) {
+    console.error(JSON.stringify({
+      level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
+      message: `org timed out — discarding ${invoiceRows.length} computed invoice rows, no write`,
+    }))
+    return { invoiceOnlyAccountsCount: 0, invoicesOrphaned: orphaned, invoiceOnlyMrrEstimated: 0 }
   }
 
   const { processed, failed } = await batchUpsert(supabase, 'invoices', invoiceRows, 'stripe_invoice_id', writeErrors)
@@ -966,7 +1026,15 @@ async function syncInvoices(
         })
       }
 
-      if (mrrEstimateRows.length > 0) {
+      // Garde d'abandon (2026-08-20) — voir syncCustomers ci-dessus. Écrit
+      // pas, `invoiceOnlyMrrEstimated` reste à 0 : reflète fidèlement qu'aucun
+      // compte n'a été mis à jour ce run, pas un compte fabriqué.
+      if (mrrEstimateRows.length > 0 && isAborted()) {
+        console.error(JSON.stringify({
+          level: 'error', function_name: 'sync-stripe', organization_id: organizationId,
+          message: `org timed out — discarding ${mrrEstimateRows.length} computed invoice-only MRR estimate rows, no write`,
+        }))
+      } else if (mrrEstimateRows.length > 0) {
         const { failed: estimateFailed } = await batchUpsert(supabase, 'accounts', mrrEstimateRows, 'id', writeErrors)
         logger.increment('records_failed', estimateFailed)
         invoiceOnlyMrrEstimated = mrrEstimateRows.length - currencyMismatchCount
@@ -1239,14 +1307,25 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
   // Généreux (sous le TTL du lock, 300s, et sous les 280s laissés par le
   // dispatcher) mais fini.
   const SYNC_STEPS_TIMEOUT_MS = 240_000
+  // Garde d'abandon (2026-08-20, cf. PARKING_LOT.md "churn_risk_band FAUX")
+  // — même défaut de conception que calculate-scores/index.ts (90s) : le
+  // commentaire ci-dessus notait déjà que le travail abandonné "peut encore
+  // se terminer en arrière-plan" sans jamais l'empêcher d'écrire. `aborted`
+  // est vérifié par syncCustomers/syncSubscriptions/syncInvoices juste avant
+  // chacune de leurs écritures — un batchUpsert périmé est sauté plutôt que
+  // silencieusement effectué après que ce run a déjà été marqué en échec.
+  let aborted = false
   let syncTimeoutHandle: number | undefined
   const syncTimeoutPromise = new Promise<'timed_out'>((resolve) => {
-    syncTimeoutHandle = setTimeout(() => resolve('timed_out'), SYNC_STEPS_TIMEOUT_MS)
+    syncTimeoutHandle = setTimeout(() => {
+      aborted = true
+      resolve('timed_out')
+    }, SYNC_STEPS_TIMEOUT_MS)
   })
   const syncWorkPromise = (async () => {
-    const { newAccountsSkippedByQuota } = await syncCustomers(supabase, organizationId, apiKey, logger, writeErrors, createdAfter)
-    const { anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned, orgMajorityCurrency } = await syncSubscriptions(supabase, organizationId, apiKey, logger, writeErrors, restatementMode)
-    const { invoiceOnlyAccountsCount, invoicesOrphaned, invoiceOnlyMrrEstimated } = await syncInvoices(supabase, organizationId, apiKey, logger, writeErrors, createdAfter, orgMajorityCurrency ?? null)
+    const { newAccountsSkippedByQuota } = await syncCustomers(supabase, organizationId, apiKey, logger, writeErrors, createdAfter, () => aborted)
+    const { anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned, orgMajorityCurrency } = await syncSubscriptions(supabase, organizationId, apiKey, logger, writeErrors, restatementMode, () => aborted)
+    const { invoiceOnlyAccountsCount, invoicesOrphaned, invoiceOnlyMrrEstimated } = await syncInvoices(supabase, organizationId, apiKey, logger, writeErrors, createdAfter, orgMajorityCurrency ?? null, () => aborted)
     return { newAccountsSkippedByQuota, anomalyDetected, billingProfile, restatementAccountsCount, subscriptionsOrphaned, invoiceOnlyAccountsCount, invoicesOrphaned, invoiceOnlyMrrEstimated, outcome: 'done' as const }
   })()
 
@@ -1254,7 +1333,7 @@ Deno.serve(withSentry('sync-stripe', async (req: Request): Promise<Response> => 
     const syncRaceResult = await Promise.race([syncWorkPromise, syncTimeoutPromise])
     clearTimeout(syncTimeoutHandle)
     if (syncRaceResult === 'timed_out') {
-      await logger.fail(`Timed out after ${SYNC_STEPS_TIMEOUT_MS}ms (P1 per-org isolation, 2026-08-13) — abandoned Stripe sync work may still complete in the background; this row's terminal status makes the stall visible immediately instead of via self-monitor's 15-minute sweep.`, 'timeout')
+      await logger.fail(`Timed out after ${SYNC_STEPS_TIMEOUT_MS}ms (P1 per-org isolation, 2026-08-13) — the abandoned work checks the same 'aborted' flag at its next write boundary (2026-08-20 fix) and stops without writing further; this row's terminal status makes the stall visible immediately instead of via self-monitor's 15-minute sweep.`, 'timeout')
       console.error(JSON.stringify({ level: 'error', function_name: 'sync-stripe', organization_id: organizationId, message: `org timed out after ${SYNC_STEPS_TIMEOUT_MS}ms — marked failed/timeout, releasing lock` }))
       return errorResponse(`Sync timed out after ${SYNC_STEPS_TIMEOUT_MS}ms for this organization`, 504)
     }

@@ -395,6 +395,39 @@ jobs:
           echo "::notice::a18_trial_gated_orgs — $GATED_COUNT organization(s) currently plan_type='free' with an expired trial_ends_at (will receive 402 from every trial-gated endpoint). This count is informational, not a deploy blocker — see a18's comment in this workflow for why."
           echo "a18: $GATED_COUNT org(s) currently trial-gated." >> "$GITHUB_STEP_SUMMARY"
 
+          # a19 — 2026-08-20 (PARKING_LOT.md "churn_risk_band FAUX") : an
+          # account whose EVERY known subscription is 'canceled' must always
+          # read churn_risk_band='churned' (D1, 2026-08-02) — never a live
+          # band computed from its historical signals. This is exactly the
+          # regression this assertion would have caught on 2026-08-15: commit
+          # 462bf74 (per-org Promise.race timeout isolation, both here and in
+          # sync-stripe/index.ts) let a timed-out org's abandoned scoring work
+          # keep writing accounts/score_history after its run was already
+          # marked failed, and a separate, unguarded fetch-error fallback in
+          # prefetchScoringData (subscriptionsResult.error silently defaulting
+          # to []) reclassified 218 fully-canceled accounts back to a live
+          # band starting 2026-08-15. The fix (this same PR) guards every
+          # write boundary behind the per-org 'aborted' flag in BOTH
+          # calculate-scores/index.ts and sync-stripe/index.ts, and throws
+          # instead of silently defaulting on a prefetch query failure.
+          #
+          # NULL band is deliberately excluded (not a violation) — an account
+          # with fully-canceled subscriptions that has simply never been
+          # scored yet is a different, unrelated state from one scored WRONG.
+          #
+          # mode=hard: this PR's own targeted backfill (scoped to exactly the
+          # 217 accounts this query found — see PARKING_LOT.md) ran before
+          # merge and brought this to 0, verified live via execute_sql
+          # (accounts.churn_risk_band + segment_memberships both corrected,
+          # not just the accounts row). Unlike a9/a12, not left pending —
+          # this is the assertion that would have caught the 2026-08-15
+          # regression the day it landed, so it ships hard from the start.
+          run_query "a19_fully_canceled_account_not_churned_band" "hard" "
+            select count(*) as n from accounts a
+            where a.churn_risk_band is not null and a.churn_risk_band != 'churned'
+              and exists (select 1 from subscriptions s where s.account_id = a.id)
+              and not exists (select 1 from subscriptions s where s.account_id = a.id and s.status != 'canceled');"
+
           if [ "${FAIL_HARD:-0}" = "1" ]; then
             echo "::error::One or more hard data-truth assertions failed — see above."
             exit 1
