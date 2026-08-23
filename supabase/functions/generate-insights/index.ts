@@ -26,6 +26,14 @@ import { withSentry } from '../_shared/sentry.ts'
 const LOCK_TTL_SECONDS = 300
 const BATCH_SIZE = 500
 const MAX_BATCHES = 200
+// Per-org isolation timeout (2026-08-23) — this cron never got the P1 fix
+// (2026-08-13, PR #61) that calculate-scores/sync-stripe received: nothing
+// here stops one slow org's sequential per-account syncInsights() calls from
+// running long enough to push the whole cron invocation past self-monitor's
+// 15-minute external sweep. Same value and same cooperative-check design
+// (issue #65 — a passive setTimeout/Promise.race can be starved by a long
+// chain of awaited microtasks and never fire) as calculate-scores.
+const ORG_INSIGHTS_TIMEOUT_MS = 90_000
 
 // ── Types ────────────────────────────────────────────────────
 interface AccountRow {
@@ -301,11 +309,13 @@ Deno.serve(withSentry('generate-insights', async (req: Request): Promise<Respons
     insights_resolved: number
     accounts_evaluated: number
     errors: number
+    timed_out?: boolean
   }> = []
 
   try {
     for (const org of orgs) {
       const organizationId = org.id
+      const orgStartedAt = Date.now()
       // Per-org lock: allows parallel calls from calculate-scores (one per org)
       const lockKey = `generate-insights:${organizationId}`
       const lockAcquired = await acquireCronLock(supabase, lockKey, LOCK_TTL_SECONDS)
@@ -318,6 +328,7 @@ Deno.serve(withSentry('generate-insights', async (req: Request): Promise<Respons
       let insightsResolved = 0
       let accountsEvaluated = 0
       let errors = 0
+      let timedOut = false
 
       const logger = new DataSyncLogger({
         supabase,
@@ -333,6 +344,13 @@ Deno.serve(withSentry('generate-insights', async (req: Request): Promise<Respons
         let batchCount = 0
 
         while (batchCount < MAX_BATCHES) {
+          // Per-org isolation timeout (2026-08-23, see ORG_INSIGHTS_TIMEOUT_MS
+          // above) — checked inline before starting another batch, cooperative
+          // rather than a passive timer (issue #65).
+          if (Date.now() - orgStartedAt > ORG_INSIGHTS_TIMEOUT_MS) {
+            timedOut = true
+            break
+          }
           batchCount++
 
           const { data: batch, error: batchError } = await supabase
@@ -363,6 +381,14 @@ Deno.serve(withSentry('generate-insights', async (req: Request): Promise<Respons
 
           // Evaluate rules for each account
           for (const account of batch as AccountRow[]) {
+            // Same cooperative deadline check as the batch-loop entry above —
+            // this per-account loop is where the sequential await time (one
+            // syncInsights() DB round-trip per account) actually accumulates,
+            // so a batch already in flight can itself cross the deadline.
+            if (Date.now() - orgStartedAt > ORG_INSIGHTS_TIMEOUT_MS) {
+              timedOut = true
+              break
+            }
             try {
               const invoiceData = invoiceMap.get(account.id)
               const usagePrevious = usageHistoryMap.get(account.id)
@@ -413,16 +439,28 @@ Deno.serve(withSentry('generate-insights', async (req: Request): Promise<Respons
             }
           }
 
+          if (timedOut) break
           if (batch.length < BATCH_SIZE) break
           batchOffset += batch.length
         }
 
-        await logger.complete({
-          insights_created: insightsCreated,
-          insights_resolved: insightsResolved,
-          accounts_evaluated: accountsEvaluated,
-          errors,
-        })
+        if (timedOut) {
+          errors++
+          await logger.fail(`Timed out after ${ORG_INSIGHTS_TIMEOUT_MS}ms — per-org isolation (2026-08-23, mirrors P1/issue #65 for calculate-scores/sync-stripe), stopped before this org could block every org after it.`)
+          console.error(JSON.stringify({
+            level: 'error',
+            function_name: 'generate-insights',
+            organization_id: organizationId,
+            message: `org timed out after ${ORG_INSIGHTS_TIMEOUT_MS}ms — marked failed, loop continues`,
+          }))
+        } else {
+          await logger.complete({
+            insights_created: insightsCreated,
+            insights_resolved: insightsResolved,
+            accounts_evaluated: accountsEvaluated,
+            errors,
+          })
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         try { await logger.fail(msg) } catch { /* logger failure must not crash */ }
@@ -435,6 +473,7 @@ Deno.serve(withSentry('generate-insights', async (req: Request): Promise<Respons
         insights_resolved: insightsResolved,
         accounts_evaluated: accountsEvaluated,
         errors,
+        timed_out: timedOut,
       })
 
       try {
@@ -444,9 +483,11 @@ Deno.serve(withSentry('generate-insights', async (req: Request): Promise<Respons
       }
     }
 
+    const timedOutCount = results.filter((r) => r.timed_out).length
     return jsonResponse({
       success: true,
       organizations_processed: orgs.length,
+      organizations_timed_out: timedOutCount, // never silent — mirrors calculate-scores (P1, 2026-08-13)
       results,
     })
   } catch (err) {

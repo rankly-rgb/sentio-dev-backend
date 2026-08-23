@@ -109,6 +109,56 @@ function resolvePrefetchFetchError(results: {
 
 const OK: QueryResult = { error: null }
 
+// Mirror de la garde d'abandon COOPÉRATIVE ajoutée le 2026-08-23 (issue #65) —
+// le Promise.race/setTimeout passif ci-dessus peut être affamé par une chaîne
+// de microtasks (awaits enchaînés sans jamais rendre la main à l'event loop
+// assez longtemps pour que le timer soit servi) : confirmé en direct dans
+// l'issue, un org observé toujours 'running' à 3.7x ORG_SCORING_TIMEOUT_MS.
+// Ce check inline (`Date.now() - orgStartedAt > timeout`) tourne sur la même
+// chaîne pilotée par de vrais awaits réseau que le travail lui-même — il ne
+// peut donc pas être affamé de la même façon.
+function isOrgOverBudget(orgStartedAt: number, now: number, timeoutMs: number): boolean {
+  return now - orgStartedAt > timeoutMs
+}
+
+describe('calculate-scores — garde d\'abandon coopérative (issue #65)', () => {
+  const TIMEOUT_MS = 90_000
+
+  it('sous le délai : pas encore en dépassement', () => {
+    expect(isOrgOverBudget(0, 89_999, TIMEOUT_MS)).toBe(false)
+  })
+
+  it('exactement au délai : pas encore en dépassement (strictement supérieur requis)', () => {
+    expect(isOrgOverBudget(0, 90_000, TIMEOUT_MS)).toBe(false)
+  })
+
+  it('un ms au-delà : en dépassement', () => {
+    expect(isOrgOverBudget(0, 90_001, TIMEOUT_MS)).toBe(true)
+  })
+
+  it('le check coopératif détecte le dépassement même quand le timer passif n\'a jamais tripé (le bug exact de l\'issue #65)', () => {
+    // Simule le scénario vérifié en direct dans #65 : `aborted` ne passe
+    // JAMAIS à true via le callback setTimeout (timer affamé) — seul le
+    // check coopératif, réévalué à chaque frontière de batch, doit pouvoir
+    // arrêter la boucle.
+    let aborted = false
+    const orgStartedAt = 0
+    const batchStartTimes = [10_000, 95_000, 180_000] // 3e batch bien après le timeout
+    const batchesStarted: number[] = []
+
+    for (const now of batchStartTimes) {
+      if (!aborted && isOrgOverBudget(orgStartedAt, now, TIMEOUT_MS)) {
+        aborted = true // posé par le check coopératif, PAS par le setTimeout
+      }
+      if (aborted) break
+      batchesStarted.push(now)
+    }
+
+    expect(aborted).toBe(true)
+    expect(batchesStarted).toEqual([10_000]) // seul le 1er batch (sous le délai) démarre
+  })
+})
+
 describe('calculate-scores — prefetchScoringData, garde fetch-error', () => {
   it('les 5 requêtes réussissent : aucune erreur, le prefetch continue normalement', () => {
     expect(
