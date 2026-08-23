@@ -839,7 +839,22 @@ Deno.serve(withSentry('calculate-scores', async (req: Request): Promise<Response
         let batchCount = 0
 
         while (batchCount < MAX_BATCHES) {
+          // Cooperative check (issue #65, 2026-08-23) — the passive setTimeout
+          // below can be starved by a long chain of back-to-back awaited
+          // microtasks and never fire: confirmed live, an org observed still
+          // 'running' at 3.7x ORG_SCORING_TIMEOUT_MS with the timer never
+          // having tripped. This check runs inline on the same await-driven
+          // chain as the work itself (right after the previous batch's real
+          // I/O), so it can't be starved the same way. The setTimeout/
+          // Promise.race below stays as a backstop for the case where the
+          // loop is never reached at all.
+          if (!aborted && Date.now() - orgStartedAt > ORG_SCORING_TIMEOUT_MS) {
+            aborted = true
+          }
           if (aborted) {
+            orgStatus = 'timed_out'
+            errors++
+            await logger.fail(`Timed out after ${ORG_SCORING_TIMEOUT_MS}ms, caught by the cooperative in-loop check (issue #65) rather than the passive setTimeout race.`)
             console.error(JSON.stringify({
               level: 'error',
               function_name: 'calculate-scores',
@@ -1079,7 +1094,16 @@ Deno.serve(withSentry('calculate-scores', async (req: Request): Promise<Response
           // scoring (en mémoire, ci-dessus) a débordé le timeout doit encore
           // pouvoir être abandonné avant d'écrire, plutôt que d'écrire un
           // résultat déjà périmé par rapport à un run plus récent.
+          // Cooperative check (issue #65) — same inline deadline check as the
+          // batch-loop entry above, evaluated again here since a single
+          // batch's in-memory scoring pass can itself cross the deadline.
+          if (!aborted && Date.now() - orgStartedAt > ORG_SCORING_TIMEOUT_MS) {
+            aborted = true
+          }
           if (aborted) {
+            orgStatus = 'timed_out'
+            errors++
+            await logger.fail(`Timed out after ${ORG_SCORING_TIMEOUT_MS}ms, caught by the cooperative in-loop check (issue #65) rather than the passive setTimeout race.`)
             console.error(JSON.stringify({
               level: 'error',
               function_name: 'calculate-scores',
