@@ -208,6 +208,27 @@ interface SeatMapping {
   unlimited_seats: boolean
 }
 
+// ── Chunk size for prefetchScoringData's .in('account_id', …) queries ──────
+// Découvert 2026-08-23 (org "test", 432 comptes, re-scoring post-restatement) :
+// un seul appel `.in('account_id', accountIds)` avec les 432 ids de
+// SCORING_BATCH_SIZE échoue de façon reproductible (2 tentatives identiques,
+// pas un flake) — "http2 error: stream error detected: unspecific protocol
+// error detected" sur la requête invoices, l'URL générée dépassant une
+// limite gérée par la couche HTTP/2 entre l'Edge Function et PostgREST.
+// Contrairement à DB_BATCH_SIZE (sync-stripe, écritures POST — le corps
+// n'est pas affecté par cette limite), ceci chunke des lectures GET dont la
+// taille de requête croît avec accountIds.length. Voir PARKING_LOT.md,
+// entrée "calculate-scores échoue systématiquement sur un org à 432 comptes".
+const PREFETCH_CHUNK_SIZE = 150
+
+function chunkAccountIds(accountIds: string[]): string[][] {
+  const chunks: string[][] = []
+  for (let i = 0; i < accountIds.length; i += PREFETCH_CHUNK_SIZE) {
+    chunks.push(accountIds.slice(i, i + PREFETCH_CHUNK_SIZE))
+  }
+  return chunks
+}
+
 // ── Pre-fetch scoring data for a batch of accounts (parallel bulk queries instead of N+1) ──
 async function prefetchScoringData(
   supabase: SupabaseClient,
@@ -234,46 +255,77 @@ async function prefetchScoringData(
   const snapshot30dStart = new Date(now.getTime() - 33 * 86400000).toISOString().split('T')[0]
   const snapshot30dEnd = new Date(now.getTime() - 27 * 86400000).toISOString().split('T')[0]
 
-  const [invoices12moResult, movementsResult, subscriptionsResult, snapshot3moResult, snapshot30dResult] = await Promise.all([
-    supabase
-      .from('invoices')
-      .select('account_id, status, due_date, paid_at, invoice_date, amount_cents')
-      .in('account_id', accountIds)
-      .gte('invoice_date', twelveMonthsAgo)
-      .limit(50000),
-    supabase
-      .from('mrr_movements')
-      .select('account_id, movement_type, amount_cents, movement_date')
-      .in('account_id', accountIds)
-      .gte('movement_date', sixMonthsAgo)
-      .limit(50000),
-    supabase
-      .from('subscriptions')
-      .select('account_id, status, stripe_price_id')
-      .in('account_id', accountIds)
-      .limit(50000),
-    supabase
-      .from('score_history')
-      .select('account_id, mrr_cents, snapshot_date')
-      .in('account_id', accountIds)
-      .gte('snapshot_date', snapshot3moStart)
-      .lte('snapshot_date', snapshot3moEnd)
-      .order('snapshot_date', { ascending: true }),
-    supabase
-      .from('score_history')
-      .select('account_id, health_score, snapshot_date')
-      .in('account_id', accountIds)
-      .gte('snapshot_date', snapshot30dStart)
-      .lte('snapshot_date', snapshot30dEnd)
-      .order('snapshot_date', { ascending: true }),
-  ])
+  // Chunké par accountIds (jamais par plage de dates) : chaque compte
+  // n'apparaît que dans un seul chunk, donc les lignes d'un même account_id
+  // restent groupées dans le même sous-résultat — l'ordre ascending de
+  // snapshot_date à l'intérieur d'un compte est préservé par la fusion
+  // ci-dessous exactement comme si la requête n'avait jamais été découpée.
+  const idChunks = chunkAccountIds(accountIds)
+
+  const chunkResults = await Promise.all(
+    idChunks.map((chunkIds) =>
+      Promise.all([
+        supabase
+          .from('invoices')
+          .select('account_id, status, due_date, paid_at, invoice_date, amount_cents')
+          .in('account_id', chunkIds)
+          .gte('invoice_date', twelveMonthsAgo)
+          .limit(50000),
+        supabase
+          .from('mrr_movements')
+          .select('account_id, movement_type, amount_cents, movement_date')
+          .in('account_id', chunkIds)
+          .gte('movement_date', sixMonthsAgo)
+          .limit(50000),
+        supabase
+          .from('subscriptions')
+          .select('account_id, status, stripe_price_id')
+          .in('account_id', chunkIds)
+          .limit(50000),
+        supabase
+          .from('score_history')
+          .select('account_id, mrr_cents, snapshot_date')
+          .in('account_id', chunkIds)
+          .gte('snapshot_date', snapshot3moStart)
+          .lte('snapshot_date', snapshot3moEnd)
+          .order('snapshot_date', { ascending: true }),
+        supabase
+          .from('score_history')
+          .select('account_id, health_score, snapshot_date')
+          .in('account_id', chunkIds)
+          .gte('snapshot_date', snapshot30dStart)
+          .lte('snapshot_date', snapshot30dEnd)
+          .order('snapshot_date', { ascending: true }),
+      ]),
+    ),
+  )
+
+  const chunkFetchError = chunkResults
+    .flatMap(([invoicesRes, movementsRes, subscriptionsRes, snapshot3moRes, snapshot30dRes]) => [
+      invoicesRes.error,
+      movementsRes.error,
+      subscriptionsRes.error,
+      snapshot3moRes.error,
+      snapshot30dRes.error,
+    ])
+    .find((err) => err != null)
+
+  if (chunkFetchError) {
+    throw new Error(`prefetchScoringData: query failed for batch (${accountIds.length} accounts): ${chunkFetchError.message}`)
+  }
+
+  const invoices12moRows = chunkResults.flatMap(([invoicesRes]) => invoicesRes.data ?? [])
+  const movementsRows = chunkResults.flatMap(([, movementsRes]) => movementsRes.data ?? [])
+  const subscriptionsRows = chunkResults.flatMap(([, , subscriptionsRes]) => subscriptionsRes.data ?? [])
+  const snapshot3moRows = chunkResults.flatMap(([, , , snapshot3moRes]) => snapshot3moRes.data ?? [])
+  const snapshot30dRows = chunkResults.flatMap(([, , , , snapshot30dRes]) => snapshot30dRes.data ?? [])
 
   const invoices90dMap = new Map<string, InvoiceRecord[]>()
   const invoices12moMap = new Map<string, InvoiceRecord[]>()
   const overdueCountMap = new Map<string, number>()
   const overdueAmountMap = new Map<string, number>()
 
-  for (const row of (invoices12moResult.data ?? [])) {
+  for (const row of invoices12moRows) {
     const rec: InvoiceRecord = {
       status: row.status,
       due_date: row.due_date,
@@ -297,7 +349,7 @@ async function prefetchScoringData(
   }
 
   const movements6moMap = new Map<string, MrrMovementRecord[]>()
-  for (const row of (movementsResult.data ?? [])) {
+  for (const row of movementsRows) {
     const list = movements6moMap.get(row.account_id) ?? []
     list.push({ movement_type: row.movement_type, amount_cents: row.amount_cents, movement_date: row.movement_date })
     movements6moMap.set(row.account_id, list)
@@ -311,21 +363,17 @@ async function prefetchScoringData(
   // `isAccountChurned([])` retourne `false` dans les deux cas — un compte
   // dont l'UNIQUE subscription est `canceled` se retrouvait donc silencieusement
   // reclassé "non churné" (`churn_risk_band='low'`) au lieu de son état réel
-  // `'churned'`, sans jamais échouer visiblement. Throw explicite ici plutôt
+  // `'churned'`, sans jamais échouer visiblement. Throw explicite (déjà fait
+  // plus haut, `chunkFetchError`, avant la construction de ces maps) plutôt
   // que de continuer avec des données partielles : le catch de l'appelant
   // (workPromise) marque déjà l'org en échec via logger.fail() — aucune
   // écriture n'a lieu sur ce batch, le prochain run réessaiera avec des
   // données fraîches plutôt que d'écrire une classification silencieusement
-  // fausse. Les 5 requêtes sont vérifiées, pas seulement `subscriptionsResult`
-  // — même risque de fond, pas de traitement spécial pour une seule d'entre elles.
-  const fetchError =
-    invoices12moResult.error ?? movementsResult.error ?? subscriptionsResult.error ?? snapshot3moResult.error ?? snapshot30dResult.error
-  if (fetchError) {
-    throw new Error(`prefetchScoringData: query failed for batch (${accountIds.length} accounts): ${fetchError.message}`)
-  }
-
+  // fausse. Les 5 requêtes sont vérifiées par chunk, pas seulement celle des
+  // subscriptions — même risque de fond, pas de traitement spécial pour une
+  // seule d'entre elles.
   const subscriptionsMap = new Map<string, SubscriptionInfo[]>()
-  for (const row of (subscriptionsResult.data ?? [])) {
+  for (const row of subscriptionsRows) {
     const list = subscriptionsMap.get(row.account_id) ?? []
     list.push({ status: row.status, stripe_price_id: row.stripe_price_id })
     subscriptionsMap.set(row.account_id, list)
@@ -333,7 +381,7 @@ async function prefetchScoringData(
 
   // Premier snapshot dans la fenêtre 83-97j par compte = "MRR il y a 3 mois".
   const mrr3moAgoMap = new Map<string, number>()
-  for (const row of (snapshot3moResult.data ?? [])) {
+  for (const row of snapshot3moRows) {
     if (!mrr3moAgoMap.has(row.account_id) && row.mrr_cents !== null) {
       mrr3moAgoMap.set(row.account_id, row.mrr_cents)
     }
@@ -341,7 +389,7 @@ async function prefetchScoringData(
 
   // Premier snapshot dans la fenêtre 27-33j par compte = "health_score il y a 30 jours" (S8 trend_30d).
   const healthScore30dAgoMap = new Map<string, number>()
-  for (const row of (snapshot30dResult.data ?? [])) {
+  for (const row of snapshot30dRows) {
     if (!healthScore30dAgoMap.has(row.account_id) && row.health_score !== null) {
       healthScore30dAgoMap.set(row.account_id, row.health_score)
     }
