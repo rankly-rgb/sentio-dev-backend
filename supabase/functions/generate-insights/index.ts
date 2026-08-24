@@ -35,6 +35,38 @@ const MAX_BATCHES = 200
 // chain of awaited microtasks and never fire) as calculate-scores.
 const ORG_INSIGHTS_TIMEOUT_MS = 90_000
 
+// ── Defensive per-call DB timeout (2026-08-24) ──────────────────────────
+// Org f2bf45aa (422 comptes) a dû être auto-failed par self-monitor après
+// 27m48s malgré ORG_INSIGHTS_TIMEOUT_MS ci-dessus, déjà live à ce moment-là
+// — root cause non confirmée directement (function_logs indisponible au
+// moment du diagnostic), mais la garde coopérative ne peut arrêter la
+// boucle qu'ENTRE deux `await`, jamais préempter un seul appel bloqué. Tout
+// appel Supabase ci-dessous est désormais borné, pour qu'un round-trip DB
+// anormalement lent devienne une erreur normale (capturée par le
+// try/catch existant, compte ou org suivant) plutôt qu'un blocage jusqu'au
+// balayage externe de self-monitor (15 min). Même ordre de grandeur que la
+// convention `fetchWithTimeout` pour les appels HTTP externes (CLAUDE.md,
+// "Appels externes : fetchWithTimeout(8s)").
+const DB_QUERY_TIMEOUT_MS = 10_000
+
+function withTimeout<T>(promise: PromiseLike<T>, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${DB_QUERY_TIMEOUT_MS}ms`))
+    }, DB_QUERY_TIMEOUT_MS)
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
+}
+
 // ── Types ────────────────────────────────────────────────────
 interface AccountRow {
   id: string
@@ -63,21 +95,27 @@ async function prefetchInsightData(
 
   const [invoiceResult, usageHistoryResult] = await Promise.all([
     // Factures impayées avec date la plus ancienne
-    supabase
-      .from('invoices')
-      .select('account_id, due_date')
-      .in('account_id', accountIds)
-      .in('status', ['open', 'uncollectible'])
-      .order('due_date', { ascending: true })
-      .limit(5000),
+    withTimeout(
+      supabase
+        .from('invoices')
+        .select('account_id, due_date')
+        .in('account_id', accountIds)
+        .in('status', ['open', 'uncollectible'])
+        .order('due_date', { ascending: true })
+        .limit(5000),
+      'prefetchInsightData: invoices query',
+    ),
     // Score usage d'il y a 14 jours (pour détecter usage_drop)
-    supabase
-      .from('score_history')
-      .select('account_id, product_usage_score, snapshot_date')
-      .in('account_id', accountIds)
-      .lte('snapshot_date', fourteenDaysAgo)
-      .order('snapshot_date', { ascending: false })
-      .limit(5000),
+    withTimeout(
+      supabase
+        .from('score_history')
+        .select('account_id, product_usage_score, snapshot_date')
+        .in('account_id', accountIds)
+        .lte('snapshot_date', fourteenDaysAgo)
+        .order('snapshot_date', { ascending: false })
+        .limit(5000),
+      'prefetchInsightData: usage history query',
+    ),
   ])
 
   // Build invoice map (oldest overdue per account)
@@ -162,12 +200,15 @@ async function syncInsights(
   const activeTypes = new Set(candidates.map((c) => c.insight_type))
 
   // Fetch existing active insights for this account
-  const { data: existingInsights } = await supabase
-    .from('ai_insights')
-    .select('id, insight_type')
-    .eq('organization_id', organizationId)
-    .eq('account_id', accountId)
-    .eq('status', 'active')
+  const { data: existingInsights } = await withTimeout(
+    supabase
+      .from('ai_insights')
+      .select('id, insight_type')
+      .eq('organization_id', organizationId)
+      .eq('account_id', accountId)
+      .eq('status', 'active'),
+    `syncInsights: fetch existing (account ${accountId})`,
+  )
 
   const existingByType = new Map<string, string>()
   for (const ins of existingInsights ?? []) {
@@ -180,22 +221,25 @@ async function syncInsights(
 
     if (existingId) {
       // Update existing active insight with fresh data
-      const { error } = await supabase
-        .from('ai_insights')
-        .update({
-          title: candidate.title,
-          description: candidate.description,
-          recommended_action: candidate.recommended_action,
-          priority: candidate.priority,
-          // confidence_score toujours null (S5) — règles déterministes, pas de
-          // probabilité. severity/signals (metadata) la remplacent.
-          confidence_score: candidate.confidence_score,
-          mrr_impact_cents: candidate.mrr_impact_cents,
-          source_scores: candidate.source_scores,
-          metadata: { severity: candidate.severity, signals: candidate.signals },
-          ai_model_version: 'rules-v1',
-        })
-        .eq('id', existingId)
+      const { error } = await withTimeout(
+        supabase
+          .from('ai_insights')
+          .update({
+            title: candidate.title,
+            description: candidate.description,
+            recommended_action: candidate.recommended_action,
+            priority: candidate.priority,
+            // confidence_score toujours null (S5) — règles déterministes, pas de
+            // probabilité. severity/signals (metadata) la remplacent.
+            confidence_score: candidate.confidence_score,
+            mrr_impact_cents: candidate.mrr_impact_cents,
+            source_scores: candidate.source_scores,
+            metadata: { severity: candidate.severity, signals: candidate.signals },
+            ai_model_version: 'rules-v1',
+          })
+          .eq('id', existingId),
+        `syncInsights: update (account ${accountId}, ${candidate.insight_type})`,
+      )
 
       if (error) {
         console.error(JSON.stringify({
@@ -210,23 +254,26 @@ async function syncInsights(
       }
     } else {
       // Insert new insight
-      const { error } = await supabase
-        .from('ai_insights')
-        .insert({
-          organization_id: organizationId,
-          account_id: accountId,
-          insight_type: candidate.insight_type,
-          title: candidate.title,
-          description: candidate.description,
-          recommended_action: candidate.recommended_action,
-          priority: candidate.priority,
-          confidence_score: candidate.confidence_score,
-          mrr_impact_cents: candidate.mrr_impact_cents,
-          source_scores: candidate.source_scores,
-          metadata: { severity: candidate.severity, signals: candidate.signals },
-          status: 'active',
-          ai_model_version: 'rules-v1',
-        })
+      const { error } = await withTimeout(
+        supabase
+          .from('ai_insights')
+          .insert({
+            organization_id: organizationId,
+            account_id: accountId,
+            insight_type: candidate.insight_type,
+            title: candidate.title,
+            description: candidate.description,
+            recommended_action: candidate.recommended_action,
+            priority: candidate.priority,
+            confidence_score: candidate.confidence_score,
+            mrr_impact_cents: candidate.mrr_impact_cents,
+            source_scores: candidate.source_scores,
+            metadata: { severity: candidate.severity, signals: candidate.signals },
+            status: 'active',
+            ai_model_version: 'rules-v1',
+          }),
+        `syncInsights: insert (account ${accountId}, ${candidate.insight_type})`,
+      )
 
       if (error) {
         console.error(JSON.stringify({
@@ -250,10 +297,13 @@ async function syncInsights(
   if (toResolve.length > 0) {
 
     for (const ins of toResolve) {
-      const { error } = await supabase
-        .from('ai_insights')
-        .update({ status: 'resolved', resolved_at: now })
-        .eq('id', ins.id)
+      const { error } = await withTimeout(
+        supabase
+          .from('ai_insights')
+          .update({ status: 'resolved', resolved_at: now })
+          .eq('id', ins.id),
+        `syncInsights: auto-resolve (account ${accountId}, insight ${ins.id})`,
+      )
 
       if (!error) resolved++
     }
@@ -353,12 +403,15 @@ Deno.serve(withSentry('generate-insights', async (req: Request): Promise<Respons
           }
           batchCount++
 
-          const { data: batch, error: batchError } = await supabase
-            .from('accounts')
-            .select('id, organization_id, health_score, churn_risk_score, churn_risk_band, expansion_score, product_usage_score, mrr_cents, contract_end_date, created_at, is_delinquent')
-            .eq('organization_id', organizationId)
-            .not('scores_calculated_at', 'is', null)
-            .range(batchOffset, batchOffset + BATCH_SIZE - 1)
+          const { data: batch, error: batchError } = await withTimeout(
+            supabase
+              .from('accounts')
+              .select('id, organization_id, health_score, churn_risk_score, churn_risk_band, expansion_score, product_usage_score, mrr_cents, contract_end_date, created_at, is_delinquent')
+              .eq('organization_id', organizationId)
+              .not('scores_calculated_at', 'is', null)
+              .range(batchOffset, batchOffset + BATCH_SIZE - 1),
+            `generate-insights: accounts query (org ${organizationId}, offset ${batchOffset})`,
+          )
 
           if (batchError) {
             console.error(JSON.stringify({
