@@ -113,6 +113,57 @@ faire basculer cette décision.
 
 ---
 
+## Suite Lot V — P0/P1/P2/P3 (2026-08-13, tour 3)
+
+**P0 (verrouiller la leçon du déploiement) : FAIT, mergé (PR #60).** Règle
+CLAUDE.md/LOTS.md ci-dessus, `a10`/`a11` (hard), `STRIPE_BILLING_WEBHOOK_SECRET`
+ajouté à la liste conditionnelle de secrets. Vérification immédiate :
+`export-playbook-accounts` (#55) a survécu au premier déploiement réel en 4
+jours — mais ce n'est pas la seule fonction hors git : 9 fonctions live
+n'ont aucun répertoire correspondant dans `supabase/functions/`
+(`export-segment-csv`, `refresh-hubspot-tokens`, `integration-oauth`,
+`webhook-config`, `export-playbook-accounts`, `get-benchmark-data`,
+`org-settings`, `get-organization-locale`, `update-organization-locale`) —
+élargit le périmètre réel du Lot 8 ci-dessous.
+
+**P1 (isolation calculate-scores/sync-stripe) : FAIT, mergé (PR #61).**
+Timeout par org (90s calculate-scores, 240s sync-stripe), statut persisté
+`succeeded`/`failed`/`timed_out`, assertion `a12` (atterrit `soft` — `n=5`
+vérifié en direct avant que ce correctif ne soit live ; à repasser `hard`
+dès qu'un run `calculate-scores` propre le confirme à 0 après déploiement).
+
+**P2 (is_delinquent — signal réel ou seed figé ?) : investigué, hypothèse
+initiale INVALIDÉE.** `is_delinquent=true` sur la population "793/875 sans
+subscription" n'est PAS une valeur figée depuis le seed — un déclenchement
+direct de `sync-stripe` sur un org isolé a écrit de vraies lignes
+`subscriptions` (`status='past_due'`, `stripe_created_at: 2026-05-16`,
+même lot de seed que #34) pour des comptes qui en semblaient dépourvus
+quelques minutes plus tôt. Le signal est donc correct quand la donnée est
+présente. Le vrai bug trouvé : la couverture de sync des subscriptions
+pour cette population semble **intermittente** run à run (un run
+batch-dispatché de 2s vs un run direct de 27s sur le même org, écarts de
+comptage observés entre deux vérifications successives) — non root-causé,
+issue #62 ouverte. Le chiffre "875" ne doit plus être cité comme une
+valeur stable tant que #62 n'est pas résolue.
+
+**P3 (fixtures Stripe test-mode pour V.3/V.4/V.5) : PAS COMMENCÉ.** Reste
+à faire : script de nettoyage d'abord (prouvé), puis souscription
+test-mode + test clock pour dater un mouvement `new`/`churn` réel (V.4) et
+mesurer l'écart `current_period_start` vs date réelle d'échec de paiement
+(V.5 — c'est cette mesure, pas la distribution du portefeuille synthétique,
+qui tranche le sort du palier `critical`). Contrôle négatif V.3 sur branche
+jetable : pas encore fait non plus.
+
+**Décision actée, ne pas revenir dessus sans nouvelle mesure** : le palier
+`critical` (`applyDelinquencyBandFloor`) **reste tel quel** — la mesure du
+tour précédent (écart `current_period_start` sur le portefeuille seedé)
+mesurait la qualité d'une fixture synthétique, pas celle du proxy. Correction
+explicite reçue : ne pas dégrader un mécanisme correct sur la foi d'une
+fixture bidon. Seule la mesure test-clock de P3 (V.5) peut légitimement
+faire basculer cette décision.
+
+---
+
 ## Lot V — Vérification rétroactive (2026-08-13, priorité absolue)
 
 **Statut : sous-items V.1/V.2/V.3 rapportés (voir CHANGELOG_STABILITY.md,
