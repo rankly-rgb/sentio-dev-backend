@@ -109,7 +109,7 @@ Feu vert donné par Naima ("aucun client réel impacté... je veux que ce soit f
 - 2026-08-20 — Le MRR de repli n'est câblé que dans `sync-stripe` (chemin batch, cron quotidien). `stripe-webhook` ne recalcule pas l'estimation en temps réel sur un event `invoice.paid` pour un compte invoice-only — recalculer une cadence à partir de l'historique complet à chaque event webhook aurait ajouté une requête DB (fetch de tout l'historique de factures payées) sur un chemin déjà temps-réel, pour un cas qui se corrige de toute façon au prochain `sync-stripe-all-orgs` (quotidien). Même arbitrage déjà fait pour `movement_date`/`provenance` (Lot 4, 2026-08-13 : "chemin batch seulement, webhook hors périmètre"). Un compte invoice-only qui reçoit un paiement via webhook affichera donc son MRR de repli à jour au plus tard le lendemain, pas immédiatement — acceptable pour une estimation, pas pour un montant confirmé.
 - 2026-08-20 — Le MRR de repli n'alimente ni `mrr_movements` ni le calcul NRR/churn rate (`calcNrrPercentage`/`calcChurnRate30d`) — délibérément non wiré, une facture payée isolée ne permet pas de classer un mouvement `new`/`expansion`/`contraction` de façon fiable (pas de `Subscription.created` à dater). Un compte invoice-only avec MRR de repli reste donc invisible dans les vues MRR trend/NRR — cohérent avec `revenue_dynamics_score` qui restera `status='unavailable'` pour lui (aucun mouvement à mesurer), jamais une tendance fabriquée. Décision produit distincte à prendre si la couverture NRR doit un jour inclure ces comptes.
 - 2026-08-20 (correctif post-revue Naima, avant merge) — **`estimateInvoiceOnlyMrr` (design initial "écart entre les 2 factures payées les plus récentes") s'est révélé faux contre la donnée réelle du golden fixture lui-même** (App'Ines, `cus_Rn6M1Tvnr0tOxS`) : un paiement manqué/en retard élargit l'écart entre les deux factures payées les plus récentes à 90 jours (2026-04-14 → 2026-07-13) sur un compte par ailleurs mensuel — l'ancien design calculait `mrr_cents=10132` (~101€), une sous-estimation ~3x du vrai ~299€/mois. Trouvé en vérifiant les vrais chiffres en base avant de répondre à la demande de Naima ("je veux voir les chiffres avant de juger si merger"), pas par une revue de code. Corrigé : la cadence est désormais la **médiane de tous les écarts consécutifs** entre factures payées (pas seulement les 2 dernières) — robuste à un seul écart irrégulier tant que la majorité de l'historique reste régulière. Sur les 15 factures payées réelles d'App'Ines (2025-02-18 → 2026-07-13), la médiane des 14 écarts vaut 32.5 jours → `mrr_cents≈28002` (≈280.02€/mois), un résultat matériellement correct (vs. le vrai ~299€/mois, l'écart restant venant de la variance naturelle des délais de paiement, pas d'un bug) au lieu d'un résultat faux d'un facteur 3. Vérification mutation-test faite : les deux tests de régression échouent bien contre l'ancien code (confirmé, `mrr_cents=10001` observé sur le scénario réduit) avant d'être validés contre le correctif.
-- 2026-08-20 — **Découverte tangentielle en vérifiant les vrais chiffres App'Ines : la devise réelle de ce compte est EUR, pas USD.** Les 15 factures payées portent `currency='eur'`, montant `29900` = 299,00 €. Le rapport de fin de session précédent (avant ce correctif) avait présenté ce cas comme "$299/mois" sans jamais vérifier la devise réelle en base — une supposition, pas une vérification. `estimateInvoiceOnlyMrr` propage déjà `currency` correctement depuis l'input (`mostRecent.currency`), donc le code n'a pas ce bug ; seule la communication verbale précédente avait la devise fausse.
+- 2026-08-20 — **Découverte tangentielle en vérifiant les vrais chiffres App'Ines : la devise réelle de ce compte est EUR, pas USD.** Les 15 factures payées portent `currency='eur'`, montant `29900` = 299,00 €. Le rapport de fin de session précédente (avant ce correctif) avait présenté ce cas comme "$299/mois" sans jamais vérifier la devise réelle en base — une supposition, pas une vérification. `estimateInvoiceOnlyMrr` propage déjà `currency` correctement depuis l'input (`mostRecent.currency`), donc le code n'a pas ce bug ; seule la communication verbale précédente avait la devise fausse.
 
 ## Mission réconciliation Stripe — point 1, Today vs Segments "Critical" (2026-08-20)
 
@@ -188,3 +188,100 @@ s'arrêter.
 - 2026-08-16 — `self-monitor` fait 3 tâches de ménage que Sentry Crons ne remplace pas (auto-fail des `data_syncs` bloquées en `running` > 15 min, auto-fail des `playbook_executions` bloquées, purge DLQ > 30 jours). Ses 3 blocs d'alerte (croissance DLQ, scoring périmé, échecs de sync) sont bien remplacés, et mieux. À rouvrir si une ligne `running` orpheline ou une DLQ qui grossit devient visible.
 - 2026-08-16 — `calculate-scores` meurt en cours de route à chaque exécution nocturne, depuis au moins le 2026-08-03. Signature : un déluge de « Rate limit exceeded for trace … Retry after ~47s » émis par les dispatches fire-and-forget (`outbound-webhook-dispatch` + `playbook-executor`, un par compte), puis `shutdown` de l'isolate. Run du 2026-08-16 03:00 UTC : 902 lignes de log, **100 % des rate limits**, entre 03:00:18 et 03:02:28, puis mort. L'org en cours au moment de la mort reste `running` dans `data_syncs` et n'est jamais scoré ce jour-là ; l'org concerné change d'une nuit à l'autre (6 orgs différents touchés sur 14 jours). Révélé par le premier check-in Sentry Crons — invisible jusque-là. Chantier réel (throttling/batch des dispatches), volontairement non ouvert ici.
 - 2026-08-16 — Un identifiant utilisé sans être importé part en production sans être vu : `tsconfig.json` exclut `supabase/`, il n'existe pas d'étape `deno check` en CI, et aucun test n'importe les `index.ts` des grosses fonctions (imports Deno-natifs). `startCronCheckin` manquant dans `sync-stripe` a ainsi cassé la fonction entière (`ReferenceError`, 500 sur chaque appel) entre 18:38 et 20:2x UTC. Audit ponctuel fait sur les 68 fonctions × 375 exports `_shared` : c'était la seule occurrence. Un `deno check` en CI fermerait la classe — chantier, pas un garde-fou à bricoler.
+
+## Tri de branches 25/08 — décision produit (pricing) + parking lot (le reste)
+
+Méthode (voir `EXECUTION_LOG_2026-08-25.md` pour le détail) : `git diff --quiet origin/main...origin/<branche>` (contenu réel vs `main`, pas `git cherry`/patch-id — trompeur, cf. entrée dédiée ci-dessous) puis `git merge-tree` sur tout diff non vide pour savoir si la branche mergerait sans conflit. Les branches qui mergent proprement sont parties en PR (backend #105-116, frontend #34-37) ; celles ci-dessous ont un diff réel qui **entre en conflit avec `main` aujourd'hui** — jamais résolu à l'aveugle, posé ici tel quel.
+
+### Décision produit requise — deux implémentations concurrentes des tiers de pricing
+
+- `feat/pricing-billing-implementation` (backend) — 184 commits d'écart vs `main`, dernier commit 2026-07-27, conflit confirmé (`git merge-tree`). Top commit du diff : `chore: stop tracking .specify/feature.json — local Spec Kit state, not shared` (probablement un commit de fin de branche, pas le cœur du chantier — le vrai contenu est le pricing/billing lui-même, à lire dans le diff complet avant toute décision).
+- `feature/chantier-d-pricing-tiers` (frontend) — 4 commits d'écart vs `main`, dernier commit 2026-07-27, conflit confirmé. Top commit : `docs(spec): add spec + plan for pricing tier interface (chantier D)`.
+- Les deux datent du même jour (27/07), cohérent avec l'avertissement déjà inscrit dans `CLAUDE.md` (règle 0, "tiers de pricing... construits deux fois en juillet 2026"). `subscription-status`/`stripe-billing-checkout`/`stripe-billing-webhook` sont déjà live (voir table Edge Functions, CLAUDE.md) — il reste à déterminer si ces deux branches sont les brouillons pré-implémentation-live (donc obsolètes) ou si elles portent une divergence de conception jamais réconciliée. Ni comparées ni touchées ici sur consigne explicite de Naima ("ça sort du chantier").
+
+### Backend — 43 branches, diff réel, conflit avec `main` (ni supprimées ni PR-ées, contenu résumé)
+
+| Branche | Commits d'écart | Dernier commit | Commit le plus récent du diff |
+|---|---|---|---|
+| chore/capture-drifted-playbook-detail-rpcs | 212 | 2026-08-03 | chore: capture drifted playbook-detail RPCs into a migration |
+| chore/clarify-api-contracts-naming | 175 | 2026-07-26 | chore: clarify API_CONTRACTS.md naming (Scoring Engine contract vs frontend contract) |
+| chore/install-speckit | 171 | 2026-07-26 | chore: install GitHub Spec Kit avec intégration Claude |
+| chore/land-pending-docs | 2 | 2026-08-06 | docs(runbook): document sync-stripe chain-triggering calculate-scores |
+| chore/seed-churn-validation | 11 | 2026-08-09 | fix(scripts): make seed-churn-validation product/prices idempotent |
+| ci/data-truth-assertions | 19 | 2026-08-13 | ci: add post-deploy data-truth assertions (Lot 2) |
+| ci/migration-version-collision-check | 209 | 2026-08-03 | ci: fail the build on migration version-number collisions |
+| claude/audit-repos-priorites-3c9m81 | 206 | 2026-08-03 | fix: empty/absent eligibility_criteria no longer matches every account (C2.5) |
+| claude/churn-rate-zero-percent-eoxzsh | 10 | 2026-08-09 | fix(sync-stripe): pin search_path on upsert_mrr_movements_sync, document DO NOTHING semantics |
+| claude/cowork-git-push-limits-oh81x8 | 197 | 2026-08-02 | feat: accept both restricted (rk_) and full secret (sk_) Stripe keys |
+| claude/insertion-check-verification-cj0frn | 11 | 2026-08-10 | feat: add seed-insertion-check script for standard-list validation |
+| claude/sentio-client-readiness-vsia7n | 26 | 2026-08-13 | feat: add dedicated payment_delinquent insight (issue #36) |
+| claude/sentio-stripe-business-logic-audit-pd5tuo | 237 | 2026-08-05 | docs(runbook): backend-ahead-of-frontend deploy incident + SELECT * view rule |
+| diag/playbook-empty-state-investigation | 212 | 2026-08-03 | diag: temporary read-only investigation workflow (not for merge) |
+| docs/branch-check-before-chantier | 7 | 2026-08-06 | docs: require checking existing branches before starting a chantier |
+| docs/lots-md | 1 | 2026-08-13 | docs: persist specs for in-flight lots (V, 4bis, 6, 8) |
+| feat/accounts-api-primary-segment | 166 | 2026-07-26 | feat(accounts-api): expose primary_segment, document expansion/benchmark gaps |
+| feat/allow-shared-stripe-key-testing | 2 | 2026-08-20 | feat: fan-out shared-key webhooks to every matching org, add real e2e proof |
+| feat/delinquency-actionable-surfaces | 249 | 2026-08-06 | test(dashboard-api): extract computeAccountsAtRisk, cover the 5 golden-dataset cases |
+| feat/delinquency-duration-v31 | 1 | 2026-08-13 | feat(scoring): delinquency-duration band floor (Lot 5, #35) |
+| feat/export-playbook-accounts | 137 | 2026-03-17 | fix: chunk .in() queries in calculate-scores to avoid PostgREST URL limit |
+| feat/invoice-only-mrr-fallback | 2 | 2026-08-20 | fix(mrr): use median gap across all paid invoices for invoice-only MRR cadence |
+| feat/mrr-unavailable-reason | 2 | 2026-08-20 | docs: note fr.format.mrrOrUnavailable is now dead code post point-2 |
+| feat/playbook-outcome-tracking | 4 | 2026-07-27 | chore: stop tracking .specify/feature.json — local Spec Kit state, not shared |
+| feat/playbook-outcome-tracking-rebase | 13 | 2026-08-06 | feat(playbooks): outcome tracking — mark-executed, auto-resolve via invoice.paid, resolution-rate stats |
+| feat/playbooks-export-csv | 178 | 2026-07-27 | chore: stop tracking .specify/feature.json — local Spec Kit state, not shared |
+| feat/today-portfolio-status | 142 | 2026-07-05 | feat(i18n): standardize product on American English, remove FR/EN locale system |
+| fix/abandoned-scoring-work-write-guard | 1 | 2026-08-23 | fix: guard abandoned per-org scoring/sync writes after timeout |
+| fix/accounts-with-priority-view-drift | 238 | 2026-08-05 | fix(db): recreate accounts_with_priority, was missing 7 accounts columns |
+| fix/ci-workflow-call | 173 | 2026-07-26 | fix(ci): add workflow_call trigger so deploy-vercel can reuse ci.yml |
+| fix/frontend-trial-error-and-a14-ratchet | 6 | 2026-08-13 | feat: a18 CI guard + permanent incident-priority rule (tour 6) |
+| fix/incident-safety-net | 2 | 2026-08-13 | fix(ci): land a14 (deno check) soft — 11 functions have pre-existing errors |
+| fix/migration-version-collision | 208 | 2026-08-03 | fix: renumber D1/C2.2/C2.5 migrations to resolve version collision |
+| fix/movement-date-provenance | 1 | 2026-08-13 | fix(mrr): date new/churn movements with real Stripe dates (Lot 4) |
+| fix/nrr-bootstrap-contraction-unavailable | 242 | 2026-08-06 | fix(scoring): calcContractionScore returns unavailable, not 100, for zero-MRR accounts |
+| fix/overview-zero-vs-unavailable | 1 | 2026-08-06 | fix(dashboard-api): bootstrap-aware churn rate, expansion config signal |
+| fix/security-definer-lockdown | 27 | 2026-08-13 | fix(security): lock down 24 SECURITY DEFINER functions exposed to anon/PUBLIC |
+| fix/seed-default-playbooks-v1-categories | 11 | 2026-08-09 | fix(playbooks): seed_default_playbooks uses V1-only template_category values |
+| fix/stripe-webhook-observability | 20 | 2026-08-13 | fix(observability): persist a trace on every stripe-webhook receipt (Lot 3) |
+| fix/sync-hubspot-vault-credentials | 137 | 2026-07-04 | fix(data): supprimer doublons display_name dans accounts (seed Stripe) |
+| fix/today-priority-matches-segment-band | 1 | 2026-08-20 | fix(today-actions): base P0/P1 priority on primary_segment, not a local churn_risk_score re-threshold |
+| lot-p0/deploy-guardrails | 1 | 2026-08-13 | fix(ci): lock down the migration-drift class that hid 4 days of stale deploys |
+| lot-p1/org-isolation | 2 | 2026-08-13 | fix(reliability): isolate calculate-scores/sync-stripe per org, add a12 |
+
+Beaucoup de ces titres correspondent déjà à du travail documenté comme livré ailleurs dans ce
+changelog/ce fichier (Lot 1, Lot 2, Lot 3, Lot 4, Lot 5, le correctif `abandoned-scoring-work`
+du 23/08, la migration cron/Vault) — cohérent avec `git merge-tree` qui les trouve en conflit
+avec `main` : le même sujet a probablement été réimplémenté et mergé sous un nom de branche
+différent. Un rapprochement titre-par-titre n'a pas été fait ici (hors périmètre demandé) ;
+si l'une d'elles s'avère porter un fragment non repris ailleurs, elle devra être extraite
+manuellement avant toute suppression future.
+
+### Frontend — 6 branches, même traitement
+
+| Branche | Commits d'écart | Dernier commit | Commit le plus récent du diff |
+|---|---|---|---|
+| claude/sentio-client-readiness-vsia7n | 7 | 2026-08-13 | feat(accounts): surface past-due MRR methodology on the delinquent badge |
+| feat/lot5-frontend-delinquent-since | 1 | 2026-08-13 | feat(accounts): Lot 5 frontend — delinquent duration badge and tooltip |
+| feat/mrr-unavailable-reason-messages | 1 | 2026-08-20 | feat(mrr): render 3 distinct "Not billable" messages instead of one generic text |
+| fix/overview-mrr-unavailable-population-captions | 2 | 2026-08-19 | fix(dashboard): explain absent MRR/Active accounts/Accounts-at-risk instead of showing a bare zero |
+| fix/trial-expired-error-handling | 8 | 2026-08-13 | feat(accounts): surface past-due MRR methodology on the delinquent badge |
+| test/etape6-qa-coverage | 3 | 2026-08-23 | test: Étape 6 QA pass — unit test coverage, CI workflow, e2e journey, /mrr skip |
+
+`feat/lot5-frontend-delinquent-since` et `claude/sentio-client-readiness-vsia7n` partagent le
+même sujet (Lot 5, badge de délinquence) déjà documenté comme livré (CHANGELOG_STABILITY.md,
+entrée "Lot 5") — probable duplication/brouillon résiduel, non vérifié.
+
+### `git cherry` s'est révélé trompeur pour ce tri — ne plus l'utiliser comme seul critère
+
+- 2026-08-25 — Un premier tri de ces mêmes branches, basé sur `git cherry origin/main origin/<branche>`
+  (comparaison par patch-id), avait classé 19 d'entre elles comme "contenu déjà atterri dans main"
+  (`cherry` ne trouvait aucun commit non résolu). **Faux** pour la totalité des 19 : re-vérifié au
+  diff de contenu réel (`git diff --quiet origin/main...origin/<branche>`), aucune n'a en fait un
+  diff vide — `git merge-tree` confirme d'ailleurs qu'une partie merge encore proprement (Bloc 2,
+  PR ouvertes) et l'autre partie est en conflit (ci-dessus). `git cherry` détecte qu'un commit au
+  patch identique existe *quelque part* dans l'historique de `main`, pas que le contenu actuel de
+  la branche est identique à `main` aujourd'hui — `main` peut avoir divergé sur les mêmes fichiers
+  depuis, laissant un vrai diff résiduel. Un test de comparaison via l'API GitHub
+  (`create_pull_request` sur `chore/land-pending-docs`) a aussi été tenté et écarté : réponse
+  "no commits between main and chore/land-pending-docs", contredite deux fois par le test local
+  (diff non vide, merge en conflit) — cause non expliquée, à ne pas réutiliser comme source de
+  vérité pour ce genre de comparaison.
